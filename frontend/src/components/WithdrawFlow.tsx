@@ -131,7 +131,7 @@ export default function WithdrawFlow() {
       })
       setStep('request')
     } catch (err: any) {
-      setDecodeError(err.message || 'Invalid Juno address')
+      setDecodeError(err.message || 'Invalid Junocash address')
     }
   }
 
@@ -168,7 +168,7 @@ export default function WithdrawFlow() {
             <div className="success-icon">&#10003;</div>
             <div className="success-title">Withdrawal Submitted</div>
             <div className="success-subtitle">
-              Your Base -&gt; Juno withdrawal of {amount} JUNO has been submitted on-chain. The bridge operators will process it shortly.
+              Your Base -&gt; Junocash withdrawal of {amount} wJUNO has been submitted on-chain. The bridge operators will process it shortly.
             </div>
             {successTxHash && (
               <div className="detail-row" style={{ borderBottom: 'none', justifyContent: 'center' }}>
@@ -201,10 +201,10 @@ export default function WithdrawFlow() {
         <div className="network-arrow">&rarr;</div>
         <div className="network-endpoint">
           <div className="network-icon">
-            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Juno" />
+            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Junocash" />
           </div>
           <div>
-            <div className="network-name">Juno</div>
+            <div className="network-name">Junocash</div>
             <div className="network-label">Destination chain</div>
           </div>
         </div>
@@ -215,7 +215,7 @@ export default function WithdrawFlow() {
           <span className="asset-label">Amount</span>
           {address && balance !== undefined && (
             <span className="asset-balance">
-              Balance: {formatUnits(balance as bigint, 8)} JUNO
+              Balance: {formatUnits(balance as bigint, 8)} wJUNO
             </span>
           )}
         </div>
@@ -226,7 +226,7 @@ export default function WithdrawFlow() {
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
-          <span className="asset-ticker">JUNO</span>
+          <span className="asset-ticker">wJUNO</span>
           <button className="ghost-btn" type="button" onClick={handleMax} disabled={balance === undefined}>
             Max
           </button>
@@ -248,11 +248,11 @@ export default function WithdrawFlow() {
       <div className="card">
         <div className="field">
           <label className="label">
-            Juno Recipient Address <InfoHint label="Use any valid Juno unified address. Recent addresses are saved locally in this browser." />
+            Junocash Recipient Address <InfoHint label="Use any valid Junocash native j1 address. Recent addresses are saved locally in this browser." />
           </label>
           <input
             className="mono"
-            placeholder={`Unified address (${runtimeConfig.baseChain.id === 8453 ? 'juno1...' : 'jtest1...'})`}
+            placeholder={`Junocash address (${runtimeConfig.baseChain.id === 8453 ? 'j1...' : 'jtest1...'})`}
             value={junoRecipient}
             onChange={(e) => { setJunoRecipient(e.target.value); setDecodeError(null) }}
           />

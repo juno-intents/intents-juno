@@ -17,4 +17,17 @@ describe('StatusTracker', () => {
     expect(html).toContain('submitted')
     expect(html).toContain('finalized')
   })
+
+  it('renders confirmation progress when the current deposit is still seen', () => {
+    const html = renderToStaticMarkup(
+      <StatusTracker
+        steps={['pending', 'seen', 'confirmed']}
+        current="seen"
+        confirmations={3}
+        requiredConfirmations={200}
+      />,
+    )
+
+    expect(html).toContain('3/200 confirmations')
+  })
 })

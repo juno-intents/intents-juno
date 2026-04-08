@@ -112,7 +112,7 @@ describe('DepositFlow', () => {
 
     await user.click(generateButton)
 
-    expect(screen.getByText(/I will not send less than 2.01005025 JUNO or my funds will be permanently lost/i)).toBeInTheDocument()
+    expect(screen.getByText(/Deposits below 2.01005025 JUNO will not be recognized and will be lost/i)).toBeInTheDocument()
     expect(screen.getByText(/I must include the memo exactly or my funds will be permanently lost/i)).toBeInTheDocument()
     expect(screen.getByText(/Juno Intents is not responsible/i)).toBeInTheDocument()
     expect(getDepositMemo).not.toHaveBeenCalled()
@@ -139,7 +139,7 @@ describe('DepositFlow', () => {
 
     await user.click(screen.getByRole('button', { name: 'Manual Send' }))
 
-    expect(screen.getByText('Destination Address')).toBeInTheDocument()
+    expect(screen.getByText('Junocash Address')).toBeInTheDocument()
     expect(screen.getByText('Memo (required)')).toBeInTheDocument()
     expect(screen.getByText('jtest1destinationwallet')).toBeInTheDocument()
     expect(screen.queryByText('junocash-cli')).not.toBeInTheDocument()
@@ -165,6 +165,7 @@ describe('DepositFlow', () => {
     expect(screen.getAllByText('3 JUNO')).not.toHaveLength(0)
     expect(screen.getByText('Memo delivery')).toBeInTheDocument()
     expect(screen.getByText('QR includes the 136-character wallet memo. Keep it exactly as shown if you paste it manually.')).toBeInTheDocument()
+    expect(screen.getByText('Junocash Address')).toBeInTheDocument()
   })
 
   it('shows the compact wallet memo in manual and cli formats', async () => {

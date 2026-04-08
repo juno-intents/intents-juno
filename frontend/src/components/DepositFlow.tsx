@@ -167,7 +167,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           </div>
           <div className="qr-summary">
             <div className="qr-summary-row">
-              <span className="qr-summary-label">Destination</span>
+              <span className="qr-summary-label">Junocash address</span>
               <span className="qr-summary-value mono">
                 {memo.oWalletUA.length > 24
                   ? `${memo.oWalletUA.slice(0, 14)}...${memo.oWalletUA.slice(-6)}`
@@ -186,10 +186,10 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
             </div>
           </div>
           <p className="deposit-modal-copy">
-            Scan with a Juno wallet for the destination, amount, and wallet memo. If you enter it manually, paste the wallet memo exactly as shown below.
+            Scan with a Junocash wallet for the destination, amount, and wallet memo. If you enter it manually, paste the wallet memo exactly as shown below.
           </p>
           <div className="field">
-            <label className="label">Destination Address</label>
+            <label className="label">Junocash Address</label>
             <div className="copy-field">
               <span className="copy-field-value">{memo.oWalletUA}</span>
               <CopyButton text={memo.oWalletUA} />
@@ -226,7 +226,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
     return (
       <>
         <div className="field">
-          <label className="label">Destination Address</label>
+          <label className="label">Junocash Address</label>
           <div className="copy-field">
             <span className="copy-field-value">{memo.oWalletUA}</span>
             <CopyButton text={memo.oWalletUA} />
@@ -249,7 +249,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           </div>
         ) : (
           <div className="warning-box">
-            Enter the amount manually in your Juno wallet, but do not send less than {formattedMinDeposit} JUNO.
+            Enter the amount manually in your Junocash wallet, but do not send less than {formattedMinDeposit} JUNO.
           </div>
         )}
       </>
@@ -264,7 +264,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
             <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Juno" />
           </div>
           <div>
-            <div className="network-name">Juno</div>
+            <div className="network-name">Junocash</div>
             <div className="network-label">Source chain</div>
           </div>
         </div>
@@ -343,7 +343,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         )}
         {cfg && cfg.minDepositAmount !== '0' && (
           <div className="warning-box" style={{ marginTop: 8, marginBottom: 0 }}>
-            Deposits below {formatJuno(cfg.minDepositAmount)} JUNO are rejected and will not mint on Base.
+            Deposits below {formatJuno(cfg.minDepositAmount)} JUNO will not be recognized and will be lost.
           </div>
         )}
         <button className="primary" onClick={handleGenerate} disabled={!cfg || !effectiveRecipient || !!formError}>

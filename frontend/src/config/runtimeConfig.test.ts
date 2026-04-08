@@ -53,8 +53,9 @@ describe('resolveRuntimeConfig', () => {
     expect(cfg.isMainnet).toBe(true)
   })
 
-  it('uses a bundled Juno logo asset instead of a brittle remote icon URL', () => {
+  it('uses bundled Junocash and wJUNO logo assets instead of remote icon URLs', () => {
     const cfg = resolveRuntimeConfig({ DEV: true })
-    expect(cfg.junoLogoUrl).toBe('/juno-icon.svg')
+    expect(cfg.junoLogoUrl).toBe('/junocash-logo.svg')
+    expect(cfg.baseLogoUrl).toBe('/wjuno-token.svg')
   })
 })

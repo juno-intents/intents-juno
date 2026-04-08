@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import { formatUnits } from 'viem'
 import type { DepositStatus, WithdrawalStatus } from '../api/types'
+import { basescanAddressUrl, basescanTxUrl, junocashTxUrl } from '../lib/bridgeUi'
 
 interface Props {
   type: 'deposit' | 'withdrawal'
@@ -15,9 +17,39 @@ function formatJuno(zatoshi: string): string {
   }
 }
 
-function truncate(s: string): string {
-  if (!s || s.length < 16) return s || '-'
-  return s.slice(0, 10) + '...' + s.slice(-6)
+interface DetailValueProps {
+  label: string
+  value?: string
+  href?: string
+  copyable?: boolean
+  statusClass?: string
+  children?: React.ReactNode
+}
+
+function DetailValue({ label, value, href, copyable, statusClass, children }: DetailValueProps) {
+  return (
+    <div className="detail-row">
+      <span className="detail-label">{label}</span>
+      <div className="detail-value-group">
+        {statusClass ? (
+          <span className={`status-badge ${statusClass}`}>{value}</span>
+        ) : children ? (
+          children
+        ) : href && value ? (
+          <a className="detail-link mono" href={href} target="_blank" rel="noreferrer">
+            {value}
+          </a>
+        ) : (
+          <span className="detail-value mono">{value || '-'}</span>
+        )}
+        {copyable && value && (
+          <button className="copy-btn" type="button">
+            Copy
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function TxDetailModal({ type, data, onClose }: Props) {
@@ -26,83 +58,100 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
   const w = data as WithdrawalStatus
   const currentState = isDeposit ? d.state : w.state
   const statusClass = currentState === 'finalized' ? 'green' : currentState === 'rejected' ? 'red' : 'orange'
+  const [copied, setCopied] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (copied === null) {
+      return undefined
+    }
+    const timeout = window.setTimeout(() => setCopied(null), 1800)
+    return () => window.clearTimeout(timeout)
+  }, [copied])
+
+  const handleCopy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied('Copied')
+    } catch {
+      setCopied('Copy failed')
+    }
+  }
+
+  const renderField = (label: string, value?: string, options?: { href?: string; copyable?: boolean }) => (
+    <div className="detail-row">
+      <span className="detail-label">{label}</span>
+      <div className="detail-value-group">
+        {options?.href && value ? (
+          <a className="detail-link mono" href={options.href} target="_blank" rel="noreferrer">
+            {value}
+          </a>
+        ) : (
+          <span className="detail-value mono">{value || '-'}</span>
+        )}
+        {options?.copyable && value && (
+          <button className="copy-btn" type="button" onClick={() => handleCopy(value)}>
+            Copy
+          </button>
+        )}
+      </div>
+    </div>
+  )
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span className="modal-title">{isDeposit ? 'Juno -> Base' : 'Base -> Juno'} Details</span>
+          <div className="modal-header-text">
+            <span className="modal-title">{isDeposit ? 'Junocash -> Base' : 'Base -> Junocash'} Details</span>
+            {copied && <span className="modal-step">{copied}</span>}
+          </div>
           <button className="modal-close" onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
-          <div className="detail-row">
-            <span className="detail-label">ID</span>
-            <span className="detail-value mono">{isDeposit ? d.depositId : w.withdrawalId}</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Status</span>
-            <span className={`status-badge ${statusClass}`}>
-              {currentState}
-            </span>
-          </div>
+          {renderField('ID', isDeposit ? d.depositId : w.withdrawalId, { copyable: true })}
+          <DetailValue label="Status" value={currentState} statusClass={statusClass} />
           <div className="detail-row">
             <span className="detail-label">Amount</span>
             <span className="detail-value mono">{formatJuno(isDeposit ? d.amount : w.amount)} JUNO</span>
           </div>
-          {isDeposit && d.baseRecipient && (
-            <div className="detail-row">
-              <span className="detail-label">Base Recipient</span>
-              <span className="detail-value mono">{truncate(d.baseRecipient)}</span>
-            </div>
-          )}
-          {isDeposit && d.txHash && (
-            <div className="detail-row">
-              <span className="detail-label">Juno Tx</span>
-              <span className="detail-value mono">{truncate(d.txHash)}</span>
-            </div>
-          )}
+          {isDeposit && d.baseRecipient && renderField('Base Recipient', d.baseRecipient, {
+            href: basescanAddressUrl(d.baseRecipient),
+            copyable: true,
+          })}
+          {isDeposit && d.baseTxHash && renderField('Base Tx', d.baseTxHash, {
+            href: basescanTxUrl(d.baseTxHash),
+            copyable: true,
+          })}
+          {isDeposit && d.txHash && renderField('Junocash Tx', d.txHash, {
+            href: junocashTxUrl(d.txHash),
+            copyable: true,
+          })}
           {isDeposit && d.rejectionReason && (
             <div className="detail-row">
               <span className="detail-label">Rejection Reason</span>
               <span className="detail-value">{d.rejectionReason}</span>
             </div>
           )}
-          {!isDeposit && w.requester && (
-            <div className="detail-row">
-              <span className="detail-label">Requester</span>
-              <span className="detail-value mono">{truncate(w.requester)}</span>
-            </div>
-          )}
-          {!isDeposit && w.baseTxHash && (
-            <div className="detail-row">
-              <span className="detail-label">Base Tx</span>
-              <span className="detail-value mono">{truncate(w.baseTxHash)}</span>
-            </div>
-          )}
-          {!isDeposit && w.junoTxId && (
-            <div className="detail-row">
-              <span className="detail-label">Juno Tx</span>
-              <span className="detail-value mono">{truncate(w.junoTxId)}</span>
-            </div>
-          )}
-          {!isDeposit && w.batchId && (
-            <div className="detail-row">
-              <span className="detail-label">Batch</span>
-              <span className="detail-value mono">{truncate(w.batchId)}</span>
-            </div>
-          )}
+          {!isDeposit && w.requester && renderField('Requester', w.requester, {
+            href: basescanAddressUrl(w.requester),
+            copyable: true,
+          })}
+          {!isDeposit && w.baseTxHash && renderField('Base Tx', w.baseTxHash, {
+            href: basescanTxUrl(w.baseTxHash),
+            copyable: true,
+          })}
+          {!isDeposit && w.junoTxId && renderField('Junocash Tx', w.junoTxId, {
+            href: junocashTxUrl(w.junoTxId),
+            copyable: true,
+          })}
+          {!isDeposit && w.batchId && renderField('Batch', w.batchId, { copyable: true })}
           {!isDeposit && w.feeBps > 0 && (
             <div className="detail-row">
               <span className="detail-label">Fee</span>
               <span className="detail-value">{(w.feeBps / 100).toFixed(2)}%</span>
             </div>
           )}
-          {!isDeposit && w.expiry && w.expiry !== '0' && (
-            <div className="detail-row">
-              <span className="detail-label">Expiry</span>
-              <span className="detail-value mono">{w.expiry}</span>
-            </div>
-          )}
+          {!isDeposit && w.expiry && w.expiry !== '0' && renderField('Expiry', w.expiry)}
         </div>
       </div>
     </div>

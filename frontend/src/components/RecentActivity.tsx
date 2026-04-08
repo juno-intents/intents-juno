@@ -23,23 +23,27 @@ function formatJuno(zatoshi: string): string {
 
 export default function RecentActivity({ address }: Props) {
   const [modalData, setModalData] = useState<{ type: 'deposit' | 'withdrawal'; data: DepositStatus | WithdrawalStatus } | null>(null)
+  const [depositLimit, setDepositLimit] = useState(5)
+  const [withdrawalLimit, setWithdrawalLimit] = useState(5)
 
   const { data: deposits } = useQuery({
-    queryKey: ['my-deposits', address],
-    queryFn: () => listDeposits({ baseRecipient: address, limit: '10' }),
+    queryKey: ['my-deposits', address, depositLimit],
+    queryFn: () => listDeposits({ baseRecipient: address, limit: String(depositLimit), offset: '0' }),
     enabled: !!address,
     refetchInterval: 15000,
   })
 
   const { data: withdrawals } = useQuery({
-    queryKey: ['my-withdrawals', address],
-    queryFn: () => listWithdrawals({ requester: address, limit: '10' }),
+    queryKey: ['my-withdrawals', address, withdrawalLimit],
+    queryFn: () => listWithdrawals({ requester: address, limit: String(withdrawalLimit), offset: '0' }),
     enabled: !!address,
     refetchInterval: 15000,
   })
 
   const deps = deposits?.data ?? []
   const wds = withdrawals?.data ?? []
+  const canLoadMoreDeposits = (deposits?.total ?? 0) > deps.length
+  const canLoadMoreWithdrawals = (withdrawals?.total ?? 0) > wds.length
 
   if (deps.length === 0 && wds.length === 0) {
     return (
@@ -62,16 +66,26 @@ export default function RecentActivity({ address }: Props) {
             <div className="tx-item" key={d.depositId} onClick={() => setModalData({ type: 'deposit', data: d })}>
               <div className="tx-item-header">
                 <div className="tx-left">
-                  <div className="tx-type">Juno -&gt; Base</div>
+                  <div className="tx-type">Junocash -&gt; Base</div>
                   <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">
                   <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
                 </div>
               </div>
-              <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
+              <StatusTracker
+                steps={DEPOSIT_STEPS}
+                current={d.state}
+                confirmations={d.confirmations}
+                requiredConfirmations={d.requiredConfirmations}
+              />
             </div>
           ))}
+          {canLoadMoreDeposits && (
+            <button className="secondary-btn" type="button" onClick={() => setDepositLimit((current) => current + 5)}>
+              Load more deposits
+            </button>
+          )}
         </div>
       )}
       {wds.length > 0 && (
@@ -83,7 +97,7 @@ export default function RecentActivity({ address }: Props) {
             <div className="tx-item" key={w.withdrawalId} onClick={() => setModalData({ type: 'withdrawal', data: w })}>
               <div className="tx-item-header">
                 <div className="tx-left">
-                  <div className="tx-type">Base -&gt; Juno</div>
+                  <div className="tx-type">Base -&gt; Junocash</div>
                   <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">
@@ -93,6 +107,11 @@ export default function RecentActivity({ address }: Props) {
               <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
             </div>
           ))}
+          {canLoadMoreWithdrawals && (
+            <button className="secondary-btn" type="button" onClick={() => setWithdrawalLimit((current) => current + 5)}>
+              Load more withdrawals
+            </button>
+          )}
         </div>
       )}
 

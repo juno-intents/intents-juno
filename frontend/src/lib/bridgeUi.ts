@@ -101,11 +101,11 @@ export function validateWithdrawAmount(
 export function validateJunoRecipient(input: string, baseChainId?: number): string | null {
   const trimmed = input.trim()
   if (trimmed === '') {
-    return 'Enter a Juno recipient address.'
+    return 'Enter a Junocash recipient address.'
   }
   const addressPattern = baseChainId === 8453 ? JUNO_MAINNET_UNIFIED_ADDRESS_RE : JUNO_TESTNET_UNIFIED_ADDRESS_RE
   if (!addressPattern.test(trimmed)) {
-    return 'Enter a valid Juno unified address.'
+    return 'Enter a valid Junocash address.'
   }
   return null
 }
@@ -123,6 +123,25 @@ export function normalizeApiBase(raw: string | undefined): string {
   return (raw ?? '').trim().replace(/\/+$/, '')
 }
 
+export function basescanTxUrl(txHash: string): string {
+  return `https://basescan.org/tx/${txHash}`
+}
+
+export function basescanAddressUrl(address: string): string {
+  return `https://basescan.org/address/${address}`
+}
+
+export function junocashTxUrl(txHash: string): string {
+  return `https://junocash.xplorer.info/tx/${txHash}`
+}
+
+export function truncateMiddle(value: string, start = 10, end = 6): string {
+  if (!value || value.length < start+end+3) {
+    return value || '-'
+  }
+  return `${value.slice(0, start)}...${value.slice(-end)}`
+}
+
 export function baseChainDisplayName(chainId: number | undefined): string {
   if (chainId === 8453) {
     return 'Base Mainnet'
@@ -137,5 +156,5 @@ export function baseChainDisplayName(chainId: number | undefined): string {
 }
 
 export function junoNetworkLabel(chainId: number | undefined): string {
-  return chainId === 8453 ? 'Juno Mainnet' : 'Juno Testnet'
+  return chainId === 8453 ? 'Junocash Mainnet' : 'Junocash Testnet'
 }

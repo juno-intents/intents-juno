@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   baseChainDisplayName,
+  junoNetworkLabel,
   normalizeApiBase,
   parseAmountToZats,
   upsertRecentRecipients,
@@ -36,26 +37,26 @@ describe('bridgeUi', () => {
     expect(validateWithdrawAmount('1', '100000000', 1000000000n)).toBeNull()
   })
 
-  it('validates mainnet juno unified address shape', () => {
-    expect(validateJunoRecipient('', 8453)).toMatch(/Enter a Juno recipient/)
+  it('validates mainnet junocash address shape', () => {
+    expect(validateJunoRecipient('', 8453)).toMatch(/Enter a Junocash recipient/)
     expect(
       validateJunoRecipient(
         'j1nvmst2l8aupvaher30zyw78m429heheefc2g29ss44v4qffgd3pj23rk23u2ggc8jp2fpzk2qrd5p6j2sqdcvzf62f3qnxy6tyqrnpy4',
         8453,
       ),
     ).toBeNull()
-    expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', 8453)).toMatch(/valid Juno unified address/)
-    expect(validateJunoRecipient('not-an-address', 8453)).toMatch(/valid Juno unified address/)
+    expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', 8453)).toMatch(/valid Junocash address/)
+    expect(validateJunoRecipient('not-an-address', 8453)).toMatch(/valid Junocash address/)
   })
 
-  it('validates testnet juno unified address shape', () => {
+  it('validates testnet junocash address shape', () => {
     expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', 84532)).toBeNull()
     expect(
       validateJunoRecipient(
         'j1nvmst2l8aupvaher30zyw78m429heheefc2g29ss44v4qffgd3pj23rk23u2ggc8jp2fpzk2qrd5p6j2sqdcvzf62f3qnxy6tyqrnpy4',
         84532,
       ),
-    ).toMatch(/valid Juno unified address/)
+    ).toMatch(/valid Junocash address/)
   })
 
   it('dedupes and caps recent recipients', () => {
@@ -79,5 +80,7 @@ describe('bridgeUi', () => {
     expect(baseChainDisplayName(8453)).toBe('Base Mainnet')
     expect(baseChainDisplayName(84532)).toBe('Base Sepolia')
     expect(baseChainDisplayName(999)).toBe('Base Chain 999')
+    expect(junoNetworkLabel(8453)).toBe('Junocash Mainnet')
+    expect(junoNetworkLabel(84532)).toBe('Junocash Testnet')
   })
 })

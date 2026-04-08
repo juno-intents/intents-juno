@@ -823,6 +823,37 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 12px;
 }
 
+.contracts-modal {
+  width: 620px;
+}
+
+.contracts-body {
+  display: grid;
+  gap: 10px;
+}
+
+.contract-row {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+}
+
+.contract-name {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.contract-link {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* Modal */
 .modal-overlay {
   position: fixed;
@@ -907,6 +938,21 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   text-align: right;
   word-break: break-all;
   max-width: 60%;
+}
+
+.detail-value-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 66%;
+}
+
+.detail-link {
+  font-size: 13px;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 /* Success modal */
@@ -1287,14 +1333,20 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .deposit-modal-summary-row,
   .qr-summary-row,
-  .deposit-modal-actions {
+  .deposit-modal-actions,
+  .detail-row {
     flex-direction: column;
     align-items: stretch;
   }
 
   .deposit-modal-summary-value,
-  .qr-summary-value {
+  .qr-summary-value,
+  .detail-value,
+  .detail-link,
+  .detail-value-group {
     text-align: left;
+    max-width: none;
+    justify-content: flex-start;
   }
 
   .transport-option {
