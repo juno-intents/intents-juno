@@ -37,6 +37,16 @@ export async function listWithdrawals(params: Record<string, string>): Promise<L
   return get(`/v1/withdrawals?${qs}`)
 }
 
+export async function listRecentDeposits(params: Record<string, string> = {}): Promise<ListResponse<DepositStatus>> {
+  const qs = new URLSearchParams(params)
+  return get(`/v1/deposits/recent?${qs}`)
+}
+
+export async function listRecentWithdrawals(params: Record<string, string> = {}): Promise<ListResponse<WithdrawalStatus>> {
+  const qs = new URLSearchParams(params)
+  return get(`/v1/withdrawals/recent?${qs}`)
+}
+
 export async function decodeRecipient(ua: string): Promise<string> {
   const resp = await fetch(`${BASE}/v1/decode-recipient?ua=${encodeURIComponent(ua)}`)
   const data = await resp.json()

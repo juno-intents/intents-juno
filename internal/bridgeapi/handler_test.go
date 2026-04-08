@@ -20,12 +20,12 @@ import (
 )
 
 type stubDepositReader struct {
-	job deposit.Job
-	err error
+	status DepositStatus
+	err    error
 }
 
-func (s *stubDepositReader) Get(_ context.Context, _ [32]byte) (deposit.Job, error) {
-	return s.job, s.err
+func (s *stubDepositReader) Get(_ context.Context, _ [32]byte) (DepositStatus, error) {
+	return s.status, s.err
 }
 
 type stubWithdrawalReader struct {
@@ -38,24 +38,41 @@ func (s *stubWithdrawalReader) Get(_ context.Context, _ [32]byte) (WithdrawalSta
 }
 
 type stubDepositLister struct {
-	jobs  []deposit.Job
-	total int
-	job   *deposit.Job
-	err   error
+	statuses    []DepositStatus
+	total       int
+	status      *DepositStatus
+	recent      []DepositStatus
+	recentTotal int
+	err         error
 }
 
-func (s *stubDepositLister) ListByBaseRecipient(_ context.Context, _ [20]byte, _, _ int) ([]deposit.Job, int, error) {
-	return s.jobs, s.total, s.err
+func (s *stubDepositLister) ListByBaseRecipient(_ context.Context, _ [20]byte, _, _ int) ([]DepositStatus, int, error) {
+	return s.statuses, s.total, s.err
 }
 
-func (s *stubDepositLister) GetByTxHash(_ context.Context, _ [32]byte) (*deposit.Job, error) {
-	return s.job, s.err
+func (s *stubDepositLister) GetByTxHash(_ context.Context, _ [32]byte) (*DepositStatus, error) {
+	return s.status, s.err
+}
+
+func (s *stubDepositLister) ListRecent(_ context.Context, _, _ int) ([]DepositStatus, int, error) {
+	return s.recent, s.recentTotal, s.err
 }
 
 type stubWithdrawalLister struct {
-	statuses []WithdrawalStatus
-	total    int
-	err      error
+	statuses    []WithdrawalStatus
+	total       int
+	recent      []WithdrawalStatus
+	recentTotal int
+	err         error
+}
+
+type stubJunoTipProvider struct {
+	height int64
+	err    error
+}
+
+func (s *stubJunoTipProvider) TipHeight(_ context.Context) (int64, error) {
+	return s.height, s.err
 }
 
 type stubRuntimeSettingsProvider struct {
@@ -86,6 +103,10 @@ func (s *stubWithdrawalLister) GetByJunoTxID(_ context.Context, _ string) ([]Wit
 
 func (s *stubWithdrawalLister) GetByBaseTxHash(_ context.Context, _ string) ([]WithdrawalStatus, error) {
 	return s.statuses, s.err
+}
+
+func (s *stubWithdrawalLister) ListRecent(_ context.Context, _, _ int) ([]WithdrawalStatus, int, error) {
+	return s.recent, s.recentTotal, s.err
 }
 
 func TestHandler_Config(t *testing.T) {
@@ -619,8 +640,14 @@ func TestListDeposits_ByBaseRecipient(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.DepositLister = &stubDepositLister{
-		jobs: []deposit.Job{
-			{Deposit: deposit.Deposit{DepositID: did, Amount: 5000, BaseRecipient: rec20}, State: deposit.StateConfirmed},
+		statuses: []DepositStatus{
+			{
+				Job: deposit.Job{
+					Deposit: deposit.Deposit{DepositID: did, Amount: 5000, BaseRecipient: rec20},
+					State:   deposit.StateConfirmed,
+				},
+				BaseTxHash: "0xfeedface",
+			},
 		},
 		total: 1,
 	}
@@ -640,9 +667,10 @@ func TestListDeposits_ByBaseRecipient(t *testing.T) {
 		Version string `json:"version"`
 		Total   int    `json:"total"`
 		Data    []struct {
-			DepositID string `json:"depositId"`
-			State     string `json:"state"`
-			Amount    string `json:"amount"`
+			DepositID  string `json:"depositId"`
+			State      string `json:"state"`
+			Amount     string `json:"amount"`
+			BaseTxHash string `json:"baseTxHash"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -653,6 +681,9 @@ func TestListDeposits_ByBaseRecipient(t *testing.T) {
 	}
 	if out.Data[0].Amount != "5000" || out.Data[0].State != "confirmed" {
 		t.Fatalf("bad deposit entry: %+v", out.Data[0])
+	}
+	if out.Data[0].BaseTxHash != "0xfeedface" {
+		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0xfeedface")
 	}
 }
 
@@ -666,10 +697,13 @@ func TestListDeposits_ByTxHash(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.DepositLister = &stubDepositLister{
-		job: &deposit.Job{
-			Deposit: deposit.Deposit{DepositID: did, Amount: 9999},
-			State:   deposit.StateFinalized,
-			TxHash:  txh,
+		status: &DepositStatus{
+			Job: deposit.Job{
+				Deposit: deposit.Deposit{DepositID: did, Amount: 9999},
+				State:   deposit.StateFinalized,
+				TxHash:  txh,
+			},
+			BaseTxHash: "0xbead",
 		},
 	}
 	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
@@ -687,7 +721,8 @@ func TestListDeposits_ByTxHash(t *testing.T) {
 	var out struct {
 		Total int `json:"total"`
 		Data  []struct {
-			DepositID string `json:"depositId"`
+			DepositID  string `json:"depositId"`
+			BaseTxHash string `json:"baseTxHash"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -695,6 +730,173 @@ func TestListDeposits_ByTxHash(t *testing.T) {
 	}
 	if out.Total != 1 || len(out.Data) != 1 {
 		t.Fatalf("expected 1 result: %+v", out)
+	}
+	if out.Data[0].BaseTxHash != "0xbead" {
+		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0xbead")
+	}
+}
+
+func TestHandler_DepositStatus_IncludesConfirmationProgressAndBaseTxHash(t *testing.T) {
+	t.Parallel()
+
+	var did [32]byte
+	did[0] = 0x44
+	var recipient [20]byte
+	recipient[0] = 0x55
+	var txh [32]byte
+	txh[0] = 0x66
+
+	cfg := testConfig()
+	cfg.RuntimeSettings = &stubRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+		DepositMinConfirmations: 9,
+	}}
+	cfg.JunoTipProvider = &stubJunoTipProvider{height: 112}
+
+	h, err := NewHandler(cfg, &stubDepositReader{
+		status: DepositStatus{
+			Job: deposit.Job{
+				Deposit: deposit.Deposit{
+					DepositID:     did,
+					Amount:        12345,
+					BaseRecipient: recipient,
+					JunoHeight:    105,
+				},
+				State:  deposit.StateSeen,
+				TxHash: txh,
+			},
+			BaseTxHash: "0xdecafbad",
+		},
+	}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status/deposit/0x"+hex.EncodeToString(did[:]), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Found                 bool   `json:"found"`
+		State                 string `json:"state"`
+		BaseTxHash            string `json:"baseTxHash"`
+		Confirmations         int64  `json:"confirmations"`
+		RequiredConfirmations int64  `json:"requiredConfirmations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !out.Found || out.State != "seen" {
+		t.Fatalf("bad status payload: %+v", out)
+	}
+	if out.BaseTxHash != "0xdecafbad" {
+		t.Fatalf("baseTxHash: got %q want %q", out.BaseTxHash, "0xdecafbad")
+	}
+	if out.Confirmations != 8 {
+		t.Fatalf("confirmations: got %d want %d", out.Confirmations, 8)
+	}
+	if out.RequiredConfirmations != 9 {
+		t.Fatalf("requiredConfirmations: got %d want %d", out.RequiredConfirmations, 9)
+	}
+}
+
+func TestListRecentDeposits(t *testing.T) {
+	t.Parallel()
+
+	var did [32]byte
+	did[0] = 0x91
+	var rec20 [20]byte
+	rec20[0] = 0x92
+
+	cfg := testConfig()
+	cfg.DepositLister = &stubDepositLister{
+		recent: []DepositStatus{
+			{
+				Job: deposit.Job{
+					Deposit: deposit.Deposit{DepositID: did, Amount: 7000, BaseRecipient: rec20},
+					State:   deposit.StateSubmitted,
+				},
+				BaseTxHash: "0x1234",
+			},
+		},
+		recentTotal: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/deposits/recent?limit=10&offset=0", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Total int `json:"total"`
+		Data  []struct {
+			DepositID  string `json:"depositId"`
+			BaseTxHash string `json:"baseTxHash"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 1 || len(out.Data) != 1 {
+		t.Fatalf("bad response: %+v", out)
+	}
+	if out.Data[0].BaseTxHash != "0x1234" {
+		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0x1234")
+	}
+}
+
+func TestListRecentWithdrawals(t *testing.T) {
+	t.Parallel()
+
+	var wid [32]byte
+	wid[0] = 0x81
+
+	cfg := testConfig()
+	cfg.WithdrawalLister = &stubWithdrawalLister{
+		recent: []WithdrawalStatus{
+			{
+				Withdrawal: withdraw.Withdrawal{ID: wid, Amount: 4000},
+				BaseTxHash: "0xdeadbeef",
+			},
+		},
+		recentTotal: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/withdrawals/recent?limit=10&offset=0", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Total int `json:"total"`
+		Data  []struct {
+			WithdrawalID string `json:"withdrawalId"`
+			BaseTxHash   string `json:"baseTxHash"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 1 || len(out.Data) != 1 {
+		t.Fatalf("bad response: %+v", out)
+	}
+	if out.Data[0].BaseTxHash != "0xdeadbeef" {
+		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0xdeadbeef")
 	}
 }
 

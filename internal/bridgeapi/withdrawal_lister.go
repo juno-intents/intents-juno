@@ -75,6 +75,28 @@ func (l *PostgresWithdrawalLister) GetByBaseTxHash(ctx context.Context, baseTxHa
 	return scanWithdrawalRows(rows)
 }
 
+func (l *PostgresWithdrawalLister) ListRecent(ctx context.Context, limit, offset int) ([]WithdrawalStatus, int, error) {
+	var total int
+	err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM withdrawal_requests`).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bridgeapi: count recent withdrawals: %w", err)
+	}
+
+	rows, err := l.pool.Query(ctx,
+		withdrawalListQuery+`ORDER BY wr.created_at DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bridgeapi: list recent withdrawals: %w", err)
+	}
+	defer rows.Close()
+
+	statuses, err := scanWithdrawalRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return statuses, total, nil
+}
+
 func scanWithdrawalRows(rows pgx.Rows) ([]WithdrawalStatus, error) {
 	var statuses []WithdrawalStatus
 	for rows.Next() {

@@ -19,6 +19,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/healthz"
+	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
@@ -37,6 +38,9 @@ func main() {
 			"pgxpool health check period",
 		)
 		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
+		junoRPCURL = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, enables deposit confirmation progress)")
+		junoRPCUser = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
+		junoRPCPass = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
 
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
@@ -73,6 +77,10 @@ func main() {
 
 	if *postgresDSN == "" || *baseRPCURL == "" || *baseChainID == 0 || *bridgeAddr == "" || *oWalletUA == "" {
 		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-rpc-url, --base-chain-id, --bridge-address, and --owallet-ua are required")
+		os.Exit(2)
+	}
+	if (*junoRPCURL == "") != (*junoRPCUser == "") || (*junoRPCURL == "") != (*junoRPCPass == "") {
+		fmt.Fprintln(os.Stderr, "error: --juno-rpc-url, --juno-rpc-user, and --juno-rpc-pass must be provided together")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -207,9 +215,24 @@ func main() {
 		os.Exit(2)
 	}
 
+	depositReader, err := bridgeapi.NewPostgresDepositReader(pool)
+	if err != nil {
+		log.Error("init deposit status reader", "err", err)
+		os.Exit(2)
+	}
+
 	var wjunoAddress common.Address
 	if *wjunoAddr != "" {
 		wjunoAddress = common.HexToAddress(*wjunoAddr)
+	}
+
+	var junoTipProvider bridgeapi.JunoTipProvider
+	if *junoRPCURL != "" {
+		junoTipProvider, err = junorpc.New(*junoRPCURL, *junoRPCUser, *junoRPCPass, junorpc.WithTimeout(5*time.Second))
+		if err != nil {
+			log.Error("init juno rpc client", "err", err)
+			os.Exit(2)
+		}
 	}
 
 	handler, err := bridgeapi.NewHandler(bridgeapi.Config{
@@ -224,6 +247,7 @@ func main() {
 		FeeBps:                        uint32(*feeBps),
 		RuntimeSettings:               runtimeSettingsCache,
 		BridgeSettings:                bridgeSettingsCache,
+		JunoTipProvider:               junoTipProvider,
 		RateLimitPerIPPerSecond:       *rateLimitPerSecond,
 		RateLimitBurst:                *rateLimitBurst,
 		RateLimitMaxTrackedIPs:        *rateLimitMaxIPs,
@@ -237,7 +261,7 @@ func main() {
 			bridgeSettingsCache.Ready,
 		),
 		Now: time.Now,
-	}, depositStore, withdrawReader)
+	}, depositReader, withdrawReader)
 	if err != nil {
 		log.Error("init bridge api handler", "err", err)
 		os.Exit(2)

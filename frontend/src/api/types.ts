@@ -21,19 +21,22 @@ export interface DepositMemo {
 }
 
 export interface DepositStatus {
-  version: string
-  found: boolean
+  version?: string
+  found?: boolean
   depositId: string
   state: string
   amount: string
   baseRecipient: string
   txHash: string
+  baseTxHash: string
+  confirmations?: number
+  requiredConfirmations?: number
   rejectionReason?: string
 }
 
 export interface WithdrawalStatus {
-  version: string
-  found: boolean
+  version?: string
+  found?: boolean
   withdrawalId: string
   state: string
   amount: string

@@ -22,63 +22,120 @@ func NewPostgresDepositLister(pool *pgxpool.Pool) (*PostgresDepositLister, error
 	return &PostgresDepositLister{pool: pool}, nil
 }
 
-func (l *PostgresDepositLister) ListByBaseRecipient(ctx context.Context, recipient [20]byte, limit, offset int) ([]deposit.Job, int, error) {
+const depositStatusSelect = `
+	SELECT
+		dj.deposit_id,
+		dj.state,
+		dj.commitment,
+		dj.leaf_index,
+		dj.amount,
+		dj.base_recipient,
+		COALESCE(dj.juno_height, 0),
+		COALESCE(dj.checkpoint_height, 0),
+		dj.checkpoint_block_hash,
+		dj.checkpoint_final_orchard_root,
+		COALESCE(dj.checkpoint_base_chain_id, 0),
+		dj.checkpoint_bridge_contract,
+		dj.proof_seal,
+		dj.tx_hash,
+		dj.rejection_reason,
+		db.tx_hash
+	FROM deposit_jobs dj
+	LEFT JOIN deposit_batches db ON db.batch_id = dj.submit_batch_id
+`
+
+func (l *PostgresDepositLister) ListByBaseRecipient(ctx context.Context, recipient [20]byte, limit, offset int) ([]DepositStatus, int, error) {
 	var total int
 	err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_jobs WHERE base_recipient = $1`, recipient[:]).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("bridgeapi: count deposits by recipient: %w", err)
 	}
 
-	rows, err := l.pool.Query(ctx, `
-		SELECT deposit_id, state, commitment, leaf_index, amount, base_recipient,
-			   COALESCE(checkpoint_height, 0), checkpoint_block_hash,
-			   checkpoint_final_orchard_root, COALESCE(checkpoint_base_chain_id, 0),
-			   checkpoint_bridge_contract, proof_seal, tx_hash, rejection_reason
-		FROM deposit_jobs
-		WHERE base_recipient = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`, recipient[:], limit, offset)
+	rows, err := l.pool.Query(ctx,
+		depositStatusSelect+`WHERE dj.base_recipient = $1 ORDER BY dj.created_at DESC LIMIT $2 OFFSET $3`,
+		recipient[:], limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("bridgeapi: list deposits by recipient: %w", err)
 	}
 	defer rows.Close()
 
-	var jobs []deposit.Job
-	for rows.Next() {
-		j, err := scanDepositJob(rows)
-		if err != nil {
-			return nil, 0, err
-		}
-		jobs = append(jobs, j)
+	statuses, err := scanDepositStatusRows(rows)
+	if err != nil {
+		return nil, 0, err
 	}
-	if rows.Err() != nil {
-		return nil, 0, fmt.Errorf("bridgeapi: iterate deposits: %w", rows.Err())
-	}
-	return jobs, total, nil
+	return statuses, total, nil
 }
 
-func (l *PostgresDepositLister) GetByTxHash(ctx context.Context, txHash [32]byte) (*deposit.Job, error) {
-	row := l.pool.QueryRow(ctx, `
-		SELECT deposit_id, state, commitment, leaf_index, amount, base_recipient,
-			   COALESCE(checkpoint_height, 0), checkpoint_block_hash,
-			   checkpoint_final_orchard_root, COALESCE(checkpoint_base_chain_id, 0),
-			   checkpoint_bridge_contract, proof_seal, tx_hash, rejection_reason
-		FROM deposit_jobs
-		WHERE tx_hash = $1
-	`, txHash[:])
+func (l *PostgresDepositLister) GetByTxHash(ctx context.Context, txHash [32]byte) (*DepositStatus, error) {
+	row := l.pool.QueryRow(ctx,
+		depositStatusSelect+`WHERE dj.tx_hash = $1`,
+		txHash[:],
+	)
 
-	j, err := scanDepositJobRow(row)
+	status, err := scanDepositStatusRow(row)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("bridgeapi: get deposit by tx hash: %w", err)
 	}
-	return &j, nil
+	return &status, nil
 }
 
-func scanDepositJob(rows pgx.Rows) (deposit.Job, error) {
+func (l *PostgresDepositLister) ListRecent(ctx context.Context, limit, offset int) ([]DepositStatus, int, error) {
+	var total int
+	err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM deposit_jobs`).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bridgeapi: count recent deposits: %w", err)
+	}
+
+	rows, err := l.pool.Query(ctx,
+		depositStatusSelect+`ORDER BY dj.created_at DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bridgeapi: list recent deposits: %w", err)
+	}
+	defer rows.Close()
+
+	statuses, err := scanDepositStatusRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return statuses, total, nil
+}
+
+func scanDepositStatusRows(rows pgx.Rows) ([]DepositStatus, error) {
+	var statuses []DepositStatus
+	for rows.Next() {
+		st, err := scanDepositStatus(rows)
+		if err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, st)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("bridgeapi: iterate deposits: %w", rows.Err())
+	}
+	return statuses, nil
+}
+
+func scanDepositStatusRow(row pgx.Row) (DepositStatus, error) {
+	return scanDepositStatus(scannerAdapter{row: row})
+}
+
+type depositStatusScanner interface {
+	Scan(dest ...any) error
+}
+
+type scannerAdapter struct {
+	row pgx.Row
+}
+
+func (s scannerAdapter) Scan(dest ...any) error {
+	return s.row.Scan(dest...)
+}
+
+func scanDepositStatus(scanner depositStatusScanner) (DepositStatus, error) {
 	var (
 		idRaw           []byte
 		state           int16
@@ -86,6 +143,7 @@ func scanDepositJob(rows pgx.Rows) (deposit.Job, error) {
 		leafIndex       int64
 		amount          int64
 		recipientRaw    []byte
+		junoHeight      int64
 		cpHeight        int64
 		cpBlockHash     []byte
 		cpRoot          []byte
@@ -94,97 +152,93 @@ func scanDepositJob(rows pgx.Rows) (deposit.Job, error) {
 		proofSeal       []byte
 		txHash          []byte
 		rejectionReason *string
+		baseTxHash      []byte
 	)
-	err := rows.Scan(&idRaw, &state, &commitment, &leafIndex, &amount, &recipientRaw,
-		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash, &rejectionReason)
+	err := scanner.Scan(
+		&idRaw,
+		&state,
+		&commitment,
+		&leafIndex,
+		&amount,
+		&recipientRaw,
+		&junoHeight,
+		&cpHeight,
+		&cpBlockHash,
+		&cpRoot,
+		&cpChainID,
+		&cpBridge,
+		&proofSeal,
+		&txHash,
+		&rejectionReason,
+		&baseTxHash,
+	)
 	if err != nil {
-		return deposit.Job{}, fmt.Errorf("bridgeapi: scan deposit: %w", err)
+		return DepositStatus{}, err
 	}
-	return buildDepositJob(idRaw, state, commitment, leafIndex, amount, recipientRaw,
-		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason)
+	return buildDepositStatus(idRaw, state, commitment, leafIndex, amount, recipientRaw, junoHeight,
+		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason, baseTxHash)
 }
 
-func scanDepositJobRow(row pgx.Row) (deposit.Job, error) {
-	var (
-		idRaw           []byte
-		state           int16
-		commitment      []byte
-		leafIndex       int64
-		amount          int64
-		recipientRaw    []byte
-		cpHeight        int64
-		cpBlockHash     []byte
-		cpRoot          []byte
-		cpChainID       int64
-		cpBridge        []byte
-		proofSeal       []byte
-		txHash          []byte
-		rejectionReason *string
-	)
-	err := row.Scan(&idRaw, &state, &commitment, &leafIndex, &amount, &recipientRaw,
-		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash, &rejectionReason)
-	if err != nil {
-		return deposit.Job{}, err
-	}
-	return buildDepositJob(idRaw, state, commitment, leafIndex, amount, recipientRaw,
-		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason)
-}
-
-func buildDepositJob(idRaw []byte, state int16, commitment []byte, leafIndex, amount int64,
-	recipientRaw []byte, cpHeight int64, cpBlockHash, cpRoot []byte, cpChainID int64,
-	cpBridge, proofSeal, txHash []byte, rejectionReason *string) (deposit.Job, error) {
+func buildDepositStatus(idRaw []byte, state int16, commitment []byte, leafIndex, amount int64, recipientRaw []byte,
+	junoHeight, cpHeight int64, cpBlockHash, cpRoot []byte, cpChainID int64, cpBridge, proofSeal, txHash []byte,
+	rejectionReason *string, baseTxHash []byte) (DepositStatus, error) {
 
 	id, err := to32(idRaw)
 	if err != nil {
-		return deposit.Job{}, err
+		return DepositStatus{}, err
 	}
 	recipient, err := to20(recipientRaw)
 	if err != nil {
-		return deposit.Job{}, err
+		return DepositStatus{}, err
 	}
 	if amount < 0 || amount > math.MaxInt64 {
-		return deposit.Job{}, fmt.Errorf("bridgeapi: invalid deposit amount in db")
+		return DepositStatus{}, fmt.Errorf("bridgeapi: invalid deposit amount in db")
 	}
 
-	var commitHash [32]byte
+	var commitmentHash [32]byte
 	if len(commitment) == 32 {
-		copy(commitHash[:], commitment)
+		copy(commitmentHash[:], commitment)
 	}
 
-	j := deposit.Job{
-		Deposit: deposit.Deposit{
-			DepositID:     id,
-			Commitment:    commitHash,
-			LeafIndex:     uint64(leafIndex),
-			Amount:        uint64(amount),
-			BaseRecipient: recipient,
-		},
-		State: deposit.State(state),
-		Checkpoint: checkpoint.Checkpoint{
-			Height: uint64(cpHeight),
+	st := DepositStatus{
+		Job: deposit.Job{
+			Deposit: deposit.Deposit{
+				DepositID:     id,
+				Commitment:    commitmentHash,
+				LeafIndex:     uint64(leafIndex),
+				Amount:        uint64(amount),
+				BaseRecipient: recipient,
+				JunoHeight:    junoHeight,
+			},
+			State: deposit.State(state),
+			Checkpoint: checkpoint.Checkpoint{
+				Height: uint64(cpHeight),
+			},
 		},
 	}
 
 	if len(cpBlockHash) == 32 {
-		copy(j.Checkpoint.BlockHash[:], cpBlockHash)
+		copy(st.Job.Checkpoint.BlockHash[:], cpBlockHash)
 	}
 	if len(cpRoot) == 32 {
-		copy(j.Checkpoint.FinalOrchardRoot[:], cpRoot)
+		copy(st.Job.Checkpoint.FinalOrchardRoot[:], cpRoot)
 	}
-	j.Checkpoint.BaseChainID = uint64(cpChainID)
+	st.Job.Checkpoint.BaseChainID = uint64(cpChainID)
 	if len(cpBridge) == 20 {
-		copy(j.Checkpoint.BridgeContract[:], cpBridge)
+		copy(st.Job.Checkpoint.BridgeContract[:], cpBridge)
 	}
-
 	if proofSeal != nil {
-		j.ProofSeal = append([]byte(nil), proofSeal...)
+		st.Job.ProofSeal = append([]byte(nil), proofSeal...)
 	}
 	if len(txHash) == 32 {
-		copy(j.TxHash[:], txHash)
+		copy(st.Job.TxHash[:], txHash)
 	}
 	if rejectionReason != nil {
-		j.RejectionReason = *rejectionReason
+		st.Job.RejectionReason = *rejectionReason
+	}
+	if len(baseTxHash) == 32 {
+		st.BaseTxHash = "0x" + fmt.Sprintf("%x", baseTxHash)
 	}
 
-	return j, nil
+	return st, nil
 }

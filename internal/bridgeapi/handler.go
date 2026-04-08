@@ -40,6 +40,7 @@ type Config struct {
 
 	RuntimeSettings RuntimeSettingsProvider
 	BridgeSettings  BridgeSettingsProvider
+	JunoTipProvider JunoTipProvider
 
 	RateLimitPerIPPerSecond float64
 	RateLimitBurst          int
@@ -63,8 +64,17 @@ type BridgeSettingsProvider interface {
 	Current() (bridgeconfig.Snapshot, error)
 }
 
+type JunoTipProvider interface {
+	TipHeight(ctx context.Context) (int64, error)
+}
+
+type DepositStatus struct {
+	Job        deposit.Job
+	BaseTxHash string
+}
+
 type DepositReader interface {
-	Get(ctx context.Context, depositID [32]byte) (deposit.Job, error)
+	Get(ctx context.Context, depositID [32]byte) (DepositStatus, error)
 }
 
 type WithdrawalStatus struct {
@@ -80,14 +90,16 @@ type WithdrawalReader interface {
 }
 
 type DepositLister interface {
-	ListByBaseRecipient(ctx context.Context, recipient [20]byte, limit, offset int) ([]deposit.Job, int, error)
-	GetByTxHash(ctx context.Context, txHash [32]byte) (*deposit.Job, error)
+	ListByBaseRecipient(ctx context.Context, recipient [20]byte, limit, offset int) ([]DepositStatus, int, error)
+	GetByTxHash(ctx context.Context, txHash [32]byte) (*DepositStatus, error)
+	ListRecent(ctx context.Context, limit, offset int) ([]DepositStatus, int, error)
 }
 
 type WithdrawalLister interface {
 	ListByRequester(ctx context.Context, requester [20]byte, limit, offset int) ([]WithdrawalStatus, int, error)
 	GetByJunoTxID(ctx context.Context, junoTxID string) ([]WithdrawalStatus, error)
 	GetByBaseTxHash(ctx context.Context, baseTxHash string) ([]WithdrawalStatus, error)
+	ListRecent(ctx context.Context, limit, offset int) ([]WithdrawalStatus, int, error)
 }
 
 func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader) (http.Handler, error) {
@@ -149,6 +161,8 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
 	mux.HandleFunc("GET /v1/deposits", h.handleListDeposits)
 	mux.HandleFunc("GET /v1/withdrawals", h.handleListWithdrawals)
+	mux.HandleFunc("GET /v1/deposits/recent", h.handleListRecentDeposits)
+	mux.HandleFunc("GET /v1/withdrawals/recent", h.handleListRecentWithdrawals)
 	mux.HandleFunc("GET /v1/decode-recipient", h.handleDecodeRecipient)
 
 	// SPA frontend fallback: serve embedded frontend for non-API paths.
@@ -364,21 +378,7 @@ func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash := ""
-	if job.TxHash != ([32]byte{}) {
-		txHash = "0x" + hex.EncodeToString(job.TxHash[:])
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version":         "v1",
-		"found":           true,
-		"depositId":       "0x" + hex.EncodeToString(job.Deposit.DepositID[:]),
-		"state":           job.State.String(),
-		"amount":          strconv.FormatUint(job.Deposit.Amount, 10),
-		"baseRecipient":   "0x" + hex.EncodeToString(job.Deposit.BaseRecipient[:]),
-		"txHash":          txHash,
-		"rejectionReason": job.RejectionReason,
-	})
+	writeJSON(w, http.StatusOK, depositStatusPayload("0x"+hex.EncodeToString(id[:]), job, h.depositProgress(r.Context(), job)))
 }
 
 func (h *handler) handleWithdrawalStatus(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +428,54 @@ func (h *handler) handleWithdrawalStatus(w http.ResponseWriter, r *http.Request)
 		"junoTxId":     st.JunoTxID,
 		"baseTxHash":   st.BaseTxHash,
 	})
+}
+
+func (h *handler) depositProgress(ctx context.Context, st DepositStatus) depositConfirmationProgress {
+	progress := depositConfirmationProgress{}
+	required, err := h.currentDepositMinConfirmations()
+	if err == nil && required > 0 {
+		progress.RequiredConfirmations = required
+	}
+	if h.cfg.JunoTipProvider == nil || st.Job.Deposit.JunoHeight <= 0 {
+		return progress
+	}
+	tipHeight, err := h.cfg.JunoTipProvider.TipHeight(ctx)
+	if err != nil || tipHeight < st.Job.Deposit.JunoHeight {
+		return progress
+	}
+	progress.Confirmations = tipHeight - st.Job.Deposit.JunoHeight + 1
+	return progress
+}
+
+type depositConfirmationProgress struct {
+	Confirmations         int64
+	RequiredConfirmations int64
+}
+
+func depositStatusPayload(id string, st DepositStatus, progress depositConfirmationProgress) map[string]any {
+	txHash := ""
+	if st.Job.TxHash != ([32]byte{}) {
+		txHash = "0x" + hex.EncodeToString(st.Job.TxHash[:])
+	}
+
+	out := map[string]any{
+		"version":         "v1",
+		"found":           true,
+		"depositId":       id,
+		"state":           st.Job.State.String(),
+		"amount":          strconv.FormatUint(st.Job.Deposit.Amount, 10),
+		"baseRecipient":   "0x" + hex.EncodeToString(st.Job.Deposit.BaseRecipient[:]),
+		"txHash":          txHash,
+		"baseTxHash":      st.BaseTxHash,
+		"rejectionReason": st.Job.RejectionReason,
+	}
+	if progress.RequiredConfirmations > 0 {
+		out["requiredConfirmations"] = progress.RequiredConfirmations
+	}
+	if progress.Confirmations > 0 {
+		out["confirmations"] = progress.Confirmations
+	}
+	return out
 }
 
 func (h *handler) handleDecodeRecipient(w http.ResponseWriter, r *http.Request) {

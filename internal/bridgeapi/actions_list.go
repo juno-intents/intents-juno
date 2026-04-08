@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/juno-intents/intents-juno/internal/deposit"
 )
 
 func (h *handler) handleListDeposits(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +60,7 @@ func (h *handler) handleListDeposits(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"version": "v1",
-			"data":    []any{depositJobToMap(*job)},
+			"data":    []any{depositStatusToMap(*job, h.depositProgress(r.Context(), *job))},
 			"total":   1,
 			"limit":   limit,
 			"offset":  offset,
@@ -90,7 +88,7 @@ func (h *handler) handleListDeposits(w http.ResponseWriter, r *http.Request) {
 
 	data := make([]any, 0, len(jobs))
 	for _, j := range jobs {
-		data = append(data, depositJobToMap(j))
+		data = append(data, depositStatusToMap(j, h.depositProgress(r.Context(), j)))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -186,21 +184,65 @@ func writeListWithdrawals(w http.ResponseWriter, statuses []WithdrawalStatus, to
 	})
 }
 
-func depositJobToMap(j deposit.Job) map[string]any {
-	txHash := ""
-	if j.TxHash != ([32]byte{}) {
-		txHash = "0x" + hex.EncodeToString(j.TxHash[:])
+func (h *handler) handleListRecentDeposits(w http.ResponseWriter, r *http.Request) {
+	if h.depositLister == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{
+			"version": "v1",
+			"error":   "list_deposits_not_available",
+		})
+		return
 	}
-	out := map[string]any{
-		"depositId":     "0x" + hex.EncodeToString(j.Deposit.DepositID[:]),
-		"state":         j.State.String(),
-		"amount":        strconv.FormatUint(j.Deposit.Amount, 10),
-		"baseRecipient": "0x" + hex.EncodeToString(j.Deposit.BaseRecipient[:]),
-		"txHash":        txHash,
+
+	limit, offset := parsePagination(r.URL.Query().Get("limit"), r.URL.Query().Get("offset"))
+	statuses, total, err := h.depositLister.ListRecent(r.Context(), limit, offset)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"version": "v1",
+			"error":   "internal",
+		})
+		return
 	}
-	if j.RejectionReason != "" {
-		out["rejectionReason"] = j.RejectionReason
+
+	data := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		data = append(data, depositStatusToMap(st, h.depositProgress(r.Context(), st)))
 	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version": "v1",
+		"data":    data,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
+func (h *handler) handleListRecentWithdrawals(w http.ResponseWriter, r *http.Request) {
+	if h.withdrawalLister == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{
+			"version": "v1",
+			"error":   "list_withdrawals_not_available",
+		})
+		return
+	}
+
+	limit, offset := parsePagination(r.URL.Query().Get("limit"), r.URL.Query().Get("offset"))
+	statuses, total, err := h.withdrawalLister.ListRecent(r.Context(), limit, offset)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"version": "v1",
+			"error":   "internal",
+		})
+		return
+	}
+
+	writeListWithdrawals(w, statuses, total, limit, offset)
+}
+
+func depositStatusToMap(st DepositStatus, progress depositConfirmationProgress) map[string]any {
+	out := depositStatusPayload("0x"+hex.EncodeToString(st.Job.Deposit.DepositID[:]), st, progress)
+	delete(out, "version")
+	delete(out, "found")
 	return out
 }
 
