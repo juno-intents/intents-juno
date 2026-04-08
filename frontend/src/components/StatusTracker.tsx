@@ -10,7 +10,9 @@ export default function StatusTracker({ steps, current, confirmations, requiredC
   const isFinalized = current === 'finalized'
   const isRejected = current === 'rejected'
   const showConfirmations = current === 'seen' && confirmations !== undefined && requiredConfirmations !== undefined
-  const label = showConfirmations ? `${confirmations}/${requiredConfirmations} confirmations` : (isFinalized ? 'finalized' : current || steps[0])
+  const label = showConfirmations
+    ? `seen - pending ${requiredConfirmations} confirmations`
+    : (isFinalized ? 'finalized' : current || steps[0])
 
   return (
     <div className="tracker-wrap">

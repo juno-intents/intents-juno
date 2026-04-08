@@ -28,6 +28,6 @@ describe('StatusTracker', () => {
       />,
     )
 
-    expect(html).toContain('3/200 confirmations')
+    expect(html).toContain('seen - pending 200 confirmations')
   })
 })

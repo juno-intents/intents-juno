@@ -737,32 +737,38 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .copy-btn {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
   padding: 0;
-  background: var(--border);
+  background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: 0;
   color: var(--text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-family: inherit;
+  vertical-align: middle;
 }
 
-.copy-btn svg {
-  width: 15px;
-  height: 15px;
+.copy-btn svg,
+.copy-btn-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+.copy-btn-icon {
+  object-fit: contain;
 }
 
 .copy-btn.is-copied {
-  background: rgba(0, 200, 83, 0.16);
   color: var(--green);
 }
 
-.copy-btn:hover { background: var(--accent); color: white; }
+.copy-btn:hover { color: var(--accent); opacity: 0.9; }
 
 .recent-recipient-row {
   display: flex;
