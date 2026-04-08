@@ -755,6 +755,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .copy-btn svg,
 .copy-btn-icon {
+  width: 12px;
+  height: 12px;
   display: block;
 }
 
