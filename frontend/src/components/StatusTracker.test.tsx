@@ -23,7 +23,7 @@ describe('StatusTracker', () => {
       <StatusTracker
         steps={['pending', 'seen', 'confirmed']}
         current="seen"
-        confirmations={3}
+        confirmations={null}
         requiredConfirmations={200}
       />,
     )

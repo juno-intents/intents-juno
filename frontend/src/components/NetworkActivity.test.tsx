@@ -43,6 +43,8 @@ describe('NetworkActivity', () => {
         baseRecipient: '0x1234567890123456789012345678901234567890',
         txHash: 'e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd',
         baseTxHash: '0xf19c70e3fa1448cb43d90faea0fe41a9d199af0dbc7f6b6df4a25d5b73031fa1',
+        confirmations: null,
+        requiredConfirmations: 200,
       }],
     })
     vi.mocked(listRecentWithdrawals).mockResolvedValue({
@@ -73,5 +75,6 @@ describe('NetworkActivity', () => {
     expect(listRecentWithdrawals).toHaveBeenCalledWith({ limit: '10', offset: '0' })
     expect(await screen.findByText(/NETWORK DEPOSITS/i)).toBeInTheDocument()
     expect(await screen.findByText(/NETWORK WITHDRAWALS/i)).toBeInTheDocument()
+    expect(await screen.findByText('seen - pending 200 confirmations')).toBeInTheDocument()
   })
 })

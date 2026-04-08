@@ -38,7 +38,13 @@ export default function CopyIconButton({
       {copied ? (
         <CheckGlyph />
       ) : (
-        <img className="copy-btn-icon" src="/copy.png" alt="" aria-hidden="true" />
+        <img
+          className="copy-btn-icon"
+          width="24"
+          height="24"
+          src="https://img.icons8.com/material-outlined/24/FFFFFF/copy.png"
+          alt="copy"
+        />
       )}
     </button>
   )

@@ -29,8 +29,8 @@ export interface DepositStatus {
   baseRecipient: string
   txHash: string
   baseTxHash: string
-  confirmations?: number
-  requiredConfirmations?: number
+  confirmations?: number | null
+  requiredConfirmations?: number | null
   rejectionReason?: string
 }
 

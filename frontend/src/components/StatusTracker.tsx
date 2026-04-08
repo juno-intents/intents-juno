@@ -1,17 +1,17 @@
 interface Props {
   steps: string[]
   current: string
-  confirmations?: number
-  requiredConfirmations?: number
+  confirmations?: number | null
+  requiredConfirmations?: number | null
 }
 
-export default function StatusTracker({ steps, current, confirmations, requiredConfirmations }: Props) {
+export default function StatusTracker({ steps, current, requiredConfirmations }: Props) {
   const idx = steps.indexOf(current)
   const isFinalized = current === 'finalized'
   const isRejected = current === 'rejected'
-  const showConfirmations = current === 'seen' && confirmations !== undefined && requiredConfirmations !== undefined
-  const label = showConfirmations
-    ? `seen - pending ${requiredConfirmations} confirmations`
+  const pendingConfirmations = requiredConfirmations ?? 200
+  const label = current === 'seen'
+    ? `seen - pending ${pendingConfirmations} confirmations`
     : (isFinalized ? 'finalized' : current || steps[0])
 
   return (
