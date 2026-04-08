@@ -47,6 +47,9 @@ export default function Layout() {
           <button className="secondary-btn" onClick={() => setGuideOpen(true)}>
             Guide
           </button>
+          <a className="secondary-btn" href="/whitepaper.pdf" target="_blank" rel="noreferrer">
+            Whitepaper
+          </a>
           <button className="secondary-btn" onClick={() => setContractsOpen(true)}>
             Contracts
           </button>
