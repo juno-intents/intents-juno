@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { formatUnits } from 'viem'
 import type { DepositStatus, WithdrawalStatus } from '../api/types'
 import { basescanAddressUrl, basescanTxUrl, junocashTxUrl } from '../lib/bridgeUi'
+import CopyIconButton from './CopyIconButton'
 
 interface Props {
   type: 'deposit' | 'withdrawal'
@@ -20,32 +21,18 @@ function formatJuno(zatoshi: string): string {
 interface DetailValueProps {
   label: string
   value?: string
-  href?: string
-  copyable?: boolean
   statusClass?: string
-  children?: React.ReactNode
 }
 
-function DetailValue({ label, value, href, copyable, statusClass, children }: DetailValueProps) {
+function DetailValue({ label, value, statusClass }: DetailValueProps) {
   return (
     <div className="detail-row">
       <span className="detail-label">{label}</span>
       <div className="detail-value-group">
         {statusClass ? (
           <span className={`status-badge ${statusClass}`}>{value}</span>
-        ) : children ? (
-          children
-        ) : href && value ? (
-          <a className="detail-link mono" href={href} target="_blank" rel="noreferrer">
-            {value}
-          </a>
         ) : (
           <span className="detail-value mono">{value || '-'}</span>
-        )}
-        {copyable && value && (
-          <button className="copy-btn" type="button">
-            Copy
-          </button>
         )}
       </div>
     </div>
@@ -89,9 +76,7 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
           <span className="detail-value mono">{value || '-'}</span>
         )}
         {options?.copyable && value && (
-          <button className="copy-btn" type="button" onClick={() => handleCopy(value)}>
-            Copy
-          </button>
+          <CopyIconButton onClick={() => void handleCopy(value)} />
         )}
       </div>
     </div>
@@ -118,12 +103,12 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
             href: basescanAddressUrl(d.baseRecipient),
             copyable: true,
           })}
-          {isDeposit && d.baseTxHash && renderField('Base Tx', d.baseTxHash, {
-            href: basescanTxUrl(d.baseTxHash),
+          {isDeposit && d.txHash && renderField('Base Confirm Tx', d.txHash, {
+            href: basescanTxUrl(d.txHash),
             copyable: true,
           })}
-          {isDeposit && d.txHash && renderField('Junocash Tx', d.txHash, {
-            href: junocashTxUrl(d.txHash),
+          {isDeposit && d.baseTxHash && renderField('Base Batch Tx', d.baseTxHash, {
+            href: basescanTxUrl(d.baseTxHash),
             copyable: true,
           })}
           {isDeposit && d.rejectionReason && (

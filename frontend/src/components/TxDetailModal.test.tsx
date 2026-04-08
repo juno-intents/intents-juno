@@ -42,7 +42,7 @@ describe('TxDetailModal', () => {
     )
     expect(screen.getByRole('link', { name: /e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd/i })).toHaveAttribute(
       'href',
-      'https://junocash.xplorer.info/tx/e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd',
+      'https://basescan.org/tx/e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd',
     )
 
     await user.click(screen.getAllByRole('button', { name: /copy/i })[0]!)

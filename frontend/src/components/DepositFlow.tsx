@@ -5,6 +5,7 @@ import { formatUnits } from 'viem'
 import { QRCodeSVG } from 'qrcode.react'
 import { getDepositMemo, getConfig } from '../api/bridge'
 import InfoHint from './InfoHint'
+import CopyIconButton from './CopyIconButton'
 import { runtimeConfig } from '../config/runtime'
 import { validateBaseRecipient, validateDepositAmount } from '../lib/bridgeUi'
 
@@ -34,17 +35,17 @@ function compactMemoHex(hex: string): string {
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setCopied(false)
+    }
   }
 
-  return (
-    <button className="copy-btn" onClick={handleCopy}>
-      {copied ? 'Copied!' : (label ?? 'Copy')}
-    </button>
-  )
+  return <CopyIconButton onClick={() => void handleCopy()} label={label ?? 'Copy'} copied={copied} />
 }
 
 export default function DepositFlow() {
@@ -261,7 +262,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
       <div className="network-card">
         <div className="network-endpoint">
           <div className="network-icon">
-            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Juno" />
+            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Junocash" />
           </div>
           <div>
             <div className="network-name">Junocash</div>

@@ -54,7 +54,7 @@ export function resolveRuntimeConfig(env: RuntimeEnv) {
     baseChainDisplayName: baseChainDisplayName(baseChain.id),
     junoNetworkLabel: junoNetworkLabel(baseChain.id),
     junoCliModeFlag: baseChain.id === base.id ? '' : '-testnet ',
-    baseLogoUrl: '/wjuno-token.svg',
+    baseLogoUrl: '/wjuno-token.png',
     junoLogoUrl: '/junocash-logo.svg',
   }
 }
