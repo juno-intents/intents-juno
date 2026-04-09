@@ -751,6 +751,7 @@ func TestHandler_DepositStatus_IncludesConfirmationProgressAndBaseTxHash(t *test
 		DepositMinConfirmations: 9,
 	}}
 	cfg.JunoTipProvider = &stubJunoTipProvider{height: 112}
+	createdAt := time.Date(2026, time.April, 9, 12, 30, 45, 0, time.UTC)
 
 	h, err := NewHandler(cfg, &stubDepositReader{
 		status: DepositStatus{
@@ -765,6 +766,7 @@ func TestHandler_DepositStatus_IncludesConfirmationProgressAndBaseTxHash(t *test
 				TxHash: txh,
 			},
 			BaseTxHash: "0xdecafbad",
+			CreatedAt:  createdAt,
 		},
 	}, &stubWithdrawalReader{})
 	if err != nil {
@@ -782,6 +784,7 @@ func TestHandler_DepositStatus_IncludesConfirmationProgressAndBaseTxHash(t *test
 		Found                 bool   `json:"found"`
 		State                 string `json:"state"`
 		BaseTxHash            string `json:"baseTxHash"`
+		CreatedAt             string `json:"createdAt"`
 		Confirmations         int64  `json:"confirmations"`
 		RequiredConfirmations int64  `json:"requiredConfirmations"`
 	}
@@ -794,6 +797,9 @@ func TestHandler_DepositStatus_IncludesConfirmationProgressAndBaseTxHash(t *test
 	}
 	if out.BaseTxHash != "0xdecafbad" {
 		t.Fatalf("baseTxHash: got %q want %q", out.BaseTxHash, "0xdecafbad")
+	}
+	if out.CreatedAt != "2026-04-09T12:30:45Z" {
+		t.Fatalf("createdAt: got %q want %q", out.CreatedAt, "2026-04-09T12:30:45Z")
 	}
 	if out.Confirmations != 8 {
 		t.Fatalf("confirmations: got %d want %d", out.Confirmations, 8)
@@ -812,6 +818,7 @@ func TestListRecentDeposits(t *testing.T) {
 	rec20[0] = 0x92
 
 	cfg := testConfig()
+	createdAt := time.Date(2026, time.April, 8, 8, 15, 0, 0, time.UTC)
 	cfg.DepositLister = &stubDepositLister{
 		recent: []DepositStatus{
 			{
@@ -820,6 +827,7 @@ func TestListRecentDeposits(t *testing.T) {
 					State:   deposit.StateSubmitted,
 				},
 				BaseTxHash: "0x1234",
+				CreatedAt:  createdAt,
 			},
 		},
 		recentTotal: 1,
@@ -841,6 +849,7 @@ func TestListRecentDeposits(t *testing.T) {
 		Data  []struct {
 			DepositID  string `json:"depositId"`
 			BaseTxHash string `json:"baseTxHash"`
+			CreatedAt  string `json:"createdAt"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -852,6 +861,9 @@ func TestListRecentDeposits(t *testing.T) {
 	if out.Data[0].BaseTxHash != "0x1234" {
 		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0x1234")
 	}
+	if out.Data[0].CreatedAt != "2026-04-08T08:15:00Z" {
+		t.Fatalf("createdAt: got %q want %q", out.Data[0].CreatedAt, "2026-04-08T08:15:00Z")
+	}
 }
 
 func TestListRecentWithdrawals(t *testing.T) {
@@ -861,11 +873,13 @@ func TestListRecentWithdrawals(t *testing.T) {
 	wid[0] = 0x81
 
 	cfg := testConfig()
+	createdAt := time.Date(2026, time.April, 8, 9, 45, 0, 0, time.UTC)
 	cfg.WithdrawalLister = &stubWithdrawalLister{
 		recent: []WithdrawalStatus{
 			{
 				Withdrawal: withdraw.Withdrawal{ID: wid, Amount: 4000},
 				BaseTxHash: "0xdeadbeef",
+				CreatedAt:  createdAt,
 			},
 		},
 		recentTotal: 1,
@@ -887,6 +901,7 @@ func TestListRecentWithdrawals(t *testing.T) {
 		Data  []struct {
 			WithdrawalID string `json:"withdrawalId"`
 			BaseTxHash   string `json:"baseTxHash"`
+			CreatedAt    string `json:"createdAt"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -897,6 +912,9 @@ func TestListRecentWithdrawals(t *testing.T) {
 	}
 	if out.Data[0].BaseTxHash != "0xdeadbeef" {
 		t.Fatalf("baseTxHash: got %q want %q", out.Data[0].BaseTxHash, "0xdeadbeef")
+	}
+	if out.Data[0].CreatedAt != "2026-04-08T09:45:00Z" {
+		t.Fatalf("createdAt: got %q want %q", out.Data[0].CreatedAt, "2026-04-08T09:45:00Z")
 	}
 }
 

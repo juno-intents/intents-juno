@@ -25,7 +25,7 @@ func NewPostgresWithdrawalLister(pool *pgxpool.Pool) (*PostgresWithdrawalLister,
 const withdrawalListQuery = `
 	SELECT
 		wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.expiry,
-		wb.batch_id, wb.state, wb.juno_txid, wb.base_tx_hash
+		wb.batch_id, wb.state, wb.juno_txid, wb.base_tx_hash, wr.created_at
 	FROM withdrawal_requests wr
 	LEFT JOIN withdrawal_batch_items wbi ON wbi.withdrawal_id = wr.withdrawal_id
 	LEFT JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
@@ -124,10 +124,11 @@ func scanWithdrawalRow(rows pgx.Rows) (WithdrawalStatus, error) {
 		batchState   *int16
 		junoTxID     *string
 		baseTxHash   *string
+		createdAt    time.Time
 	)
 
 	err := rows.Scan(&idRaw, &requesterRaw, &amount, &feeBps, &recipientUA, &expiry,
-		&batchIDRaw, &batchState, &junoTxID, &baseTxHash)
+		&batchIDRaw, &batchState, &junoTxID, &baseTxHash, &createdAt)
 	if err != nil {
 		return WithdrawalStatus{}, fmt.Errorf("bridgeapi: scan withdrawal: %w", err)
 	}
@@ -153,6 +154,7 @@ func scanWithdrawalRow(rows pgx.Rows) (WithdrawalStatus, error) {
 			RecipientUA: append([]byte(nil), recipientUA...),
 			Expiry:      expiry.UTC(),
 		},
+		CreatedAt: createdAt.UTC(),
 	}
 
 	if batchIDRaw != nil && batchState != nil {

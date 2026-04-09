@@ -263,6 +263,7 @@ func withdrawalStatusToMap(st WithdrawalStatus) map[string]any {
 		"batchId":      batchID,
 		"junoTxId":     st.JunoTxID,
 		"baseTxHash":   st.BaseTxHash,
+		"createdAt":    formatOptionalTime(st.CreatedAt),
 	}
 }
 

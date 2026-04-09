@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,7 +40,8 @@ const depositStatusSelect = `
 		dj.proof_seal,
 		dj.tx_hash,
 		dj.rejection_reason,
-		db.tx_hash
+		db.tx_hash,
+		dj.created_at
 	FROM deposit_jobs dj
 	LEFT JOIN deposit_batches db ON db.batch_id = dj.submit_batch_id
 `
@@ -153,6 +155,7 @@ func scanDepositStatus(scanner depositStatusScanner) (DepositStatus, error) {
 		txHash          []byte
 		rejectionReason *string
 		baseTxHash      []byte
+		createdAt       time.Time
 	)
 	err := scanner.Scan(
 		&idRaw,
@@ -171,17 +174,18 @@ func scanDepositStatus(scanner depositStatusScanner) (DepositStatus, error) {
 		&txHash,
 		&rejectionReason,
 		&baseTxHash,
+		&createdAt,
 	)
 	if err != nil {
 		return DepositStatus{}, err
 	}
 	return buildDepositStatus(idRaw, state, commitment, leafIndex, amount, recipientRaw, junoHeight,
-		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason, baseTxHash)
+		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason, baseTxHash, createdAt)
 }
 
 func buildDepositStatus(idRaw []byte, state int16, commitment []byte, leafIndex, amount int64, recipientRaw []byte,
 	junoHeight, cpHeight int64, cpBlockHash, cpRoot []byte, cpChainID int64, cpBridge, proofSeal, txHash []byte,
-	rejectionReason *string, baseTxHash []byte) (DepositStatus, error) {
+	rejectionReason *string, baseTxHash []byte, createdAt time.Time) (DepositStatus, error) {
 
 	id, err := to32(idRaw)
 	if err != nil {
@@ -215,6 +219,7 @@ func buildDepositStatus(idRaw []byte, state int16, commitment []byte, leafIndex,
 				Height: uint64(cpHeight),
 			},
 		},
+		CreatedAt: createdAt.UTC(),
 	}
 
 	if len(cpBlockHash) == 32 {

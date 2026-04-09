@@ -14,11 +14,14 @@ import { baseChainDisplayName } from '../lib/bridgeUi'
 
 type RightPanel = 'my-activity' | 'recent-activity' | 'docs'
 
+const UNISWAP_POOL_URL = 'https://app.uniswap.org/explore/pools/base/0xdba3574e915900f3ac316f6c1078718d9983754951dcf5fa211b40c471cf2219'
+
 export default function Layout() {
   const [tab, setTab] = useState<'deposit' | 'withdraw'>('deposit')
   const [rightPanel, setRightPanel] = useState<RightPanel>('my-activity')
   const [guideOpen, setGuideOpen] = useState(false)
   const [contractsOpen, setContractsOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
 
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
@@ -26,35 +29,98 @@ export default function Layout() {
   })
 
   const chainLabel = baseChainDisplayName(cfg?.baseChainId ?? runtimeConfig.baseChain.id)
+  const openGuide = () => {
+    setGuideOpen(true)
+    setMenuOpen(false)
+  }
+  const openContracts = () => {
+    setContractsOpen(true)
+    setMenuOpen(false)
+  }
 
   return (
     <>
-      <header>
-        <div className="header-left">
-          <div className="brand">
-            <img className="brand-logo" src={runtimeConfig.junoLogoUrl} alt="Junocash" />
-            <span>JUNOCASH BRIDGE</span>
+      <header className="site-header">
+        <div className="header-top-row">
+          <div className="header-left">
+            <div className="brand">
+              <img className="brand-logo" src={runtimeConfig.junoLogoUrl} alt="Junocash" />
+              <span>JUNOCASH BRIDGE</span>
+            </div>
           </div>
+          <div className="header-actions">
+            <button className="secondary-btn" onClick={openGuide}>
+              Guide
+            </button>
+            <a className="secondary-btn" href="/whitepaper.pdf" target="_blank" rel="noreferrer">
+              Whitepaper
+            </a>
+            <button className="secondary-btn" onClick={openContracts}>
+              Contracts
+            </button>
+            <a className="secondary-btn" href={UNISWAP_POOL_URL} target="_blank" rel="noreferrer">
+              Uniswap
+            </a>
+            <div className="header-wallet-desktop">
+              <ConnectButton showBalance={false} />
+            </div>
+          </div>
+          <button
+            type="button"
+            className="header-menu-button"
+            aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={menuOpen}
+            aria-controls="mobile-header-menu"
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            <span />
+            <span />
+            <span />
+          </button>
+        </div>
+        <div className="header-network-row">
           {chainLabel && (
             <span className="status-pill">
               <span className="dot" />
               {chainLabel}
             </span>
           )}
-          <span className="status-pill status-pill-neutral">{runtimeConfig.junoNetworkLabel}</span>
+          <span className="status-pill status-pill-neutral">
+            <span className="dot" />
+            {runtimeConfig.junoNetworkLabel}
+          </span>
         </div>
-        <div className="header-actions">
-          <button className="secondary-btn" onClick={() => setGuideOpen(true)}>
-            Guide
-          </button>
-          <a className="secondary-btn" href="/whitepaper.pdf" target="_blank" rel="noreferrer">
-            Whitepaper
-          </a>
-          <button className="secondary-btn" onClick={() => setContractsOpen(true)}>
-            Contracts
-          </button>
-          <ConnectButton showBalance={false} />
-        </div>
+        {menuOpen && (
+          <div id="mobile-header-menu" className="mobile-header-menu" role="menu">
+            <button className="secondary-btn mobile-header-item" onClick={openGuide}>
+              Guide
+            </button>
+            <a
+              className="secondary-btn mobile-header-item"
+              href="/whitepaper.pdf"
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setMenuOpen(false)}
+            >
+              Whitepaper
+            </a>
+            <button className="secondary-btn mobile-header-item" onClick={openContracts}>
+              Contracts
+            </button>
+            <a
+              className="secondary-btn mobile-header-item"
+              href={UNISWAP_POOL_URL}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setMenuOpen(false)}
+            >
+              Uniswap
+            </a>
+            <div className="mobile-header-wallet">
+              <ConnectButton showBalance={false} />
+            </div>
+          </div>
+        )}
       </header>
       <div className="layout">
         <div className="panel-left">

@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
 import type { DepositStatus, WithdrawalStatus } from '../api/types'
+import { formatTimeAgo } from '../lib/time'
 import RecentActivity from './RecentActivity'
 import StatusTracker from './StatusTracker'
 import TxDetailModal from './TxDetailModal'
@@ -87,13 +88,14 @@ export default function Explorer() {
                 <div className="tx-item" key={d.depositId} onClick={() => setModalData({ type: 'deposit', data: d })}>
                   <div className="tx-item-header">
                     <div className="tx-left">
-                      <div className="tx-type">Junocash -&gt; Base</div>
-                      <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
-                    </div>
-                    <div className="tx-right">
-                      <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
-                    </div>
+                    <div className="tx-type">Junocash -&gt; Base</div>
+                    <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
                   </div>
+                  <div className="tx-right">
+                    {d.createdAt && <div className="tx-time">{formatTimeAgo(d.createdAt)}</div>}
+                    <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
+                  </div>
+                </div>
                   <StatusTracker
                     steps={DEPOSIT_STEPS}
                     current={d.state}
@@ -114,13 +116,14 @@ export default function Explorer() {
                 <div className="tx-item" key={w.withdrawalId} onClick={() => setModalData({ type: 'withdrawal', data: w })}>
                   <div className="tx-item-header">
                     <div className="tx-left">
-                      <div className="tx-type">Base -&gt; Junocash</div>
-                      <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
-                    </div>
-                    <div className="tx-right">
-                      <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
-                    </div>
+                    <div className="tx-type">Base -&gt; Junocash</div>
+                    <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
                   </div>
+                  <div className="tx-right">
+                    {w.createdAt && <div className="tx-time">{formatTimeAgo(w.createdAt)}</div>}
+                    <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
+                  </div>
+                </div>
                   <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
                 </div>
               ))}

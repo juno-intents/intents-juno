@@ -71,6 +71,7 @@ type JunoTipProvider interface {
 type DepositStatus struct {
 	Job        deposit.Job
 	BaseTxHash string
+	CreatedAt  time.Time
 }
 
 type DepositReader interface {
@@ -83,6 +84,7 @@ type WithdrawalStatus struct {
 	BatchState withdraw.BatchState
 	JunoTxID   string
 	BaseTxHash string
+	CreatedAt  time.Time
 }
 
 type WithdrawalReader interface {
@@ -427,6 +429,7 @@ func (h *handler) handleWithdrawalStatus(w http.ResponseWriter, r *http.Request)
 		"batchId":      batchID,
 		"junoTxId":     st.JunoTxID,
 		"baseTxHash":   st.BaseTxHash,
+		"createdAt":    formatOptionalTime(st.CreatedAt),
 	})
 }
 
@@ -467,6 +470,7 @@ func depositStatusPayload(id string, st DepositStatus, progress depositConfirmat
 		"baseRecipient":   "0x" + hex.EncodeToString(st.Job.Deposit.BaseRecipient[:]),
 		"txHash":          txHash,
 		"baseTxHash":      st.BaseTxHash,
+		"createdAt":       formatOptionalTime(st.CreatedAt),
 		"rejectionReason": st.Job.RejectionReason,
 	}
 	if progress.RequiredConfirmations > 0 {
@@ -737,4 +741,11 @@ func (c *memoResponseCache) evictOne() {
 
 func memoCacheKey(baseRecipient string, nonce string) string {
 	return baseRecipient + "|" + nonce
+}
+
+func formatOptionalTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }

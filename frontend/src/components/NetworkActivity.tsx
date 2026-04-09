@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { listDeposits, listRecentDeposits, listRecentWithdrawals, listWithdrawals } from '../api/bridge'
 import type { DepositStatus, WithdrawalStatus } from '../api/types'
+import { formatTimeAgo } from '../lib/time'
 import StatusTracker from './StatusTracker'
 import TxDetailModal from './TxDetailModal'
 
@@ -102,6 +103,7 @@ export default function NetworkActivity() {
                   <div className="tx-id">{deposit.depositId.slice(0, 10)}...{deposit.depositId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">
+                  {deposit.createdAt && <div className="tx-time">{formatTimeAgo(deposit.createdAt)}</div>}
                   <div className="tx-amount">{formatJuno(deposit.amount)} JUNO</div>
                 </div>
               </div>
@@ -129,6 +131,7 @@ export default function NetworkActivity() {
                   <div className="tx-id">{withdrawal.withdrawalId.slice(0, 10)}...{withdrawal.withdrawalId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">
+                  {withdrawal.createdAt && <div className="tx-time">{formatTimeAgo(withdrawal.createdAt)}</div>}
                   <div className="tx-amount">{formatJuno(withdrawal.amount)} JUNO</div>
                 </div>
               </div>

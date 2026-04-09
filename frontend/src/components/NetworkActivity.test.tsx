@@ -29,6 +29,9 @@ function renderNetworkActivity() {
 
 describe('NetworkActivity', () => {
   it('loads recent network-wide deposits and withdrawals by default', async () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString()
+
     vi.mocked(listRecentDeposits).mockResolvedValue({
       version: 'v1',
       total: 1,
@@ -39,6 +42,7 @@ describe('NetworkActivity', () => {
         found: true,
         depositId: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         state: 'seen',
+        createdAt: fiveMinutesAgo,
         amount: '100000000',
         baseRecipient: '0x1234567890123456789012345678901234567890',
         txHash: 'e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd',
@@ -57,6 +61,7 @@ describe('NetworkActivity', () => {
         found: true,
         withdrawalId: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         state: 'requested',
+        createdAt: twentyMinutesAgo,
         amount: '100000000',
         feeBps: 50,
         requester: '0x1234567890123456789012345678901234567890',
@@ -76,5 +81,7 @@ describe('NetworkActivity', () => {
     expect(await screen.findByText(/NETWORK DEPOSITS/i)).toBeInTheDocument()
     expect(await screen.findByText(/NETWORK WITHDRAWALS/i)).toBeInTheDocument()
     expect(await screen.findByText('seen - pending 200 confirmations')).toBeInTheDocument()
+    expect(await screen.findByText('5m ago')).toBeInTheDocument()
+    expect(await screen.findByText('20m ago')).toBeInTheDocument()
   })
 })

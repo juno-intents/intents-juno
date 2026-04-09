@@ -29,6 +29,8 @@ function renderRecentActivity() {
 describe('RecentActivity', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString()
 
     vi.mocked(listDeposits).mockResolvedValue({
       version: 'v1',
@@ -40,6 +42,7 @@ describe('RecentActivity', () => {
         found: true,
         depositId: `0x${String(idx + 1).padStart(64, '0')}`,
         state: 'confirmed',
+        createdAt: fiveMinutesAgo,
         amount: '100000000',
         baseRecipient: '0x1234567890123456789012345678901234567890',
         txHash: `0x${String(idx + 11).padStart(64, '0')}`,
@@ -57,6 +60,7 @@ describe('RecentActivity', () => {
         found: true,
         withdrawalId: `0x${String(idx + 21).padStart(64, '0')}`,
         state: 'requested',
+        createdAt: twentyMinutesAgo,
         amount: '100000000',
         feeBps: 50,
         requester: '0x1234567890123456789012345678901234567890',
@@ -70,6 +74,7 @@ describe('RecentActivity', () => {
 
   it('starts at five per section and loads more on demand', async () => {
     const user = userEvent.setup()
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
     renderRecentActivity()
 
     await waitFor(() => {
@@ -95,6 +100,7 @@ describe('RecentActivity', () => {
         found: true,
         depositId: `0x${String(idx + 1).padStart(64, '0')}`,
         state: 'confirmed',
+        createdAt: fiveMinutesAgo,
         amount: '100000000',
         baseRecipient: '0x1234567890123456789012345678901234567890',
         txHash: `0x${String(idx + 11).padStart(64, '0')}`,
@@ -111,5 +117,8 @@ describe('RecentActivity', () => {
         offset: '0',
       })
     })
+
+    expect(screen.getAllByText('5m ago').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('20m ago').length).toBeGreaterThan(0)
   })
 })

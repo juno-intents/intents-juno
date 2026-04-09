@@ -39,6 +39,7 @@ func (r *PostgresWithdrawalReader) Get(ctx context.Context, withdrawalID [32]byt
 		batchState   *int16
 		junoTxID     *string
 		baseTxHash   *string
+		createdAt    time.Time
 	)
 
 	err := r.pool.QueryRow(ctx, `
@@ -52,7 +53,8 @@ func (r *PostgresWithdrawalReader) Get(ctx context.Context, withdrawalID [32]byt
 			wb.batch_id,
 			wb.state,
 			wb.juno_txid,
-			wb.base_tx_hash
+			wb.base_tx_hash,
+			wr.created_at
 		FROM withdrawal_requests wr
 		LEFT JOIN withdrawal_batch_items wbi ON wbi.withdrawal_id = wr.withdrawal_id
 		LEFT JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
@@ -68,6 +70,7 @@ func (r *PostgresWithdrawalReader) Get(ctx context.Context, withdrawalID [32]byt
 		&batchState,
 		&junoTxID,
 		&baseTxHash,
+		&createdAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -97,6 +100,7 @@ func (r *PostgresWithdrawalReader) Get(ctx context.Context, withdrawalID [32]byt
 			RecipientUA: append([]byte(nil), recipientUA...),
 			Expiry:      expiry.UTC(),
 		},
+		CreatedAt: createdAt.UTC(),
 	}
 
 	if batchIDRaw != nil && batchState != nil {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { formatUnits } from 'viem'
 import type { DepositStatus, WithdrawalStatus } from '../api/types'
 import { basescanAddressUrl, basescanTxUrl, junocashTxUrl } from '../lib/bridgeUi'
+import { formatUtcTimestamp } from '../lib/time'
 import CopyIconButton from './CopyIconButton'
 
 interface Props {
@@ -95,6 +96,12 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
         <div className="modal-body">
           {renderField('ID', isDeposit ? d.depositId : w.withdrawalId, { copyable: true })}
           <DetailValue label="Status" value={currentState} statusClass={statusClass} />
+          {((isDeposit ? d.createdAt : w.createdAt) && formatUtcTimestamp(isDeposit ? d.createdAt : w.createdAt)) && (
+            <div className="detail-row">
+              <span className="detail-label">Timestamp</span>
+              <span className="detail-value mono">{formatUtcTimestamp(isDeposit ? d.createdAt : w.createdAt)}</span>
+            </div>
+          )}
           <div className="detail-row">
             <span className="detail-label">Amount</span>
             <span className="detail-value mono">{formatJuno(isDeposit ? d.amount : w.amount)} JUNO</span>

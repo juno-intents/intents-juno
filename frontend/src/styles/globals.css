@@ -33,7 +33,7 @@ a:hover { color: var(--accent-hover); }
   display: flex;
   max-width: 1400px;
   margin: 0 auto;
-  min-height: calc(100vh - 56px);
+  min-height: calc(100vh - 108px);
   gap: 1px;
 }
 
@@ -51,10 +51,10 @@ a:hover { color: var(--accent-hover); }
   overflow-y: auto;
 }
 
-header {
+.site-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px 24px;
   border-bottom: 1px solid var(--border);
   background: rgba(5,5,5,0.95);
@@ -62,14 +62,20 @@ header {
   position: sticky;
   top: 0;
   z-index: 100;
-  height: 56px;
+}
+
+.header-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
 }
 
 .brand {
@@ -93,6 +99,46 @@ header {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.header-wallet-desktop {
+  display: flex;
+  align-items: center;
+}
+
+.header-menu-button {
+  display: none;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border-radius: 12px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.header-menu-button span {
+  width: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text);
+}
+
+.header-network-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mobile-header-menu {
+  display: none;
 }
 
 .secondary-btn,
@@ -661,6 +707,11 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 13px;
   font-weight: 600;
   font-family: var(--mono);
+}
+
+.tx-time {
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .status-pill-sm {
@@ -1296,13 +1347,19 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .panel-left { width: 100%; min-width: auto; border-right: none; border-bottom: 1px solid var(--border); }
+  .layout { min-height: calc(100vh - 128px); }
 }
 
 @media (max-width: 640px) {
-  header {
+  .site-header {
     height: auto;
-    align-items: flex-start;
     gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .header-top-row {
+    width: 100%;
+    align-items: center;
   }
 
   .panel-left,
@@ -1321,14 +1378,52 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
     flex-direction: column;
   }
 
+  .tx-right {
+    width: 100%;
+    align-items: flex-start;
+    text-align: left;
+  }
+
   .asset-input-row {
     align-items: stretch;
     flex-wrap: wrap;
   }
 
   .header-actions {
+    display: none;
+  }
+
+  .header-menu-button {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .header-network-row {
     width: 100%;
-    justify-content: space-between;
+    justify-content: center;
+  }
+
+  .mobile-header-menu {
+    display: grid;
+    gap: 10px;
+    width: 100%;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-card);
+  }
+
+  .mobile-header-item {
+    width: 100%;
+    text-align: left;
+  }
+
+  .mobile-header-wallet {
+    width: 100%;
+  }
+
+  .mobile-header-wallet button {
+    width: 100%;
   }
 
   .deposit-stepper {

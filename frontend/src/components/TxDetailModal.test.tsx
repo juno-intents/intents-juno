@@ -23,6 +23,7 @@ describe('TxDetailModal', () => {
           found: true,
           depositId: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           state: 'seen',
+          createdAt: '2026-04-09T12:34:56Z',
           amount: '100000000',
           baseRecipient: '0x1db445c5fe275aee8c1985efdf887c3ee6392cec',
           txHash: 'e1b3dc82527e18b90bc11bc2d69c7c44fca61e43126fac64e5ecac9d0dd0d4bd',
@@ -47,5 +48,6 @@ describe('TxDetailModal', () => {
 
     await user.click(screen.getAllByRole('button', { name: /copy/i })[0]!)
     expect(await screen.findByText(/Copied/i)).toBeInTheDocument()
+    expect(screen.getByText('2026-04-09 12:34:56 UTC')).toBeInTheDocument()
   })
 })

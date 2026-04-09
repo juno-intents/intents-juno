@@ -25,6 +25,7 @@ export interface DepositStatus {
   found?: boolean
   depositId: string
   state: string
+  createdAt?: string
   amount: string
   baseRecipient: string
   txHash: string
@@ -39,6 +40,7 @@ export interface WithdrawalStatus {
   found?: boolean
   withdrawalId: string
   state: string
+  createdAt?: string
   amount: string
   feeBps: number
   requester: string
