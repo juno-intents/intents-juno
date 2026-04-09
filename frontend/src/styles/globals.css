@@ -132,7 +132,7 @@ a:hover { color: var(--accent-hover); }
 .header-network-row {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 10px;
   flex-wrap: wrap;
 }

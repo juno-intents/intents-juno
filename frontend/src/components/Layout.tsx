@@ -85,7 +85,7 @@ export default function Layout() {
               {chainLabel}
             </span>
           )}
-          <span className="status-pill status-pill-neutral">
+          <span className="status-pill">
             <span className="dot" />
             {runtimeConfig.junoNetworkLabel}
           </span>

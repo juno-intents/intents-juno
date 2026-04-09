@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+import { runtimeConfig } from '../config/runtime'
 import Layout from './Layout'
 
 vi.mock('@rainbow-me/rainbowkit', () => ({
@@ -92,5 +93,13 @@ describe('Layout', () => {
     expect(within(menu).getByRole('button', { name: 'Guide' })).toBeInTheDocument()
     expect(within(menu).getByRole('button', { name: 'Contracts' })).toBeInTheDocument()
     expect(within(menu).getByRole('link', { name: 'Whitepaper' })).toHaveAttribute('href', '/whitepaper.pdf')
+  })
+
+  it('renders the Junocash network pill without the neutral accent styling', () => {
+    renderLayout()
+
+    const pill = screen.getByText(runtimeConfig.junoNetworkLabel).closest('.status-pill')
+    expect(pill).toBeInTheDocument()
+    expect(pill).not.toHaveClass('status-pill-neutral')
   })
 })
