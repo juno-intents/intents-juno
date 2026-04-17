@@ -102,4 +102,13 @@ describe('Layout', () => {
     expect(pill).toBeInTheDocument()
     expect(pill).not.toHaveClass('status-pill-neutral')
   })
+
+  it('shows the bridge maintenance banner with the exact UTC reopen timestamp', () => {
+    renderLayout()
+
+    const banner = screen.getByRole('status')
+    expect(banner).toHaveTextContent('Bridge maintenance in progress')
+    expect(banner).toHaveTextContent('Deposits and withdrawals are paused.')
+    expect(banner).toHaveTextContent('Apr 19, 2026, 18:41 UTC')
+  })
 })
