@@ -351,8 +351,7 @@ async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
         bail!("download ELF from {url} failed with status {}", response.status());
     }
     let bytes = response.bytes().await.context("read ELF body")?.to_vec();
-    fs::write(&cache_path, &bytes)
-        .with_context(|| format!("write cached ELF {}", cache_path.display()))?;
+    write_cache_bytes_atomically(&cache_path, &bytes)?;
     Ok((bytes, url))
 }
 
@@ -397,6 +396,50 @@ fn cache_path_for_url(pipeline: PipelineKind, url: &str) -> PathBuf {
     base_dir.join(format!("{}-{hash:016x}.elf", pipeline.name()))
 }
 
+fn write_cache_bytes_atomically(cache_path: &PathBuf, bytes: &[u8]) -> Result<()> {
+    write_cache_bytes_atomically_with_hook(cache_path, bytes, |_| Ok(()))
+}
+
+fn write_cache_bytes_atomically_with_hook<F>(cache_path: &PathBuf, bytes: &[u8], before_rename: F) -> Result<()>
+where
+    F: FnOnce(&PathBuf) -> Result<()>,
+{
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| anyhow!("cache path missing parent: {}", cache_path.display()))?;
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("cache temp timestamp")?
+        .as_nanos();
+    let temp_path = parent.join(format!(
+        ".{}.{unique_suffix}.tmp",
+        cache_path
+            .file_name()
+            .ok_or_else(|| anyhow!("cache path missing file name: {}", cache_path.display()))?
+            .to_string_lossy()
+    ));
+
+    fs::write(&temp_path, bytes)
+        .with_context(|| format!("write cached ELF temp file {}", temp_path.display()))?;
+
+    let rename_result = (|| -> Result<()> {
+        before_rename(&temp_path)?;
+        fs::rename(&temp_path, cache_path).with_context(|| {
+            format!(
+                "rename cached ELF temp file {} -> {}",
+                temp_path.display(),
+                cache_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if rename_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    rename_result
+}
+
 fn normalize_hex_32(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
     if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -427,6 +470,7 @@ fn write_json<T: Serialize>(value: &T) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::path::PathBuf;
 
     fn dependency_version(contents: &str, dep_name: &str) -> Option<String> {
         contents
@@ -513,6 +557,35 @@ mod tests {
 
         assert_eq!(deposit_a, deposit_b);
         assert_ne!(deposit_a, withdraw);
+    }
+
+    #[test]
+    fn write_cache_bytes_atomically_hides_partial_file_until_rename() {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("sp1-cache-test-{unique_suffix}"));
+        fs::create_dir_all(&base_dir).expect("create temp dir");
+        let cache_path = base_dir.join("withdraw.elf");
+
+        let before_rename = |temp_path: &PathBuf| -> Result<()> {
+            assert!(temp_path.exists(), "temp file should exist before rename");
+            assert!(
+                !cache_path.exists(),
+                "final cache path must stay hidden until rename completes"
+            );
+            Ok(())
+        };
+
+        write_cache_bytes_atomically_with_hook(&cache_path, b"elf-bytes", before_rename)
+            .expect("atomic cache write");
+
+        let written = fs::read(&cache_path).expect("read cached file");
+        assert_eq!(written, b"elf-bytes");
+
+        fs::remove_file(&cache_path).expect("remove cached file");
+        fs::remove_dir(&base_dir).expect("remove temp dir");
     }
 
     #[test]
