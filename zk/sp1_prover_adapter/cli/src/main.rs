@@ -1,12 +1,12 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sp1_prover::worker::SP1LightNode;
 use sp1_sdk::network::signer::NetworkSigner;
 use sp1_sdk::network::{
-    proto::{types::ProofMode, GetProofRequestParamsResponse},
     Address, FulfillmentStrategy, NetworkClient, NetworkMode,
+    proto::{GetProofRequestParamsResponse, types::ProofMode},
 };
 use sp1_sdk::prelude::*;
 use sp1_sdk::{NetworkProver, ProverClient, ProvingKey, SP1Context, SP1ProofMode};
@@ -22,6 +22,7 @@ const VERSION_SP1_BALANCE_RESPONSE: &str = "sp1.balance.response.v1";
 const VERSION_PROVER_REQUEST: &str = "prover.request.v1";
 const VERSION_PROVER_RESPONSE: &str = "prover.response.v1";
 const DEFAULT_NETWORK_GAS_LIMIT: u64 = 1_000_000_000;
+const DEFAULT_GAS_LIMIT_HEADROOM_BPS: u64 = 1_000;
 
 #[derive(Clone, Copy)]
 enum PipelineKind {
@@ -136,7 +137,8 @@ async fn handle_balance_request(_req: BalanceRequest) -> Result<()> {
 async fn handle_prover_request(req: ProverRequest) -> Result<()> {
     let image_id = normalize_hex_32(&req.image_id)?;
     let journal = decode_hex_bytes(&req.journal).context("decode prover journal")?;
-    let private_input = decode_hex_bytes(&req.private_input).context("decode prover private_input")?;
+    let private_input =
+        decode_hex_bytes(&req.private_input).context("decode prover private_input")?;
 
     let pipeline = pipeline_for_image_id(&image_id)?;
     let response = match prove_once(pipeline, &image_id, journal.as_slice(), private_input).await {
@@ -193,6 +195,7 @@ async fn prove_once(
     stdin.write_vec(private_input);
 
     let gas_limit_cap = read_pipeline_max_gas_limit(pipeline)?;
+    let gas_limit_headroom_bps = read_pipeline_gas_limit_headroom_bps(pipeline)?;
     let (simulated_cycle_limit, simulated_gas_limit, committed_value_digest) =
         simulate_execution_limits(proving_key.elf(), &stdin).await?;
     let (cycle_limit, gas_limit, public_values_hash) = resolve_execution_limits(
@@ -200,6 +203,7 @@ async fn prove_once(
         simulated_gas_limit,
         committed_value_digest,
         gas_limit_cap,
+        gas_limit_headroom_bps,
     );
     let min_auction_period = read_u64_env("SP1_MIN_AUCTION_PERIOD", 1)?;
     let auction_timeout = Duration::from_secs(read_u64_env("SP1_AUCTION_TIMEOUT_SECONDS", 300)?);
@@ -212,6 +216,16 @@ async fn prove_once(
             pipeline.name(),
             max_gas_limit
         );
+    } else if let Some(simulated_gas_limit) = simulated_gas_limit {
+        if gas_limit_headroom_bps > 0 {
+            eprintln!(
+                "applying SP1 gas limit headroom for {} pipeline: simulated={} padded={} headroom_bps={}",
+                pipeline.name(),
+                simulated_gas_limit,
+                gas_limit,
+                gas_limit_headroom_bps
+            );
+        }
     }
 
     let params = prover
@@ -394,7 +408,11 @@ async fn simulate_execution_limits(
 ) -> Result<(u64, Option<u64>, Vec<u8>)> {
     let execute_result = SP1LightNode::new()
         .await
-        .execute(elf, stdin.clone(), SP1Context::builder().calculate_gas(true).build())
+        .execute(
+            elf,
+            stdin.clone(),
+            SP1Context::builder().calculate_gas(true).build(),
+        )
         .await
         .context("sp1 simulation failed")?;
     let (_, committed_value_digest, report) = execute_result;
@@ -410,12 +428,25 @@ fn resolve_execution_limits(
     simulated_gas_limit: Option<u64>,
     simulated_public_values_hash: Vec<u8>,
     gas_limit_override: Option<u64>,
+    gas_limit_headroom_bps: u64,
 ) -> (u64, u64, Vec<u8>) {
     (
         simulated_cycle_limit,
-        gas_limit_override.unwrap_or_else(|| simulated_gas_limit.unwrap_or(DEFAULT_NETWORK_GAS_LIMIT)),
+        gas_limit_override.unwrap_or_else(|| {
+            simulated_gas_limit
+                .map(|gas| apply_gas_limit_headroom(gas, gas_limit_headroom_bps))
+                .unwrap_or(DEFAULT_NETWORK_GAS_LIMIT)
+        }),
         simulated_public_values_hash,
     )
+}
+
+fn apply_gas_limit_headroom(gas_limit: u64, headroom_bps: u64) -> u64 {
+    if gas_limit == 0 || headroom_bps == 0 {
+        return gas_limit;
+    }
+    let extra = gas_limit.saturating_mul(headroom_bps).saturating_add(9_999) / 10_000;
+    gas_limit.saturating_add(extra)
 }
 
 fn address_from_bytes(bytes: &[u8]) -> Result<Address> {
@@ -429,7 +460,10 @@ fn read_pipeline_max_gas_limit(pipeline: PipelineKind) -> Result<Option<u64>> {
     read_pipeline_max_gas_limit_from(pipeline, |name| read_env_nonempty(name))
 }
 
-fn read_pipeline_max_gas_limit_from<F>(pipeline: PipelineKind, mut read_env: F) -> Result<Option<u64>>
+fn read_pipeline_max_gas_limit_from<F>(
+    pipeline: PipelineKind,
+    mut read_env: F,
+) -> Result<Option<u64>>
 where
     F: FnMut(&str) -> Option<String>,
 {
@@ -443,6 +477,30 @@ where
     read_optional_u64_env_from("SP1_MAX_GAS_LIMIT", read_env)
 }
 
+fn read_pipeline_gas_limit_headroom_bps(pipeline: PipelineKind) -> Result<u64> {
+    read_pipeline_gas_limit_headroom_bps_from(pipeline, |name| read_env_nonempty(name))
+}
+
+fn read_pipeline_gas_limit_headroom_bps_from<F>(
+    pipeline: PipelineKind,
+    mut read_env: F,
+) -> Result<u64>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let specific_name = match pipeline {
+        PipelineKind::Deposit => "SP1_DEPOSIT_GAS_LIMIT_HEADROOM_BPS",
+        PipelineKind::Withdraw => "SP1_WITHDRAW_GAS_LIMIT_HEADROOM_BPS",
+    };
+    if let Some(value) = read_optional_u64_env_from(specific_name, &mut read_env)? {
+        return Ok(value);
+    }
+    Ok(
+        read_optional_u64_env_from("SP1_GAS_LIMIT_HEADROOM_BPS", read_env)?
+            .unwrap_or(DEFAULT_GAS_LIMIT_HEADROOM_BPS),
+    )
+}
+
 async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
     if let Some(path) = pipeline_env_path(pipeline)? {
         let bytes = fs::read(&path).with_context(|| format!("read ELF path {}", path.display()))?;
@@ -451,13 +509,14 @@ async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
     let url = pipeline_env_url(pipeline)?;
     let cache_path = cache_path_for_url(pipeline, &url);
     if cache_path.exists() {
-        let bytes =
-            fs::read(&cache_path).with_context(|| format!("read cached ELF {}", cache_path.display()))?;
+        let bytes = fs::read(&cache_path)
+            .with_context(|| format!("read cached ELF {}", cache_path.display()))?;
         return Ok((bytes, url));
     }
 
     if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create cache dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create cache dir {}", parent.display()))?;
     }
 
     let client = Client::builder()
@@ -470,7 +529,10 @@ async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
         .await
         .with_context(|| format!("download ELF from {url}"))?;
     if !response.status().is_success() {
-        bail!("download ELF from {url} failed with status {}", response.status());
+        bail!(
+            "download ELF from {url} failed with status {}",
+            response.status()
+        );
     }
     let bytes = response.bytes().await.context("read ELF body")?.to_vec();
     write_cache_bytes_atomically(&cache_path, &bytes)?;
@@ -522,7 +584,11 @@ fn write_cache_bytes_atomically(cache_path: &PathBuf, bytes: &[u8]) -> Result<()
     write_cache_bytes_atomically_with_hook(cache_path, bytes, |_| Ok(()))
 }
 
-fn write_cache_bytes_atomically_with_hook<F>(cache_path: &PathBuf, bytes: &[u8], before_rename: F) -> Result<()>
+fn write_cache_bytes_atomically_with_hook<F>(
+    cache_path: &PathBuf,
+    bytes: &[u8],
+    before_rename: F,
+) -> Result<()>
 where
     F: FnOnce(&PathBuf) -> Result<()>,
 {
@@ -584,7 +650,9 @@ fn encode_hex(data: &[u8]) -> String {
 
 fn write_json<T: Serialize>(value: &T) -> Result<()> {
     serde_json::to_writer(std::io::stdout(), value).context("encode response json")?;
-    std::io::stdout().write_all(b"\n").context("write response newline")?;
+    std::io::stdout()
+        .write_all(b"\n")
+        .context("write response newline")?;
     Ok(())
 }
 
@@ -612,7 +680,10 @@ mod tests {
         for line in contents.lines().map(str::trim) {
             if line == "[[package]]" {
                 if let (Some(name), Some(version)) = (current_name.take(), current_version.take()) {
-                    versions.entry(name).or_insert_with(BTreeSet::new).insert(version);
+                    versions
+                        .entry(name)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(version);
                 }
                 continue;
             }
@@ -632,7 +703,10 @@ mod tests {
         }
 
         if let (Some(name), Some(version)) = (current_name.take(), current_version.take()) {
-            versions.entry(name).or_insert_with(BTreeSet::new).insert(version);
+            versions
+                .entry(name)
+                .or_insert_with(BTreeSet::new)
+                .insert(version);
         }
 
         versions
@@ -732,8 +806,8 @@ mod tests {
     #[test]
     fn read_required_private_key_errors_when_missing() {
         let envs: HashMap<&str, String> = HashMap::new();
-        let err =
-            read_required_private_key_from(|name| envs.get(name).cloned()).expect_err("missing key");
+        let err = read_required_private_key_from(|name| envs.get(name).cloned())
+            .expect_err("missing key");
         assert!(err.to_string().contains("NETWORK_PRIVATE_KEY is required"));
     }
 
@@ -757,7 +831,7 @@ mod tests {
     #[test]
     fn resolve_execution_limits_prefers_pipeline_gas_cap_and_keeps_public_values_hash() {
         let (cycles, gas, public_values_hash) =
-            resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], Some(444));
+            resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], Some(444), 1_000);
 
         assert_eq!(cycles, 12345);
         assert_eq!(gas, 444);
@@ -765,8 +839,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_execution_limits_uses_simulated_gas_when_no_override_is_present() {
-        let (_, gas, _) = resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], None);
+    fn resolve_execution_limits_applies_gas_headroom_when_no_override_is_present() {
+        let (_, gas, _) = resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], None, 1_000);
+        assert_eq!(gas, 74679);
+    }
+
+    #[test]
+    fn resolve_execution_limits_uses_simulated_gas_when_headroom_is_zero() {
+        let (_, gas, _) = resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], None, 0);
         assert_eq!(gas, 67890);
     }
 
@@ -776,9 +856,10 @@ mod tests {
         envs.insert("SP1_MAX_GAS_LIMIT", "1000000".to_owned());
         envs.insert("SP1_DEPOSIT_MAX_GAS_LIMIT", "123456".to_owned());
 
-        let got = read_pipeline_max_gas_limit_from(PipelineKind::Deposit, |name| envs.get(name).cloned())
-            .expect("resolve pipeline-specific gas limit")
-            .expect("gas limit should be set");
+        let got =
+            read_pipeline_max_gas_limit_from(PipelineKind::Deposit, |name| envs.get(name).cloned())
+                .expect("resolve pipeline-specific gas limit")
+                .expect("gas limit should be set");
         assert_eq!(got, 123456);
     }
 
@@ -787,9 +868,11 @@ mod tests {
         let mut envs = HashMap::new();
         envs.insert("SP1_MAX_GAS_LIMIT", "7654321".to_owned());
 
-        let got = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| envs.get(name).cloned())
-            .expect("resolve global gas limit")
-            .expect("gas limit should be set");
+        let got = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| {
+            envs.get(name).cloned()
+        })
+        .expect("resolve global gas limit")
+        .expect("gas limit should be set");
         assert_eq!(got, 7654321);
     }
 
@@ -798,9 +881,65 @@ mod tests {
         let mut envs = HashMap::new();
         envs.insert("SP1_WITHDRAW_MAX_GAS_LIMIT", "not-a-number".to_owned());
 
-        let err = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| envs.get(name).cloned())
-            .expect_err("invalid gas limit should error");
+        let err = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| {
+            envs.get(name).cloned()
+        })
+        .expect_err("invalid gas limit should error");
         assert!(err.to_string().contains("SP1_WITHDRAW_MAX_GAS_LIMIT"));
+    }
+
+    #[test]
+    fn read_pipeline_gas_limit_headroom_prefers_pipeline_specific_value() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_GAS_LIMIT_HEADROOM_BPS", "400".to_owned());
+        envs.insert("SP1_WITHDRAW_GAS_LIMIT_HEADROOM_BPS", "750".to_owned());
+
+        let got = read_pipeline_gas_limit_headroom_bps_from(PipelineKind::Withdraw, |name| {
+            envs.get(name).cloned()
+        })
+        .expect("resolve pipeline-specific gas headroom");
+        assert_eq!(got, 750);
+    }
+
+    #[test]
+    fn read_pipeline_gas_limit_headroom_uses_global_fallback() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_GAS_LIMIT_HEADROOM_BPS", "650".to_owned());
+
+        let got = read_pipeline_gas_limit_headroom_bps_from(PipelineKind::Deposit, |name| {
+            envs.get(name).cloned()
+        })
+        .expect("resolve global gas headroom");
+        assert_eq!(got, 650);
+    }
+
+    #[test]
+    fn read_pipeline_gas_limit_headroom_defaults_when_unset() {
+        let envs: HashMap<&str, String> = HashMap::new();
+
+        let got = read_pipeline_gas_limit_headroom_bps_from(PipelineKind::Deposit, |name| {
+            envs.get(name).cloned()
+        })
+        .expect("resolve default gas headroom");
+        assert_eq!(got, DEFAULT_GAS_LIMIT_HEADROOM_BPS);
+    }
+
+    #[test]
+    fn read_pipeline_gas_limit_headroom_rejects_invalid_values() {
+        let mut envs = HashMap::new();
+        envs.insert(
+            "SP1_WITHDRAW_GAS_LIMIT_HEADROOM_BPS",
+            "not-a-number".to_owned(),
+        );
+
+        let err = read_pipeline_gas_limit_headroom_bps_from(PipelineKind::Withdraw, |name| {
+            envs.get(name).cloned()
+        })
+        .expect_err("invalid gas headroom should error");
+        assert!(
+            err.to_string()
+                .contains("SP1_WITHDRAW_GAS_LIMIT_HEADROOM_BPS")
+        );
     }
 
     #[test]
@@ -858,12 +997,18 @@ mod tests {
         let mismatches: Vec<String> = versions
             .into_iter()
             .filter(|(name, _)| {
-                (name.starts_with("sp1-") || name.starts_with("slop-")) && name != "sp1-prover-adapter"
+                (name.starts_with("sp1-") || name.starts_with("slop-"))
+                    && name != "sp1-prover-adapter"
             })
             .filter(|(_, found_versions)| {
                 found_versions.len() != 1 || !found_versions.contains("6.0.2")
             })
-            .map(|(name, found_versions)| format!("{name}={}", found_versions.into_iter().collect::<Vec<_>>().join(",")))
+            .map(|(name, found_versions)| {
+                format!(
+                    "{name}={}",
+                    found_versions.into_iter().collect::<Vec<_>>().join(",")
+                )
+            })
             .collect();
 
         assert!(
