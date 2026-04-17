@@ -6575,6 +6575,7 @@ dependencies = [
  "sp1-prover",
  "sp1-sdk",
  "tokio",
+ "tonic",
 ]
 
 [[package]]

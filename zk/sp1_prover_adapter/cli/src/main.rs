@@ -6,7 +6,10 @@ use sp1_prover::worker::SP1LightNode;
 use sp1_sdk::network::signer::NetworkSigner;
 use sp1_sdk::network::{
     Address, FulfillmentStrategy, NetworkClient, NetworkMode,
-    proto::{GetProofRequestParamsResponse, types::ProofMode},
+    proto::{
+        GetProofRequestParamsResponse, auction_network::prover_network_client::ProverNetworkClient,
+        auction_types::GetProversByUptimeRequest, types::ProofMode,
+    },
 };
 use sp1_sdk::prelude::*;
 use sp1_sdk::{NetworkProver, ProverClient, ProvingKey, SP1Context, SP1ProofMode};
@@ -16,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use tonic::transport::{ClientTlsConfig, Endpoint};
 
 const VERSION_SP1_BALANCE_REQUEST: &str = "sp1.balance.request.v1";
 const VERSION_SP1_BALANCE_RESPONSE: &str = "sp1.balance.response.v1";
@@ -176,7 +180,9 @@ async fn prove_once(
 ) -> Result<(Vec<u8>, String)> {
     let (elf_bytes, program_source) = load_program_elf(pipeline).await?;
     let prover = build_network_prover().await?;
-    let client = build_network_client()?;
+    let network_rpc_url =
+        read_network_rpc_url().unwrap_or_else(|| "https://rpc.mainnet.succinct.xyz".to_owned());
+    let client = build_network_client_with_rpc_url(network_rpc_url.clone())?;
 
     let proving_key = prover
         .setup(elf_bytes.into())
@@ -253,35 +259,70 @@ async fn prove_once(
         actual_vkey
     );
 
-    let response = client
-        .request_proof(
-            request_vk_hash,
-            &stdin,
-            ProofMode::Groth16,
-            &request_version,
-            FulfillmentStrategy::Auction,
-            request_timeout.as_secs(),
-            cycle_limit,
-            gas_limit,
-            min_auction_period,
-            None,
-            address_from_bytes(&params.auctioneer)?,
-            address_from_bytes(&params.executor)?,
-            address_from_bytes(&params.verifier)?,
-            address_from_bytes(&params.treasury)?,
-            Some(public_values_hash),
-            base_fee,
-            max_price_per_pgu,
-            params.domain.clone(),
-        )
-        .await
-        .context("sp1 request proof failed")?;
+    let strategy = FulfillmentStrategy::Auction;
+    let auctioneer = address_from_bytes(&params.auctioneer)?;
+    let executor = address_from_bytes(&params.executor)?;
+    let verifier = address_from_bytes(&params.verifier)?;
+    let treasury = address_from_bytes(&params.treasury)?;
+    let mut whitelist: Option<Vec<Address>> = None;
 
-    let request_id = sp1_sdk::network::B256::from_slice(response.request_id());
-    let proof = prover
-        .wait_proof(request_id, Some(request_timeout), Some(auction_timeout))
-        .await
-        .context("sp1 network groth16 prove failed")?;
+    let proof = loop {
+        let response = client
+            .request_proof(
+                request_vk_hash,
+                &stdin,
+                ProofMode::Groth16,
+                &request_version,
+                strategy,
+                request_timeout.as_secs(),
+                cycle_limit,
+                gas_limit,
+                min_auction_period,
+                whitelist.clone(),
+                auctioneer,
+                executor,
+                verifier,
+                treasury,
+                Some(public_values_hash.clone()),
+                base_fee,
+                max_price_per_pgu,
+                params.domain.clone(),
+            )
+            .await
+            .context("sp1 request proof failed")?;
+
+        let request_id = sp1_sdk::network::B256::from_slice(response.request_id());
+        match prover
+            .wait_proof(request_id, Some(request_timeout), Some(auction_timeout))
+            .await
+        {
+            Ok(proof) => break proof,
+            Err(err)
+                if should_retry_with_fallback_whitelist(
+                    &err,
+                    NetworkMode::Mainnet,
+                    strategy,
+                    whitelist.as_deref(),
+                ) =>
+            {
+                let fallback_whitelist = fetch_high_availability_provers(&network_rpc_url)
+                    .await
+                    .context("fetch fallback high availability provers")?;
+                if fallback_whitelist.is_empty() {
+                    return Err(err).context("sp1 network groth16 prove failed");
+                }
+                eprintln!(
+                    "retrying {} proof request {} with {} fallback high-availability provers after {}",
+                    pipeline.name(),
+                    request_id,
+                    fallback_whitelist.len(),
+                    err
+                );
+                whitelist = Some(fallback_whitelist);
+            }
+            Err(err) => return Err(err).context("sp1 network groth16 prove failed"),
+        }
+    };
 
     let public_values = proof.public_values.to_vec();
     if public_values != expected_journal {
@@ -309,10 +350,10 @@ async fn build_network_prover() -> Result<NetworkProver> {
     Ok(builder.build().await)
 }
 
-fn build_network_client() -> Result<NetworkClient> {
+fn build_network_client_with_rpc_url(rpc_url: String) -> Result<NetworkClient> {
     Ok(NetworkClient::new(
         build_network_signer()?,
-        read_network_rpc_url().unwrap_or_else(|| "https://rpc.mainnet.succinct.xyz".to_owned()),
+        rpc_url,
         NetworkMode::Mainnet,
     ))
 }
@@ -328,6 +369,73 @@ fn read_required_private_key() -> Result<String> {
 
 fn render_error_chain(err: &anyhow::Error) -> String {
     format!("{err:#}")
+}
+
+fn should_retry_with_fallback_whitelist(
+    err: &anyhow::Error,
+    network_mode: NetworkMode,
+    strategy: FulfillmentStrategy,
+    whitelist: Option<&[Address]>,
+) -> bool {
+    if network_mode != NetworkMode::Mainnet
+        || strategy != FulfillmentStrategy::Auction
+        || whitelist.is_some()
+    {
+        return false;
+    }
+    matches!(
+        err.downcast_ref::<sp1_sdk::network::Error>(),
+        Some(
+            sp1_sdk::network::Error::RequestUnfulfillable { .. }
+                | sp1_sdk::network::Error::RequestTimedOut { .. }
+                | sp1_sdk::network::Error::RequestAuctionTimedOut { .. }
+        )
+    )
+}
+
+async fn fetch_high_availability_provers(rpc_url: &str) -> Result<Vec<Address>> {
+    let channel = configure_grpc_endpoint(rpc_url)?
+        .connect()
+        .await
+        .with_context(|| format!("connect fallback prover client to {rpc_url}"))?;
+    let mut rpc = ProverNetworkClient::new(channel);
+    let response = rpc
+        .get_provers_by_uptime(GetProversByUptimeRequest {
+            high_availability_only: true,
+        })
+        .await
+        .context("get high availability provers")?;
+    decode_prover_addresses(response.into_inner().provers)
+}
+
+fn decode_prover_addresses(raw_provers: Vec<Vec<u8>>) -> Result<Vec<Address>> {
+    raw_provers
+        .into_iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            address_from_bytes(&bytes).with_context(|| format!("decode fallback prover #{index}"))
+        })
+        .collect()
+}
+
+fn configure_grpc_endpoint(addr: &str) -> Result<Endpoint> {
+    let mut endpoint = Endpoint::new(addr.to_owned())
+        .with_context(|| format!("invalid gRPC endpoint {addr}"))?
+        .timeout(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(15))
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(Duration::from_secs(15))
+        .keep_alive_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .tcp_nodelay(true);
+
+    if addr.starts_with("https://") {
+        endpoint = endpoint
+            .tls_config(ClientTlsConfig::new().with_webpki_roots())
+            .with_context(|| format!("configure TLS for {addr}"))?;
+    }
+
+    Ok(endpoint)
 }
 
 fn read_required_private_key_from<F>(mut read_env: F) -> Result<String>
@@ -948,6 +1056,68 @@ mod tests {
         let rendered = render_error_chain(&err);
         assert!(rendered.contains("outer error"));
         assert!(rendered.contains("inner error"));
+    }
+
+    #[test]
+    fn retry_gate_matches_mainnet_auction_unfulfillable_without_whitelist() {
+        let err = anyhow::Error::new(sp1_sdk::network::Error::RequestUnfulfillable {
+            request_id: vec![1, 2, 3],
+        });
+
+        assert!(should_retry_with_fallback_whitelist(
+            &err,
+            NetworkMode::Mainnet,
+            FulfillmentStrategy::Auction,
+            None,
+        ));
+    }
+
+    #[test]
+    fn retry_gate_rejects_non_retryable_error_classes() {
+        let err = anyhow::Error::new(sp1_sdk::network::Error::RequestUnexecutable {
+            request_id: vec![1, 2, 3],
+        });
+
+        assert!(!should_retry_with_fallback_whitelist(
+            &err,
+            NetworkMode::Mainnet,
+            FulfillmentStrategy::Auction,
+            None,
+        ));
+    }
+
+    #[test]
+    fn retry_gate_rejects_existing_whitelist_and_non_mainnet_paths() {
+        let err = anyhow::Error::new(sp1_sdk::network::Error::RequestTimedOut {
+            request_id: vec![1, 2, 3],
+        });
+        let existing_whitelist = [Address::from_slice(&[7u8; 20])];
+
+        assert!(!should_retry_with_fallback_whitelist(
+            &err,
+            NetworkMode::Mainnet,
+            FulfillmentStrategy::Auction,
+            Some(&existing_whitelist),
+        ));
+        assert!(!should_retry_with_fallback_whitelist(
+            &err,
+            NetworkMode::Reserved,
+            FulfillmentStrategy::Auction,
+            None,
+        ));
+        assert!(!should_retry_with_fallback_whitelist(
+            &err,
+            NetworkMode::Mainnet,
+            FulfillmentStrategy::Hosted,
+            None,
+        ));
+    }
+
+    #[test]
+    fn decode_prover_addresses_rejects_invalid_address_lengths() {
+        let err = decode_prover_addresses(vec![vec![1, 2, 3]])
+            .expect_err("invalid fallback prover address should fail");
+        assert!(err.to_string().contains("decode fallback prover #0"));
     }
 
     #[test]
