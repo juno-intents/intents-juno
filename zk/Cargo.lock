@@ -6448,9 +6448,9 @@ dependencies = [
 
 [[package]]
 name = "sp1-lib"
-version = "6.0.2"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "517e820776910468611149dda66791bdb700c1b7d68b96f0ea2e604f00ad8771"
+checksum = "9b96392c1b1c197beaa6b0806099a8d73643a09d5ac0874e26c9c5153a7fcb4c"
 dependencies = [
  "bincode",
  "serde",
@@ -6793,9 +6793,9 @@ dependencies = [
 
 [[package]]
 name = "sp1-zkvm"
-version = "6.0.2"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45aa8c53b0332dcce1f588185df97e8ed9e7a6b37b0c6584f29674017628831f"
+checksum = "d31a7c3f072f248342284031684c9195e2264422964129c3b8652f9196ecc937"
 dependencies = [
  "cfg-if",
  "critical-section",

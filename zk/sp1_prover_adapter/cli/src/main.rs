@@ -1179,8 +1179,6 @@ mod tests {
             .filter(|(name, _)| {
                 (name.starts_with("sp1-") || name.starts_with("slop-"))
                     && name != "sp1-prover-adapter"
-                    && name != "sp1-lib"
-                    && name != "sp1-zkvm"
             })
             .filter(|(_, found_versions)| {
                 found_versions.len() != 1 || !found_versions.contains(expected_version.as_str())
@@ -1198,6 +1196,42 @@ mod tests {
             "expected SP1/slop toolchain lockfile to stay on {}, found mismatches: {}",
             expected_version,
             mismatches.join("; ")
+        );
+    }
+
+    #[test]
+    fn guest_release_line_matches_adapter_release_line() {
+        let expected_version = sp1_sdk::SP1_CIRCUIT_VERSION
+            .trim()
+            .trim_start_matches('v')
+            .to_owned();
+        let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
+        let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
+
+        let deposit_version =
+            dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version");
+        let withdraw_version = dependency_version(withdraw_guest, "sp1-zkvm")
+            .expect("withdraw guest sp1-zkvm version");
+
+        assert_eq!(deposit_version, expected_version);
+        assert_eq!(withdraw_version, expected_version);
+    }
+
+    #[test]
+    fn bridge_guest_release_workflow_pins_sp1_toolchain_to_adapter_release_line() {
+        let expected_version = format!(
+            "sp1up --version v{}",
+            sp1_sdk::SP1_CIRCUIT_VERSION
+                .trim()
+                .trim_start_matches('v')
+                .to_owned()
+        );
+        let workflow =
+            include_str!("../../../../.github/workflows/release-bridge-guest-programs.yml");
+
+        assert!(
+            workflow.contains(&expected_version),
+            "expected bridge guest release workflow to pin SP1 toolchain with `{expected_version}`"
         );
     }
 }
