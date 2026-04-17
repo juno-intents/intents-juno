@@ -2,13 +2,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sp1_prover::worker::SP1LightNode;
 use sp1_sdk::network::signer::NetworkSigner;
 use sp1_sdk::network::{
     proto::{types::ProofMode, GetProofRequestParamsResponse},
     Address, FulfillmentStrategy, NetworkClient, NetworkMode,
 };
 use sp1_sdk::prelude::*;
-use sp1_sdk::{NetworkProver, ProverClient, ProvingKey, SP1ProofMode};
+use sp1_sdk::{NetworkProver, ProverClient, ProvingKey, SP1Context, SP1ProofMode};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -192,15 +193,12 @@ async fn prove_once(
     stdin.write_vec(private_input);
 
     let gas_limit_cap = read_pipeline_max_gas_limit(pipeline)?;
-    let (public_values, report) = prover
-        .execute(proving_key.elf().clone(), stdin.clone())
-        .calculate_gas(true)
-        .await
-        .context("sp1 simulation failed")?;
+    let (simulated_cycle_limit, simulated_gas_limit, committed_value_digest) =
+        simulate_execution_limits(proving_key.elf(), &stdin).await?;
     let (cycle_limit, gas_limit, public_values_hash) = resolve_execution_limits(
-        report.total_instruction_count(),
-        report.gas(),
-        public_values.hash(),
+        simulated_cycle_limit,
+        simulated_gas_limit,
+        committed_value_digest,
         gas_limit_cap,
     );
     let min_auction_period = read_u64_env("SP1_MIN_AUCTION_PERIOD", 1)?;
@@ -388,6 +386,23 @@ where
 {
     read_env("SP1_REQUEST_CIRCUIT_VERSION")
         .unwrap_or_else(|| sp1_sdk::SP1_CIRCUIT_VERSION.trim().to_owned())
+}
+
+async fn simulate_execution_limits(
+    elf: &[u8],
+    stdin: &SP1Stdin,
+) -> Result<(u64, Option<u64>, Vec<u8>)> {
+    let execute_result = SP1LightNode::new()
+        .await
+        .execute(elf, stdin.clone(), SP1Context::builder().calculate_gas(true).build())
+        .await
+        .context("sp1 simulation failed")?;
+    let (_, committed_value_digest, report) = execute_result;
+    Ok((
+        report.total_instruction_count(),
+        report.gas(),
+        committed_value_digest.to_vec(),
+    ))
 }
 
 fn resolve_execution_limits(
@@ -802,6 +817,19 @@ mod tests {
         assert!(
             source.contains(".register_program("),
             "compat request path must register the program before requesting proof"
+        );
+    }
+
+    #[test]
+    fn compat_request_path_uses_committed_value_digest_for_public_values_hash() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+        assert!(
+            production_source.contains("committed_value_digest.to_vec()"),
+            "compat request path must submit the committed-value digest from execution"
         );
     }
 
