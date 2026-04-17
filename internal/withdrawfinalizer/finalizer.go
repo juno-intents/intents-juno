@@ -201,23 +201,19 @@ func (f *Finalizer) WithPauseChecker(pc PauseChecker) *Finalizer {
 }
 
 func (f *Finalizer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
-	cp := pkg.Checkpoint
-	if err := f.validateCheckpointPackage(pkg); err != nil {
+	updated, err := f.applyCheckpointPackage(pkg)
+	if err != nil {
 		return err
 	}
-
-	// Only move forward in height to avoid accidental reorg/rollback usage.
-	if f.checkpoint != nil && cp.Height <= f.checkpoint.Height {
+	if !updated {
 		return nil
 	}
+	cp := pkg.Checkpoint
 	if checkpointStore, ok := f.store.(checkpointPersistenceStore); ok {
 		if err := checkpointStore.StoreFinalizerCheckpoint(ctx, cp, pkg.OperatorSignatures); err != nil {
 			return err
 		}
 	}
-
-	f.checkpoint = &cp
-	f.opSigs = cloneOperatorSignatures(pkg.OperatorSignatures)
 
 	f.log.Info("updated checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
 	return f.Tick(ctx)
@@ -242,13 +238,62 @@ func (f *Finalizer) RestoreCheckpoint(ctx context.Context) error {
 		Checkpoint:         cp,
 		OperatorSignatures: operatorSigs,
 	}
-	if err := f.validateCheckpointPackage(pkg); err != nil {
+	updated, err := f.applyCheckpointPackage(pkg)
+	if err != nil {
 		return err
 	}
-	f.checkpoint = &cp
-	f.opSigs = cloneOperatorSignatures(operatorSigs)
-	f.log.Info("restored checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
+	if updated {
+		f.log.Info("restored checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
+	}
 	return nil
+}
+
+func (f *Finalizer) restoreCheckpointFromStore(ctx context.Context) error {
+	if f == nil {
+		return fmt.Errorf("%w: nil finalizer", ErrInvalidConfig)
+	}
+	checkpointStore, ok := f.store.(checkpointPersistenceStore)
+	if !ok {
+		return nil
+	}
+	cp, operatorSigs, ok, err := checkpointStore.LoadFinalizerCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	pkg := CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: operatorSigs,
+	}
+	hadCheckpoint := f.checkpoint != nil
+	updated, err := f.applyCheckpointPackage(pkg)
+	if err != nil {
+		return err
+	}
+	if updated {
+		msg := "restored checkpoint"
+		if hadCheckpoint {
+			msg = "updated checkpoint from store"
+		}
+		f.log.Info(msg, "height", cp.Height, "digest", checkpoint.Digest(cp))
+	}
+	return nil
+}
+
+func (f *Finalizer) applyCheckpointPackage(pkg CheckpointPackage) (bool, error) {
+	cp := pkg.Checkpoint
+	if err := f.validateCheckpointPackage(pkg); err != nil {
+		return false, err
+	}
+	// Only move forward in height to avoid accidental reorg/rollback usage.
+	if f.checkpoint != nil && cp.Height <= f.checkpoint.Height {
+		return false, nil
+	}
+	f.checkpoint = &cp
+	f.opSigs = cloneOperatorSignatures(pkg.OperatorSignatures)
+	return true, nil
 }
 
 func (f *Finalizer) validateCheckpointPackage(pkg CheckpointPackage) error {
@@ -276,6 +321,9 @@ func cloneOperatorSignatures(operatorSignatures [][]byte) [][]byte {
 func (f *Finalizer) Tick(ctx context.Context) error {
 	if f == nil || f.store == nil {
 		return fmt.Errorf("%w: nil finalizer", ErrInvalidConfig)
+	}
+	if err := f.restoreCheckpointFromStore(ctx); err != nil {
+		return err
 	}
 	if f.checkpoint == nil || len(f.opSigs) == 0 {
 		return nil

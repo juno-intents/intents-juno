@@ -413,6 +413,74 @@ func TestFinalizer_RestoreCheckpointLoadsPersistedPackage(t *testing.T) {
 	}
 }
 
+func TestFinalizer_TickRefreshesCheckpointFromStore(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 27, 13, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+
+	initialCP := checkpoint.Checkpoint{
+		Height:           42,
+		BlockHash:        common.HexToHash("0x1234"),
+		FinalOrchardRoot: common.HexToHash("0x5678"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+	}
+	operatorAddrs, initialSigs := mustSignedCheckpoint(t, initialCP)
+	if err := store.StoreFinalizerCheckpoint(context.Background(), initialCP, initialSigs); err != nil {
+		t.Fatalf("StoreFinalizerCheckpoint initial: %v", err)
+	}
+
+	f, err := New(Config{
+		Owner:               "finalizer-a",
+		LeaseTTL:            30 * time.Second,
+		LeaseRenewInterval:  10 * time.Second,
+		MaxBatches:          1,
+		BaseChainID:         initialCP.BaseChainID,
+		BridgeAddress:       initialCP.BridgeContract,
+		WithdrawImageID:     common.HexToHash("0x99"),
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   1,
+		ProofRequestTimeout: time.Minute,
+	}, store, leaseStore, &recordingSender{}, &staticProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := f.RestoreCheckpoint(context.Background()); err != nil {
+		t.Fatalf("RestoreCheckpoint: %v", err)
+	}
+
+	nextCP := checkpoint.Checkpoint{
+		Height:           77,
+		BlockHash:        common.HexToHash("0x4321"),
+		FinalOrchardRoot: common.HexToHash("0x8765"),
+		BaseChainID:      initialCP.BaseChainID,
+		BridgeContract:   initialCP.BridgeContract,
+	}
+	_, nextSigs := mustSignedCheckpoint(t, nextCP)
+	if err := store.StoreFinalizerCheckpoint(context.Background(), nextCP, nextSigs); err != nil {
+		t.Fatalf("StoreFinalizerCheckpoint next: %v", err)
+	}
+
+	if err := f.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if f.checkpoint == nil {
+		t.Fatalf("expected checkpoint after Tick")
+	}
+	if f.checkpoint.Height != nextCP.Height {
+		t.Fatalf("checkpoint height after Tick = %d, want %d", f.checkpoint.Height, nextCP.Height)
+	}
+	if f.checkpoint.BlockHash != nextCP.BlockHash {
+		t.Fatalf("checkpoint block hash after Tick = %s, want %s", f.checkpoint.BlockHash.Hex(), nextCP.BlockHash.Hex())
+	}
+	if len(f.opSigs) != len(nextSigs) {
+		t.Fatalf("operator signature count after Tick = %d, want %d", len(f.opSigs), len(nextSigs))
+	}
+}
+
 func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	t.Parallel()
 
