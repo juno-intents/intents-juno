@@ -743,11 +743,12 @@ if [[ "$dry_run" != "true" ]]; then
     [[ -n "$app_launch_template_source_version" ]] || die "app role asg $app_role_asg did not return a launch template version"
     bootstrap_user_data="$tmp_dir/app-launch-template-user-data.sh"
     render_app_runtime_bootstrap_user_data "$bundle_b64" "$bootstrap_user_data"
-    launch_template_data_json="$(jq -cn --arg user_data "$(base64 <"$bootstrap_user_data" | tr -d '\n')" '{UserData: $user_data}')"
+    launch_template_data_json="$tmp_dir/app-launch-template-data.json"
+    base64 <"$bootstrap_user_data" | tr -d '\n' | jq -Rs '{UserData: .}' >"$launch_template_data_json"
     launch_template_create_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" ec2 create-launch-template-version \
       --launch-template-id "$app_launch_template_id" \
       --source-version "$app_launch_template_source_version" \
-      --launch-template-data "$launch_template_data_json" \
+      --launch-template-data "file://$launch_template_data_json" \
       --output json)"
     app_launch_template_version="$(jq -r '.LaunchTemplateVersion.VersionNumber // empty' <<<"$launch_template_create_json")"
     [[ -n "$app_launch_template_version" && "$app_launch_template_version" != "null" ]] || die "failed to create a new launch template version for app role asg $app_role_asg"

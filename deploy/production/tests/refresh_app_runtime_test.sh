@@ -331,7 +331,7 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$aws_log")" '"FromPort":18232' "refresh restores operator juno rpc ingress for the app security group"
   assert_contains "$(cat "$aws_log")" '"FromPort":8080' "refresh restores operator juno scan ingress for the app security group"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers app instances from the app role asg"
-  assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9" "refresh publishes the rendered app runtime bundle into a new app launch template version"
+  assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9 --launch-template-data file://" "refresh publishes the rendered app runtime bundle into a temp launch template payload file"
   assert_contains "$(cat "$aws_log")" "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-app-asg --launch-template LaunchTemplateId=lt-app1234567890,Version=10" "refresh moves the app asg to the new bootstrap launch template version"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh bootstraps the first in-service app instance over ssm"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh bootstraps the second in-service app instance over ssm even before it is marked healthy"
