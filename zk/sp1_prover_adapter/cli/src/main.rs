@@ -502,11 +502,12 @@ fn read_request_circuit_version() -> String {
     read_request_circuit_version_from(|name| read_env_nonempty(name))
 }
 
-fn read_request_circuit_version_from<F>(_read_env: F) -> String
+fn read_request_circuit_version_from<F>(mut read_env: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
 {
-    sp1_sdk::SP1_CIRCUIT_VERSION.trim().to_owned()
+    read_env("SP1_REQUEST_CIRCUIT_VERSION")
+        .unwrap_or_else(|| sp1_sdk::SP1_CIRCUIT_VERSION.trim().to_owned())
 }
 
 async fn simulate_execution_limits(
@@ -928,12 +929,12 @@ mod tests {
     }
 
     #[test]
-    fn read_request_circuit_version_ignores_override_and_uses_local_sp1_circuit_version() {
+    fn read_request_circuit_version_prefers_explicit_override() {
         let mut envs = HashMap::new();
         envs.insert("SP1_REQUEST_CIRCUIT_VERSION", "v6.1.0".to_owned());
 
         let got = read_request_circuit_version_from(|name| envs.get(name).cloned());
-        assert_eq!(got, sp1_sdk::SP1_CIRCUIT_VERSION.trim());
+        assert_eq!(got, "v6.1.0");
     }
 
     #[test]
@@ -1151,28 +1152,32 @@ mod tests {
     }
 
     #[test]
-    fn adapter_request_version_matches_declared_sp1_release_line() {
+    fn adapter_sp1_sdk_version_matches_guest_toolchain_versions() {
         let adapter = include_str!("../Cargo.toml");
-        let sdk_version = dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
+        let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
+        let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
+
+        let adapter_version =
+            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
         let prover_version =
             dependency_version(adapter, "sp1-prover").expect("adapter sp1-prover version");
-        let circuit_version = sp1_sdk::SP1_CIRCUIT_VERSION
-            .trim()
-            .trim_start_matches('v')
-            .to_owned();
+        let deposit_version =
+            dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version");
+        let withdraw_version = dependency_version(withdraw_guest, "sp1-zkvm")
+            .expect("withdraw guest sp1-zkvm version");
 
-        assert_eq!(sdk_version, prover_version);
-        assert_eq!(sdk_version, circuit_version);
+        assert_eq!(adapter_version, prover_version);
+        assert_eq!(adapter_version, deposit_version);
+        assert_eq!(adapter_version, withdraw_version);
     }
 
     #[test]
     fn lockfile_keeps_sp1_and_slop_toolchain_on_adapter_release_line() {
         let lockfile = include_str!("../../../Cargo.lock");
         let versions = lockfile_versions(lockfile);
-        let expected_version = sp1_sdk::SP1_CIRCUIT_VERSION
-            .trim()
-            .trim_start_matches('v')
-            .to_owned();
+        let adapter = include_str!("../Cargo.toml");
+        let expected_version =
+            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
 
         let mismatches: Vec<String> = versions
             .into_iter()
@@ -1201,10 +1206,9 @@ mod tests {
 
     #[test]
     fn guest_release_line_matches_adapter_release_line() {
-        let expected_version = sp1_sdk::SP1_CIRCUIT_VERSION
-            .trim()
-            .trim_start_matches('v')
-            .to_owned();
+        let adapter = include_str!("../Cargo.toml");
+        let expected_version =
+            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
         let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
         let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
 
@@ -1219,12 +1223,10 @@ mod tests {
 
     #[test]
     fn bridge_guest_release_workflow_pins_sp1_toolchain_to_adapter_release_line() {
+        let adapter = include_str!("../Cargo.toml");
         let expected_version = format!(
             "sp1up --version v{}",
-            sp1_sdk::SP1_CIRCUIT_VERSION
-                .trim()
-                .trim_start_matches('v')
-                .to_owned()
+            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version")
         );
         let workflow =
             include_str!("../../../../.github/workflows/release-bridge-guest-programs.yml");

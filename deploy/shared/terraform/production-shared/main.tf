@@ -159,6 +159,10 @@ locals {
       value = tostring(var.shared_sp1_request_timeout_seconds)
     },
     {
+      name  = "SP1_REQUEST_CIRCUIT_VERSION"
+      value = "v6.1.0"
+    },
+    {
       name  = "SP1_DEPOSIT_PROGRAM_URL"
       value = local.shared_sp1_deposit_program_url
     },
@@ -191,6 +195,10 @@ locals {
     {
       name  = "SP1_NETWORK_RPC_URL"
       value = trimspace(var.shared_sp1_rpc_url)
+    },
+    {
+      name  = "SP1_REQUEST_CIRCUIT_VERSION"
+      value = "v6.1.0"
     },
     {
       name  = "SP1_DEPOSIT_PROGRAM_URL"
