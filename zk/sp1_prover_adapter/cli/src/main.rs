@@ -179,6 +179,10 @@ async fn prove_once(
         .setup(elf_bytes.into())
         .await
         .context("sp1 setup failed")?;
+    let request_vk_hash = prover
+        .register_program(proving_key.verifying_key(), proving_key.elf())
+        .await
+        .context("sp1 register program failed")?;
     let actual_vkey = normalize_hex_32(&proving_key.verifying_key().bytes32())?;
     if actual_vkey != expected_image_id {
         bail!("program vkey mismatch: got={actual_vkey} expected={expected_image_id}");
@@ -239,7 +243,7 @@ async fn prove_once(
 
     let response = client
         .request_proof(
-            NetworkClient::get_vk_hash(proving_key.verifying_key()).context("compute vk hash")?,
+            request_vk_hash,
             &stdin,
             ProofMode::Groth16,
             &request_version,
@@ -790,6 +794,15 @@ mod tests {
         let rendered = render_error_chain(&err);
         assert!(rendered.contains("outer error"));
         assert!(rendered.contains("inner error"));
+    }
+
+    #[test]
+    fn compat_request_path_registers_program_before_request() {
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(".register_program("),
+            "compat request path must register the program before requesting proof"
+        );
     }
 
     #[test]
