@@ -174,6 +174,8 @@ main() {
   assert_contains "$outputs_tf" 'output "shared_kafka_critical_hmac_secret_arn"' "live-e2e exports the Kafka critical-topic HMAC secret ARN"
 
   assert_contains "$main_tf" 'name  = "SP1_NETWORK_RPC_URL"' "live-e2e proof task env includes SP1 rpc url"
+  assert_contains "$main_tf" 'name  = "SP1_REQUEST_CIRCUIT_VERSION"' "live-e2e proof task env includes SP1 request circuit version override"
+  assert_contains "$main_tf" 'value = "v6.1.0"' "live-e2e proof task env pins the SP1 request circuit version override"
   assert_contains "$main_tf" 'name  = "JUNO_QUEUE_KAFKA_AUTH_MODE"' "live-e2e proof task env includes kafka auth mode"
   assert_contains "$main_tf" 'value = "aws-msk-iam"' "live-e2e proof task env pins MSK IAM auth"
   assert_contains "$main_tf" 'name  = "JUNO_QUEUE_KAFKA_AWS_REGION"' "live-e2e proof task env includes kafka iam region"

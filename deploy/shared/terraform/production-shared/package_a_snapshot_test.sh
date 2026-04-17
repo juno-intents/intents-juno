@@ -191,6 +191,8 @@ main() {
   assert_not_contains "$main_tf" 'connectivity_info {' "production-shared keeps MSK on the default same-VPC broker path"
   assert_not_contains "$main_tf" 'vpc_connectivity {' "production-shared does not enable MSK multi-VPC connectivity for same-VPC clients"
   assert_contains "$main_tf" 'name  = "SP1_NETWORK_RPC_URL"' "production-shared proof task env includes SP1 rpc url"
+  assert_contains "$main_tf" 'name  = "SP1_REQUEST_CIRCUIT_VERSION"' "production-shared proof task env includes SP1 request circuit version override"
+  assert_contains "$main_tf" 'value = "v6.1.0"' "production-shared proof task env pins the SP1 request circuit version override"
   assert_contains "$main_tf" 'name  = "SP1_DEPOSIT_PROGRAM_URL"' "production-shared proof task env includes deposit program url"
   assert_contains "$main_tf" 'name  = "SP1_WITHDRAW_PROGRAM_URL"' "production-shared proof task env includes withdraw program url"
   assert_contains "$main_tf" 'shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0' "production-shared blocks active proof services without requestor address"

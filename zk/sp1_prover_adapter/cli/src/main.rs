@@ -3,9 +3,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sp1_sdk::network::signer::NetworkSigner;
-use sp1_sdk::network::NetworkMode;
+use sp1_sdk::network::{
+    proto::{types::ProofMode, GetProofRequestParamsResponse},
+    Address, FulfillmentStrategy, NetworkClient, NetworkMode,
+};
 use sp1_sdk::prelude::*;
-use sp1_sdk::{NetworkProver, ProveRequest, ProverClient};
+use sp1_sdk::{NetworkProver, ProverClient, ProvingKey, SP1ProofMode};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -17,6 +20,7 @@ const VERSION_SP1_BALANCE_REQUEST: &str = "sp1.balance.request.v1";
 const VERSION_SP1_BALANCE_RESPONSE: &str = "sp1.balance.response.v1";
 const VERSION_PROVER_REQUEST: &str = "prover.request.v1";
 const VERSION_PROVER_RESPONSE: &str = "prover.response.v1";
+const DEFAULT_NETWORK_GAS_LIMIT: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy)]
 enum PipelineKind {
@@ -169,6 +173,7 @@ async fn prove_once(
 ) -> Result<(Vec<u8>, String)> {
     let (elf_bytes, program_source) = load_program_elf(pipeline).await?;
     let prover = build_network_prover().await?;
+    let client = build_network_client()?;
 
     let proving_key = prover
         .setup(elf_bytes.into())
@@ -182,33 +187,85 @@ async fn prove_once(
     let mut stdin = SP1Stdin::new();
     stdin.write_vec(private_input);
 
-    let mut req = prover
-        .prove(&proving_key, stdin)
-        .groth16()
-        .min_auction_period(read_u64_env("SP1_MIN_AUCTION_PERIOD", 1)?)
-        .auction_timeout(Duration::from_secs(read_u64_env(
-            "SP1_AUCTION_TIMEOUT_SECONDS",
-            300,
-        )?))
-        .timeout(Duration::from_secs(read_u64_env(
-            "SP1_REQUEST_TIMEOUT_SECONDS",
-            1800,
-        )?));
+    let gas_limit_cap = read_pipeline_max_gas_limit(pipeline)?;
+    let (public_values, report) = prover
+        .execute(proving_key.elf().clone(), stdin.clone())
+        .calculate_gas(true)
+        .await
+        .context("sp1 simulation failed")?;
+    let (cycle_limit, gas_limit, public_values_hash) = resolve_execution_limits(
+        report.total_instruction_count(),
+        report.gas(),
+        public_values.hash(),
+        gas_limit_cap,
+    );
+    let min_auction_period = read_u64_env("SP1_MIN_AUCTION_PERIOD", 1)?;
+    let auction_timeout = Duration::from_secs(read_u64_env("SP1_AUCTION_TIMEOUT_SECONDS", 300)?);
+    let request_timeout = Duration::from_secs(read_u64_env("SP1_REQUEST_TIMEOUT_SECONDS", 1800)?);
+    let request_version = read_request_circuit_version();
 
-    if let Some(max_gas_limit) = read_pipeline_max_gas_limit(pipeline)? {
+    if let Some(max_gas_limit) = gas_limit_cap {
         eprintln!(
             "applying SP1 gas limit cap for {} pipeline: {} PGUs",
             pipeline.name(),
             max_gas_limit
         );
-        req = req.gas_limit(max_gas_limit);
     }
 
-    if let Some(max_price_per_pgu) = read_optional_u64_env("SP1_MAX_PRICE_PER_PGU")? {
-        req = req.max_price_per_pgu(max_price_per_pgu);
-    }
+    let params = prover
+        .get_proof_request_params(SP1ProofMode::Groth16)
+        .await
+        .context("get proof request params")?;
+    let GetProofRequestParamsResponse::Auction(params) = params else {
+        bail!("proof request params unsupported in non-mainnet mode");
+    };
+    let base_fee = params
+        .base_fee
+        .parse::<u64>()
+        .context("invalid base fee from proof request params")?;
+    let default_max_price_per_pgu = params
+        .max_price_per_pgu
+        .parse::<u64>()
+        .context("invalid max price per pgu from proof request params")?;
+    let max_price_per_pgu =
+        read_optional_u64_env("SP1_MAX_PRICE_PER_PGU")?.unwrap_or(default_max_price_per_pgu);
 
-    let proof = req.await.context("sp1 network groth16 prove failed")?;
+    eprintln!(
+        "requesting {} proof with compat circuit version {} (setup image id {})",
+        pipeline.name(),
+        request_version,
+        actual_vkey
+    );
+
+    let response = client
+        .request_proof(
+            NetworkClient::get_vk_hash(proving_key.verifying_key()).context("compute vk hash")?,
+            &stdin,
+            ProofMode::Groth16,
+            &request_version,
+            FulfillmentStrategy::Auction,
+            request_timeout.as_secs(),
+            cycle_limit,
+            gas_limit,
+            min_auction_period,
+            None,
+            address_from_bytes(&params.auctioneer)?,
+            address_from_bytes(&params.executor)?,
+            address_from_bytes(&params.verifier)?,
+            address_from_bytes(&params.treasury)?,
+            Some(public_values_hash),
+            base_fee,
+            max_price_per_pgu,
+            params.domain.clone(),
+        )
+        .await
+        .context("sp1 request proof failed")?;
+
+    let request_id = sp1_sdk::network::B256::from_slice(response.request_id());
+    let proof = prover
+        .wait_proof(request_id, Some(request_timeout), Some(auction_timeout))
+        .await
+        .context("sp1 network groth16 prove failed")?;
 
     let public_values = proof.public_values.to_vec();
     if public_values != expected_journal {
@@ -223,20 +280,30 @@ async fn prove_once(
 }
 
 async fn build_network_prover() -> Result<NetworkProver> {
-    let private_key = read_required_private_key()?;
-    let signer = NetworkSigner::local(&private_key).context("invalid NETWORK_PRIVATE_KEY")?;
+    let signer = build_network_signer()?;
 
     let mut builder = ProverClient::builder()
         .network_for(NetworkMode::Mainnet)
         .signer(signer);
 
-    if let Some(rpc_url) = read_env_nonempty("SP1_NETWORK_RPC_URL")
-        .or_else(|| read_env_nonempty("NETWORK_RPC_URL"))
-    {
+    if let Some(rpc_url) = read_network_rpc_url() {
         builder = builder.rpc_url(&rpc_url);
     }
 
     Ok(builder.build().await)
+}
+
+fn build_network_client() -> Result<NetworkClient> {
+    Ok(NetworkClient::new(
+        build_network_signer()?,
+        read_network_rpc_url().unwrap_or_else(|| "https://rpc.mainnet.succinct.xyz".to_owned()),
+        NetworkMode::Mainnet,
+    ))
+}
+
+fn build_network_signer() -> Result<NetworkSigner> {
+    let private_key = read_required_private_key()?;
+    NetworkSigner::local(&private_key).context("invalid NETWORK_PRIVATE_KEY")
 }
 
 fn read_required_private_key() -> Result<String> {
@@ -272,6 +339,10 @@ fn read_env_nonempty(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn read_network_rpc_url() -> Option<String> {
+    read_env_nonempty("SP1_NETWORK_RPC_URL").or_else(|| read_env_nonempty("NETWORK_RPC_URL"))
+}
+
 fn read_u64_env(name: &str, default_value: u64) -> Result<u64> {
     let Some(raw) = read_env_nonempty(name) else {
         return Ok(default_value);
@@ -301,6 +372,38 @@ where
         .parse::<u64>()
         .with_context(|| format!("{name} must be an unsigned integer"))?;
     Ok(Some(value))
+}
+
+fn read_request_circuit_version() -> String {
+    read_request_circuit_version_from(|name| read_env_nonempty(name))
+}
+
+fn read_request_circuit_version_from<F>(mut read_env: F) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    read_env("SP1_REQUEST_CIRCUIT_VERSION")
+        .unwrap_or_else(|| sp1_sdk::SP1_CIRCUIT_VERSION.trim().to_owned())
+}
+
+fn resolve_execution_limits(
+    simulated_cycle_limit: u64,
+    simulated_gas_limit: Option<u64>,
+    simulated_public_values_hash: Vec<u8>,
+    gas_limit_override: Option<u64>,
+) -> (u64, u64, Vec<u8>) {
+    (
+        simulated_cycle_limit,
+        gas_limit_override.unwrap_or_else(|| simulated_gas_limit.unwrap_or(DEFAULT_NETWORK_GAS_LIMIT)),
+        simulated_public_values_hash,
+    )
+}
+
+fn address_from_bytes(bytes: &[u8]) -> Result<Address> {
+    if bytes.len() != 20 {
+        bail!("expected 20-byte address, got {}", bytes.len());
+    }
+    Ok(Address::from_slice(bytes))
 }
 
 fn read_pipeline_max_gas_limit(pipeline: PipelineKind) -> Result<Option<u64>> {
@@ -613,6 +716,39 @@ mod tests {
         let err =
             read_required_private_key_from(|name| envs.get(name).cloned()).expect_err("missing key");
         assert!(err.to_string().contains("NETWORK_PRIVATE_KEY is required"));
+    }
+
+    #[test]
+    fn read_request_circuit_version_prefers_override() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_REQUEST_CIRCUIT_VERSION", "v6.1.0".to_owned());
+
+        let got = read_request_circuit_version_from(|name| envs.get(name).cloned());
+        assert_eq!(got, "v6.1.0");
+    }
+
+    #[test]
+    fn read_request_circuit_version_defaults_to_local_sp1_circuit_version() {
+        let envs: HashMap<&str, String> = HashMap::new();
+
+        let got = read_request_circuit_version_from(|name| envs.get(name).cloned());
+        assert_eq!(got, sp1_sdk::SP1_CIRCUIT_VERSION.trim());
+    }
+
+    #[test]
+    fn resolve_execution_limits_prefers_pipeline_gas_cap_and_keeps_public_values_hash() {
+        let (cycles, gas, public_values_hash) =
+            resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], Some(444));
+
+        assert_eq!(cycles, 12345);
+        assert_eq!(gas, 444);
+        assert_eq!(public_values_hash, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn resolve_execution_limits_uses_simulated_gas_when_no_override_is_present() {
+        let (_, gas, _) = resolve_execution_limits(12345, Some(67890), vec![1, 2, 3], None);
+        assert_eq!(gas, 67890);
     }
 
     #[test]
