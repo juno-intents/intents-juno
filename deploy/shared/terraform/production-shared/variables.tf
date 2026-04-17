@@ -237,13 +237,13 @@ variable "shared_base_chain_id" {
 }
 
 variable "shared_deposit_image_id" {
-  description = "Deposit guest image id (bytes32 hex) used to derive the shared proof-requestor deposit guest program URL. Required when shared_ecs_desired_count > 0."
+  description = "Deposit guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when shared_ecs_desired_count > 0."
   type        = string
   default     = ""
 }
 
 variable "shared_withdraw_image_id" {
-  description = "Withdraw guest image id (bytes32 hex) used to derive the shared proof-requestor withdraw guest program URL. Required when shared_ecs_desired_count > 0."
+  description = "Withdraw guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when shared_ecs_desired_count > 0."
   type        = string
   default     = ""
 }
@@ -252,6 +252,18 @@ variable "shared_bridge_guest_release_tag" {
   description = "GitHub release tag used to derive shared SP1 guest program URLs from guest image ids."
   type        = string
   default     = "bridge-guests-latest"
+}
+
+variable "shared_sp1_deposit_program_url_override" {
+  description = "Optional explicit deposit guest program URL. When set, the shared proof runtime uses this URL instead of deriving it from shared_bridge_guest_release_tag and shared_deposit_image_id."
+  type        = string
+  default     = ""
+}
+
+variable "shared_sp1_withdraw_program_url_override" {
+  description = "Optional explicit withdraw guest program URL. When set, the shared proof runtime uses this URL instead of deriving it from shared_bridge_guest_release_tag and shared_withdraw_image_id."
+  type        = string
+  default     = ""
 }
 
 variable "shared_sp1_rpc_url" {

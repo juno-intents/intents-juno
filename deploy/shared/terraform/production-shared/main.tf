@@ -91,8 +91,8 @@ locals {
   shared_sp1_projected_pair_cost_wei           = (var.shared_sp1_groth16_base_fee_wei * 2) + (var.shared_sp1_max_price_per_pgu * (var.shared_sp1_deposit_pgu_estimate + var.shared_sp1_withdraw_pgu_estimate))
   shared_sp1_projected_with_overhead           = floor(((local.shared_sp1_projected_pair_cost_wei * 120) + 99) / 100)
   shared_sp1_required_credit_buffer            = local.shared_sp1_projected_with_overhead * 3
-  shared_sp1_deposit_program_url               = can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/deposit-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_deposit_image_id_hex) : ""
-  shared_sp1_withdraw_program_url              = can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
+  shared_sp1_deposit_program_url               = trimspace(var.shared_sp1_deposit_program_url_override) != "" ? trimspace(var.shared_sp1_deposit_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/deposit-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_deposit_image_id_hex) : ""
+  shared_sp1_withdraw_program_url              = trimspace(var.shared_sp1_withdraw_program_url_override) != "" ? trimspace(var.shared_sp1_withdraw_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
   shared_proof_requestor_command = [
     "/usr/local/bin/proof-requestor",
     "--postgres-dsn-env", "POSTGRES_DSN",

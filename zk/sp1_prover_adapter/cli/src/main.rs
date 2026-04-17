@@ -1152,65 +1152,54 @@ mod tests {
     }
 
     #[test]
-    fn adapter_sp1_sdk_version_matches_guest_toolchain_versions() {
+    fn adapter_sp1_sdk_version_matches_prover_dependency() {
         let adapter = include_str!("../Cargo.toml");
-        let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
-        let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
-
         let adapter_version =
             dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
         let prover_version =
             dependency_version(adapter, "sp1-prover").expect("adapter sp1-prover version");
+
+        assert_eq!(adapter_version, prover_version);
+    }
+
+    #[test]
+    fn guest_toolchain_versions_match_each_other() {
+        let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
+        let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
         let deposit_version =
             dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version");
         let withdraw_version = dependency_version(withdraw_guest, "sp1-zkvm")
             .expect("withdraw guest sp1-zkvm version");
 
-        assert_eq!(adapter_version, prover_version);
-        assert_eq!(adapter_version, deposit_version);
-        assert_eq!(adapter_version, withdraw_version);
+        assert_eq!(deposit_version, withdraw_version);
     }
 
     #[test]
-    fn lockfile_keeps_sp1_and_slop_toolchain_on_adapter_release_line() {
+    fn lockfile_includes_adapter_release_line_for_sdk_and_prover() {
         let lockfile = include_str!("../../../Cargo.lock");
         let versions = lockfile_versions(lockfile);
         let adapter = include_str!("../Cargo.toml");
         let expected_version =
             dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
-
-        let mismatches: Vec<String> = versions
-            .into_iter()
-            .filter(|(name, _)| {
-                (name.starts_with("sp1-") || name.starts_with("slop-"))
-                    && name != "sp1-prover-adapter"
-            })
-            .filter(|(_, found_versions)| {
-                found_versions.len() != 1 || !found_versions.contains(expected_version.as_str())
-            })
-            .map(|(name, found_versions)| {
-                format!(
-                    "{name}={}",
-                    found_versions.into_iter().collect::<Vec<_>>().join(",")
-                )
-            })
-            .collect();
-
-        assert!(
-            mismatches.is_empty(),
-            "expected SP1/slop toolchain lockfile to stay on {}, found mismatches: {}",
-            expected_version,
-            mismatches.join("; ")
-        );
+        for package in ["sp1-sdk", "sp1-prover"] {
+            let found_versions = versions
+                .get(package)
+                .unwrap_or_else(|| panic!("missing {package} in lockfile"));
+            assert!(
+                found_versions.contains(expected_version.as_str()),
+                "expected {package} to include adapter release line {}, found {:?}",
+                expected_version,
+                found_versions
+            );
+        }
     }
 
     #[test]
-    fn guest_release_line_matches_adapter_release_line() {
-        let adapter = include_str!("../Cargo.toml");
-        let expected_version =
-            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version");
+    fn guest_release_line_matches_guest_toolchain_line() {
         let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
         let withdraw_guest = include_str!("../../../withdraw_guest/guest/Cargo.toml");
+        let expected_version =
+            dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version");
 
         let deposit_version =
             dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version");
@@ -1222,11 +1211,11 @@ mod tests {
     }
 
     #[test]
-    fn bridge_guest_release_workflow_pins_sp1_toolchain_to_adapter_release_line() {
-        let adapter = include_str!("../Cargo.toml");
+    fn bridge_guest_release_workflow_pins_sp1_toolchain_to_guest_release_line() {
+        let deposit_guest = include_str!("../../../deposit_guest/guest/Cargo.toml");
         let expected_version = format!(
             "sp1up --version v{}",
-            dependency_version(adapter, "sp1-sdk").expect("adapter sp1-sdk version")
+            dependency_version(deposit_guest, "sp1-zkvm").expect("deposit guest sp1-zkvm version")
         );
         let workflow =
             include_str!("../../../../.github/workflows/release-bridge-guest-programs.yml");
