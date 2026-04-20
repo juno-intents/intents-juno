@@ -241,7 +241,7 @@ configure_junocashd_extra_args() {
   local tmp
   tmp="$(mktemp)"
 
-  awk -v value="$value" '
+  sudo cat "$env_file" | awk -v value="$value" '
     BEGIN { replaced = 0 }
     /^JUNOCASHD_EXTRA_ARGS=/ {
       print "JUNOCASHD_EXTRA_ARGS=" value

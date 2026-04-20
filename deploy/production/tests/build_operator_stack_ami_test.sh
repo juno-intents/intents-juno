@@ -427,6 +427,7 @@ test_build_operator_stack_ami_supports_builder_only_junocashd_reindex() {
   assert_contains "$script_text" 'ExecStart=/usr/local/bin/intents-juno-junocashd.sh' "junocashd systemd unit runs through the wrapper"
   assert_contains "$script_text" 'configure_junocashd_extra_args "-reindex=1"' "bootstrap enables reindex when requested"
   assert_contains "$script_text" 'configure_junocashd_extra_args ""' "bootstrap clears reindex args before imaging"
+  assert_contains "$script_text" 'sudo cat "$env_file" | awk -v value="$value"' "reindex helper reads the protected env file through sudo"
 
   junocashd_wrapper="$(extract_block "cat > /tmp/intents-juno-junocashd.sh <<'EOF_JUNOD_WRAPPER'" "EOF_JUNOD_WRAPPER")"
   assert_contains "$junocashd_wrapper" 'source /etc/intents-juno/operator-stack.env' "junocashd wrapper reads the operator env"
