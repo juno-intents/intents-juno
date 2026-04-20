@@ -125,6 +125,26 @@ bash "\$tmp_dir/install.sh"
 EOF
 }
 
+verify_app_binaries_release_assets() {
+  local release_tag="$1"
+  local github_repo="$2"
+  local release_json asset_name
+  local required_assets=(
+    bridge-api_linux_amd64
+    bridge-api_linux_amd64.sha256
+    backoffice_linux_amd64
+    backoffice_linux_amd64.sha256
+  )
+
+  release_json="$(gh release view "$release_tag" --repo "$github_repo" --json assets)"
+  [[ -n "$release_json" ]] || die "failed to resolve app-binaries release metadata: $release_tag"
+
+  for asset_name in "${required_assets[@]}"; do
+    jq -e --arg asset_name "$asset_name" '.assets[]? | select(.name == $asset_name)' >/dev/null <<<"$release_json" \
+      || die "app-binaries release $release_tag is missing asset: $asset_name"
+  done
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -173,16 +193,13 @@ for cmd in jq base64 tar cast aws; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 if [[ -n "$app_binaries_release_tag" ]]; then
-  for cmd in gh sha256sum; do
+  for cmd in gh; do
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
 fi
 
 output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 mkdir -p "$output_dir" "$output_dir/nginx" "$output_dir/systemd" "$output_dir/bin"
-if [[ -n "$app_binaries_release_tag" ]]; then
-  mkdir -p "$output_dir/app-binaries"
-fi
 
 tmp_dir="$(mktemp -d)"
 bundle_dir="$tmp_dir/bundle"
@@ -221,20 +238,14 @@ if [[ -z "$backoffice_hostname" ]]; then
 fi
 [[ -n "$backoffice_hostname" ]] || die "app deploy is missing services.backoffice.record_name or services.backoffice.public_url"
 
+app_binaries_release_env=""
 if [[ -n "$app_binaries_release_tag" ]]; then
-  gh release download "$app_binaries_release_tag" \
-    --repo "$github_repo" \
-    --pattern "bridge-api_linux_amd64" \
-    --pattern "bridge-api_linux_amd64.sha256" \
-    --pattern "backoffice_linux_amd64" \
-    --pattern "backoffice_linux_amd64.sha256" \
-    --dir "$output_dir/app-binaries" \
-    --clobber
-  (
-    cd "$output_dir/app-binaries"
-    sha256sum -c bridge-api_linux_amd64.sha256 >/dev/null
-    sha256sum -c backoffice_linux_amd64.sha256 >/dev/null
-  )
+  verify_app_binaries_release_assets "$app_binaries_release_tag" "$github_repo"
+  app_binaries_release_env="$output_dir/app-binaries-release.env"
+  cat >"$app_binaries_release_env" <<EOF
+APP_BINARIES_RELEASE_TAG=$app_binaries_release_tag
+APP_BINARIES_GITHUB_REPO=$github_repo
+EOF
 fi
 
 bridge_wrapper="$output_dir/bin/bridge-api-wrapper"
@@ -601,10 +612,8 @@ if [[ -n "$cloudflared_wrapper" && -n "$cloudflared_unit" ]]; then
   cp "$cloudflared_wrapper" "$bundle_dir/cloudflared-backoffice-wrapper"
   cp "$cloudflared_unit" "$bundle_dir/systemd/cloudflared-backoffice.service"
 fi
-if [[ -n "$app_binaries_release_tag" ]]; then
-  mkdir -p "$bundle_dir/app-binaries"
-  cp "$output_dir/app-binaries/bridge-api_linux_amd64" "$bundle_dir/app-binaries/bridge-api_linux_amd64"
-  cp "$output_dir/app-binaries/backoffice_linux_amd64" "$bundle_dir/app-binaries/backoffice_linux_amd64"
+if [[ -n "$app_binaries_release_env" ]]; then
+  cp "$app_binaries_release_env" "$bundle_dir/app-binaries-release.env"
 fi
 
 install_script="$output_dir/install.sh"
@@ -620,6 +629,12 @@ if ! command -v jq >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y jq
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y curl
 fi
 
 if ! command -v aws >/dev/null 2>&1; then
@@ -644,9 +659,26 @@ if ! command -v aws >/dev/null 2>&1; then
   rm -rf "$aws_tmp_dir"
 fi
 
-if [[ -d "$script_dir/app-binaries" ]]; then
-  install -m 0755 "$script_dir/app-binaries/bridge-api_linux_amd64" /usr/local/bin/bridge-api
-  install -m 0755 "$script_dir/app-binaries/backoffice_linux_amd64" /usr/local/bin/backoffice
+if [[ -f "$script_dir/app-binaries-release.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$script_dir/app-binaries-release.env"
+  [[ -n "${APP_BINARIES_RELEASE_TAG:-}" ]] || { printf 'APP_BINARIES_RELEASE_TAG is required\n' >&2; exit 1; }
+  [[ -n "${APP_BINARIES_GITHUB_REPO:-}" ]] || { printf 'APP_BINARIES_GITHUB_REPO is required\n' >&2; exit 1; }
+
+  binaries_tmp_dir="$(mktemp -d)"
+  base_url="https://github.com/${APP_BINARIES_GITHUB_REPO}/releases/download/${APP_BINARIES_RELEASE_TAG}"
+  curl -fsSL "$base_url/bridge-api_linux_amd64" -o "$binaries_tmp_dir/bridge-api_linux_amd64"
+  curl -fsSL "$base_url/bridge-api_linux_amd64.sha256" -o "$binaries_tmp_dir/bridge-api_linux_amd64.sha256"
+  curl -fsSL "$base_url/backoffice_linux_amd64" -o "$binaries_tmp_dir/backoffice_linux_amd64"
+  curl -fsSL "$base_url/backoffice_linux_amd64.sha256" -o "$binaries_tmp_dir/backoffice_linux_amd64.sha256"
+  (
+    cd "$binaries_tmp_dir"
+    sha256sum -c bridge-api_linux_amd64.sha256
+    sha256sum -c backoffice_linux_amd64.sha256
+  )
+  install -m 0755 "$binaries_tmp_dir/bridge-api_linux_amd64" /usr/local/bin/bridge-api
+  install -m 0755 "$binaries_tmp_dir/backoffice_linux_amd64" /usr/local/bin/backoffice
+  rm -rf "$binaries_tmp_dir"
 fi
 
 install -m 0600 "$script_dir/bridge-api.env" /etc/intents-juno/bridge-api.env

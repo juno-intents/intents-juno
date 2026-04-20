@@ -235,28 +235,15 @@ write_fake_refresh_runtime_gh() {
   cat >"$target" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'gh %s\n' "$*" >>"$TEST_AWS_LOG"
 
-dir=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dir) dir="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
+if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
+  printf '%s\n' '{"assets":[{"name":"bridge-api_linux_amd64"},{"name":"bridge-api_linux_amd64.sha256"},{"name":"backoffice_linux_amd64"},{"name":"backoffice_linux_amd64.sha256"}]}'
+  exit 0
+fi
 
-[[ -n "$dir" ]] || {
-  printf 'missing --dir for fake gh\n' >&2
-  exit 1
-}
-
-mkdir -p "$dir"
-printf 'bridge-api-binary\n' >"$dir/bridge-api_linux_amd64"
-printf 'backoffice-binary\n' >"$dir/backoffice_linux_amd64"
-(
-  cd "$dir"
-  sha256sum bridge-api_linux_amd64 > bridge-api_linux_amd64.sha256
-  sha256sum backoffice_linux_amd64 > backoffice_linux_amd64.sha256
-)
+printf 'unexpected gh invocation\n' >&2
+exit 1
 EOF
   chmod +x "$target"
 }
@@ -301,13 +288,17 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=wallet-mainnet-f8379377446f" "refresh renders the backoffice scan wallet id"
   assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_ID=intents-juno-mainnet-app-runtime-config" "refresh renders the runtime config secret id for host hydration"
   assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_REGION=us-east-1" "refresh renders the runtime config secret region for host hydration"
-  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$script_dir/app-binaries/bridge-api_linux_amd64" /usr/local/bin/bridge-api' "refresh installs the staged published bridge-api binary onto the host"
-  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$script_dir/app-binaries/backoffice_linux_amd64" /usr/local/bin/backoffice' "refresh installs the staged published backoffice binary onto the host"
+  assert_contains "$(cat "$output_dir/install.sh")" 'source "$script_dir/app-binaries-release.env"' "refresh installs app binaries from bundled release metadata when a release tag is pinned"
+  assert_contains "$(cat "$output_dir/install.sh")" 'https://github.com/${APP_BINARIES_GITHUB_REPO}/releases/download/${APP_BINARIES_RELEASE_TAG}' "refresh downloads host binaries from the pinned github release tag"
+  assert_contains "$(cat "$output_dir/install.sh")" 'sha256sum -c bridge-api_linux_amd64.sha256' "refresh verifies the bridge-api release checksum on-host before install"
+  assert_contains "$(cat "$output_dir/install.sh")" 'sha256sum -c backoffice_linux_amd64.sha256' "refresh verifies the backoffice release checksum on-host before install"
+  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$binaries_tmp_dir/bridge-api_linux_amd64" /usr/local/bin/bridge-api' "refresh installs the verified bridge-api release binary onto the host"
+  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$binaries_tmp_dir/backoffice_linux_amd64" /usr/local/bin/backoffice' "refresh installs the verified backoffice release binary onto the host"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-url "${BACKOFFICE_JUNO_SCAN_URL}"' "refresh passes the backoffice scan url to the backoffice wrapper"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-wallet-id "${BACKOFFICE_JUNO_SCAN_WALLET_ID}"' "refresh passes the backoffice scan wallet id to the backoffice wrapper"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-bearer-token-env BACKOFFICE_JUNO_SCAN_BEARER_TOKEN' "refresh passes the optional backoffice scan bearer token env to the backoffice wrapper"
-  assert_eq "$(cat "$output_dir/app-binaries/bridge-api_linux_amd64")" "bridge-api-binary" "refresh stages the published bridge-api binary in the remote bundle"
-  assert_eq "$(cat "$output_dir/app-binaries/backoffice_linux_amd64")" "backoffice-binary" "refresh stages the published backoffice binary in the remote bundle"
+  assert_contains "$(cat "$output_dir/app-binaries-release.env")" "APP_BINARIES_RELEASE_TAG=app-binaries-v2026.04.07-r2-mainnet" "refresh writes the pinned app-binaries release tag into the bundle metadata"
+  assert_contains "$(cat "$output_dir/app-binaries-release.env")" "APP_BINARIES_GITHUB_REPO=juno-intents/intents-juno" "refresh writes the github repo into the bundle metadata"
   assert_contains "$(cat "$output_dir/install.sh")" 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' "refresh writes a self-locating install script for remote bundle extraction"
   assert_contains "$(cat "$output_dir/install.sh")" 'for _ in $(seq 1 60); do' "refresh allows slow app runtime startup during the remote readiness gate"
   assert_contains "$(cat "$output_dir/install.sh")" 'sleep 5' "refresh backs off between remote readiness checks so the app can finish booting"
@@ -336,6 +327,7 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh bootstraps the first in-service app instance over ssm"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh bootstraps the second in-service app instance over ssm even before it is marked healthy"
   assert_not_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app003" "refresh skips terminating app instances"
+  assert_contains "$(cat "$aws_log")" "gh release view app-binaries-v2026.04.07-r2-mainnet --repo juno-intents/intents-juno --json assets" "refresh verifies the pinned github release assets before rendering host-side downloads"
   assert_line_order "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-shared1234567890" "ssm send-command --instance-ids i-app001" "refresh reopens shared ingress before restarting app services"
   assert_line_order "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9" "ssm send-command --instance-ids i-app001" "refresh updates the app launch template before touching the live instances"
   assert_eq "$(jq -r '.app_target_mode' "$tmp/refresh-summary.json")" "asg" "refresh summary reports app role mode"
