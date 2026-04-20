@@ -45,6 +45,9 @@ main() {
   assert_contains "$wireguard_workflow" 'Create or Update Release' "wireguard ami workflow uploads release assets"
 
   assert_contains "$all_workflows" 'if [[ -z "$resolved_source_ami_id" && "$RELEASE_TIER" != "mainnet" ]]; then' "operator stack workflow skips latest source AMI fallback for mainnet releases"
+  assert_contains "$all_workflows" 'copy_to_regions' "operator stack workflow exposes a copy-to-regions input"
+  assert_contains "$all_workflows" 'junocashd_reindex' "operator stack workflow exposes a junocashd reindex input"
+  assert_contains "$all_workflows" './deploy/shared/runbooks/copy-operator-ami.sh replicate' "operator stack workflow can replicate a built ami across regions before publishing"
 
   assert_contains "$all_workflows" "if: \${{ env.AWS_ROLE_TO_ASSUME != '' }}" "AWS-backed release and deploy workflows prefer role auth when available"
   assert_contains "$all_workflows" "if: \${{ env.AWS_ROLE_TO_ASSUME == '' && env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}" "AWS-backed release and deploy workflows only use static keys when no role is configured"

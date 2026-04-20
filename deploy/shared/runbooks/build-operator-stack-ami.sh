@@ -30,6 +30,7 @@ Options:
   --bridge-address <address>       Bridge address for standby checkpoint stack
                                    (default: 0x0000000000000000000000000000000000000000)
   --sync-timeout-seconds <n>       max seconds to wait for junocashd sync (default: 21600)
+  --junocashd-reindex             force a one-time junocashd reindex on the builder before imaging
   --tss-signer-runtime-mode <mode> default tss signer runtime mode (nitro-enclave|host-process, default: nitro-enclave)
   --source-ami-id <ami-id>         optional base AMI id for builder (default: latest Ubuntu 24.04 amd64)
   --vpc-id <vpc-id>                optional VPC id (default: default VPC)
@@ -156,6 +157,7 @@ build_remote_bootstrap_script() {
   local bridge_address="$5"
   local sync_timeout_seconds="$6"
   local tss_signer_runtime_mode="$7"
+  local junocashd_reindex="$8"
   local junocashd_testnet_line=""
   local juno_scan_ua_hrp="jtest"
   local junocash_cli_network_flag="-testnet"
@@ -231,6 +233,31 @@ wait_for_service_active() {
 
     sleep 2
   done
+}
+
+configure_junocashd_extra_args() {
+  local value="$1"
+  local env_file="/etc/intents-juno/operator-stack.env"
+  local tmp
+  tmp="$(mktemp)"
+
+  awk -v value="$value" '
+    BEGIN { replaced = 0 }
+    /^JUNOCASHD_EXTRA_ARGS=/ {
+      print "JUNOCASHD_EXTRA_ARGS=" value
+      replaced = 1
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        print "JUNOCASHD_EXTRA_ARGS=" value
+      }
+    }
+  ' "$env_file" >"$tmp"
+
+  sudo install -m 0640 -o root -g intents-juno "$tmp" "$env_file"
+  rm -f "$tmp"
 }
 
 sha256_hex_file() {
@@ -493,6 +520,7 @@ CFG
   cat > /tmp/operator-stack.env <<ENV
 JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
+JUNOCASHD_EXTRA_ARGS=
 JUNO_RPC_BIND=127.0.0.1
 JUNO_RPC_ALLOW_IPS=127.0.0.1
 JUNO_SCAN_UA_HRP=__BOOTSTRAP_JUNO_SCAN_UA_HRP__
@@ -2481,6 +2509,26 @@ exec /usr/local/bin/base-event-scanner "${args[@]}"
 EOF_BASE_EVENT_SCANNER
   sudo install -m 0755 /tmp/intents-juno-base-event-scanner.sh /usr/local/bin/intents-juno-base-event-scanner.sh
 
+  cat > /tmp/intents-juno-junocashd.sh <<'EOF_JUNOD_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/intents-juno/operator-stack.env
+
+args=(
+  -conf=/etc/intents-juno/junocashd.conf
+  -datadir=/var/lib/intents-juno/junocashd
+)
+
+if [[ -n "${JUNOCASHD_EXTRA_ARGS:-}" ]]; then
+  read -r -a extra_args <<<"${JUNOCASHD_EXTRA_ARGS:-}"
+  args+=("${extra_args[@]}")
+fi
+
+exec /usr/local/bin/junocashd "${args[@]}"
+EOF_JUNOD_WRAPPER
+  sudo install -m 0755 /tmp/intents-juno-junocashd.sh /usr/local/bin/intents-juno-junocashd.sh
+
   cat > /tmp/junocashd.service <<'EOF_JUNOD'
 [Unit]
 Description=Intents Juno Operator junocashd
@@ -2491,7 +2539,7 @@ Wants=network-online.target
 Type=simple
 User=intents-juno
 Group=intents-juno
-ExecStart=/usr/local/bin/junocashd -conf=/etc/intents-juno/junocashd.conf -datadir=/var/lib/intents-juno/junocashd
+ExecStart=/usr/local/bin/intents-juno-junocashd.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -3156,6 +3204,9 @@ install_juno_txsign
 install_juno_txbuild
 install_intents_binaries
 write_stack_config
+if [[ "__BOOTSTRAP_JUNOCASHD_REINDEX__" == "true" ]]; then
+  configure_junocashd_extra_args "-reindex=1"
+fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service juno-scan-backfill.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service operator-signer-api.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
@@ -3181,6 +3232,9 @@ for _ in \$(seq 1 60); do
   fi
   sleep 2
 done
+if [[ "__BOOTSTRAP_JUNOCASHD_REINDEX__" == "true" ]]; then
+  configure_junocashd_extra_args ""
+fi
 sync
 REMOTE_SCRIPT
 )"
@@ -3195,6 +3249,7 @@ REMOTE_SCRIPT
   script="${script//__BOOTSTRAP_SSM_AGENT_URL__/https:\/\/s3.${aws_region}.amazonaws.com\/amazon-ssm-${aws_region}\/latest\/debian_amd64\/amazon-ssm-agent.deb}"
   script="${script//__BOOTSTRAP_SYNC_TIMEOUT_SECONDS__/$sync_timeout_seconds}"
   script="${script//__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__/$tss_signer_runtime_mode}"
+  script="${script//__BOOTSTRAP_JUNOCASHD_REINDEX__/$junocashd_reindex}"
   script="${script//__BOOTSTRAP_GO_TOOLCHAIN__/$GO_TOOLCHAIN_PIN}"
   script="${script//\\\$/\$}"
 
@@ -3214,6 +3269,7 @@ command_create() {
   local base_chain_id="84532"
   local bridge_address="0x0000000000000000000000000000000000000000"
   local sync_timeout_seconds="21600"
+  local junocashd_reindex="false"
   local tss_signer_runtime_mode="nitro-enclave"
   local source_ami_id=""
   local vpc_id=""
@@ -3277,6 +3333,10 @@ command_create() {
         sync_timeout_seconds="$2"
         shift 2
         ;;
+      --junocashd-reindex)
+        junocashd_reindex="true"
+        shift
+        ;;
       --tss-signer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --tss-signer-runtime-mode"
         tss_signer_runtime_mode="${2,,}"
@@ -3339,6 +3399,7 @@ command_create() {
   [[ -n "$aws_region" ]] || die "--aws-region is required"
   [[ "$sync_timeout_seconds" =~ ^[0-9]+$ ]] || die "--sync-timeout-seconds must be numeric"
   (( sync_timeout_seconds > 0 )) || die "--sync-timeout-seconds must be > 0"
+  [[ "$junocashd_reindex" == "true" || "$junocashd_reindex" == "false" ]] || die "--junocashd-reindex must be boolean"
   case "$tss_signer_runtime_mode" in
     nitro-enclave|host-process) ;;
     *) die "--tss-signer-runtime-mode must be nitro-enclave or host-process" ;;
@@ -3479,7 +3540,7 @@ command_create() {
 
   local remote_bootstrap_script
   remote_bootstrap_script="$(mktemp)"
-  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$juno_network" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" "$tss_signer_runtime_mode" >"$remote_bootstrap_script"
+  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$juno_network" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" "$tss_signer_runtime_mode" "$junocashd_reindex" >"$remote_bootstrap_script"
   chmod 0700 "$remote_bootstrap_script"
 
   local -a ssh_opts

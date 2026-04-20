@@ -208,6 +208,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'CHECKPOINT_SIGNER_DRIVER=aws-kms' "runbook defaults the baked operator env to aws-kms signer mode"
   assert_contains "$script_text" 'CHECKPOINT_SIGNER_KMS_KEY_ID=' "runbook reserves a kms key id slot in operator env"
   assert_contains "$script_text" 'CHECKPOINT_BLOB_SSE_KMS_KEY_ID=' "runbook reserves a blob sse kms key id slot in operator env"
+  assert_contains "$script_text" 'JUNOCASHD_EXTRA_ARGS=' "runbook reserves a junocashd extra args slot in operator env"
   assert_contains "$script_text" 'OPERATOR_ADDRESS=' "runbook reserves operator address in operator env"
   assert_contains "$script_text" 'CHECKPOINT_OPERATORS=' "runbook leaves checkpoint operators to deployment-time hydration"
 
@@ -415,6 +416,22 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h' "bootstrap env pins the withdraw expiry safety margin"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h' "bootstrap env pins the withdraw max expiry extension"
   assert_contains "$script_text" 'operator-signer-api.service' "builder installs the operator signer api service"
+}
+
+test_build_operator_stack_ami_supports_builder_only_junocashd_reindex() {
+  local script_text junocashd_wrapper
+  script_text="$(cat "$RUNBOOK_PATH")"
+
+  assert_contains "$script_text" '--junocashd-reindex' "runbook exposes an explicit junocashd reindex flag"
+  assert_contains "$script_text" "cat > /tmp/intents-juno-junocashd.sh <<'EOF_JUNOD_WRAPPER'" "runbook renders a dedicated junocashd wrapper"
+  assert_contains "$script_text" 'ExecStart=/usr/local/bin/intents-juno-junocashd.sh' "junocashd systemd unit runs through the wrapper"
+  assert_contains "$script_text" 'configure_junocashd_extra_args "-reindex=1"' "bootstrap enables reindex when requested"
+  assert_contains "$script_text" 'configure_junocashd_extra_args ""' "bootstrap clears reindex args before imaging"
+
+  junocashd_wrapper="$(extract_block "cat > /tmp/intents-juno-junocashd.sh <<'EOF_JUNOD_WRAPPER'" "EOF_JUNOD_WRAPPER")"
+  assert_contains "$junocashd_wrapper" 'source /etc/intents-juno/operator-stack.env' "junocashd wrapper reads the operator env"
+  assert_contains "$junocashd_wrapper" 'read -r -a extra_args <<<"${JUNOCASHD_EXTRA_ARGS:-}"' "junocashd wrapper expands extra args from env"
+  assert_contains "$junocashd_wrapper" 'exec /usr/local/bin/junocashd "${args[@]}"' "junocashd wrapper execs the daemon with composed args"
 }
 
 test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry() {
@@ -1189,6 +1206,7 @@ main() {
   test_build_operator_stack_ami_repairs_dpkg_before_apt
   test_build_operator_stack_ami_bootstraps_ssm_agent
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
+  test_build_operator_stack_ami_supports_builder_only_junocashd_reindex
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
   test_build_operator_stack_ami_waits_for_juno_scan_catchup_before_imaging

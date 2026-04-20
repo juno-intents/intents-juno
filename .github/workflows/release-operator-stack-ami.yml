@@ -33,6 +33,16 @@ on:
         required: false
         default: ""
         type: string
+      copy_to_regions:
+        description: "Optional comma-separated regions to copy the built AMI into before publishing the release manifest"
+        required: false
+        default: ""
+        type: string
+      junocashd_reindex:
+        description: "Force a one-time junocashd reindex on the builder before imaging"
+        required: false
+        default: false
+        type: boolean
       sync_timeout_seconds:
         description: "Max seconds to wait for junocashd sync"
         required: true
@@ -207,6 +217,9 @@ jobs:
           if [[ -n "${{ steps.resolve_source_ami.outputs.source_ami_id }}" ]]; then
             source_ami_args=(--source-ami-id "${{ steps.resolve_source_ami.outputs.source_ami_id }}")
           fi
+          if [[ "${{ inputs.junocashd_reindex }}" == "true" ]]; then
+            source_ami_args+=(--junocashd-reindex)
+          fi
 
           ./deploy/shared/runbooks/build-operator-stack-ami.sh create \
             --aws-region "${{ inputs.aws_region }}" \
@@ -222,6 +235,22 @@ jobs:
             --manifest-out ".ci/out/operator-ami-manifest.json" \
             --metadata-out ".ci/out/operator-stack-bootstrap.json" | tee ".ci/out/operator-ami-id.txt"
 
+      - name: Copy Operator Stack AMI to Additional Regions
+        if: ${{ inputs.copy_to_regions != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/shared/runbooks/copy-operator-ami.sh replicate \
+            --manifest-in ".ci/out/operator-ami-manifest.json" \
+            --manifest-out ".ci/out/operator-ami-manifest.next.json" \
+            --source-region "${{ inputs.aws_region }}" \
+            --target-regions "${{ inputs.copy_to_regions }}"
+          mv ".ci/out/operator-ami-manifest.next.json" ".ci/out/operator-ami-manifest.json"
+
+      - name: Checksum Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
           sha256sum ".ci/out/operator-ami-manifest.json" > ".ci/out/operator-ami-manifest.json.sha256"
           sha256sum ".ci/out/operator-stack-bootstrap.json" > ".ci/out/operator-stack-bootstrap.json.sha256"
 
@@ -241,9 +270,11 @@ jobs:
           fi
           block_height="$(jq -r '.junocashd.synced_block_height' .ci/out/operator-ami-manifest.json)"
           block_hash="$(jq -r '.junocashd.synced_block_hash' .ci/out/operator-ami-manifest.json)"
+          region_list="$(jq -r '.regions | keys | join(", ")' .ci/out/operator-ami-manifest.json)"
           notes="Operator stack AMI release for ${region}
 
           AMI: ${ami_id}
+          Regions: ${region_list}
           Juno network: ${RELEASE_TIER}
           Synced blockstamp: height=${block_height} hash=${block_hash}
           Repo commit: ${GITHUB_SHA}"
