@@ -137,29 +137,6 @@ a:hover { color: var(--accent-hover); }
   flex-wrap: wrap;
 }
 
-.maintenance-banner {
-  display: grid;
-  gap: 4px;
-  padding: 12px 14px;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 77, 0, 0.4);
-  background: linear-gradient(135deg, rgba(255, 77, 0, 0.16), rgba(255, 77, 0, 0.04));
-}
-
-.maintenance-banner-title {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #ffd2bf;
-}
-
-.maintenance-banner-copy {
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--text);
-}
-
 .mobile-header-menu {
   display: none;
 }

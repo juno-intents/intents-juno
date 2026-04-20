@@ -15,17 +15,6 @@ import { baseChainDisplayName } from '../lib/bridgeUi'
 type RightPanel = 'my-activity' | 'recent-activity' | 'docs'
 
 const UNISWAP_POOL_URL = 'https://app.uniswap.org/explore/pools/base/0xdba3574e915900f3ac316f6c1078718d9983754951dcf5fa211b40c471cf2219'
-const BRIDGE_MAINTENANCE_END_UNIX = 1776451300 + 48 * 60 * 60
-const BRIDGE_MAINTENANCE_END_LABEL = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-  timeZone: 'UTC',
-  timeZoneName: 'short',
-}).format(new Date(BRIDGE_MAINTENANCE_END_UNIX * 1000))
 
 export default function Layout() {
   const [tab, setTab] = useState<'deposit' | 'withdraw'>('deposit')
@@ -100,12 +89,6 @@ export default function Layout() {
             <span className="dot" />
             {runtimeConfig.junoNetworkLabel}
           </span>
-        </div>
-        <div className="maintenance-banner" role="status" aria-live="polite">
-          <div className="maintenance-banner-title">Bridge maintenance in progress</div>
-          <div className="maintenance-banner-copy">
-            Deposits and withdrawals are paused. Earliest expected reopen: {BRIDGE_MAINTENANCE_END_LABEL}.
-          </div>
         </div>
         {menuOpen && (
           <div id="mobile-header-menu" className="mobile-header-menu" role="menu">
