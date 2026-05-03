@@ -315,6 +315,35 @@ func (s *Store) ListByState(ctx context.Context, state checkpoint.PackageState) 
 	return out, nil
 }
 
+func (s *Store) LatestByState(ctx context.Context, state checkpoint.PackageState) (checkpoint.PackageRecord, bool, error) {
+	if s == nil || s.pool == nil {
+		return checkpoint.PackageRecord{}, false, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	var digestRaw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT digest
+		FROM checkpoint_packages
+		WHERE state = $1
+		ORDER BY checkpoint_height DESC, emitted_at DESC NULLS LAST, persisted_at DESC, digest DESC
+		LIMIT 1
+	`, int16(state)).Scan(&digestRaw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return checkpoint.PackageRecord{}, false, nil
+		}
+		return checkpoint.PackageRecord{}, false, fmt.Errorf("checkpoint/postgres: latest package by state: %w", err)
+	}
+	digest, err := toHash(digestRaw)
+	if err != nil {
+		return checkpoint.PackageRecord{}, false, err
+	}
+	rec, err := s.Get(ctx, digest)
+	if err != nil {
+		return checkpoint.PackageRecord{}, false, err
+	}
+	return rec, true, nil
+}
+
 func (s *Store) ListReadyToPin(ctx context.Context, now time.Time, limit int) ([]checkpoint.PackageRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
@@ -616,4 +645,5 @@ func toAddress(raw []byte) (common.Address, error) {
 }
 
 var _ checkpoint.PackageStore = (*Store)(nil)
+var _ checkpoint.LatestPackageStore = (*Store)(nil)
 var _ checkpoint.SignerCommitmentStore = (*Store)(nil)

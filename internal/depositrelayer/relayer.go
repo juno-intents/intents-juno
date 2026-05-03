@@ -471,6 +471,16 @@ func (r *Relayer) restoreCheckpointFromStore(ctx context.Context) error {
 	if r.checkpointStore == nil {
 		return nil
 	}
+	if latestStore, ok := r.checkpointStore.(checkpoint.LatestPackageStore); ok {
+		best, ok, err := latestStore.LatestByState(ctx, checkpoint.PackageStateEmitted)
+		if err != nil {
+			return fmt.Errorf("depositrelayer: load latest emitted checkpoint: %w", err)
+		}
+		if !ok {
+			return nil
+		}
+		return r.restoreCheckpointPackage(best)
+	}
 	recs, err := r.checkpointStore.ListByState(ctx, checkpoint.PackageStateEmitted)
 	if err != nil {
 		return fmt.Errorf("depositrelayer: list emitted checkpoints: %w", err)
@@ -484,6 +494,10 @@ func (r *Relayer) restoreCheckpointFromStore(ctx context.Context) error {
 			best = rec
 		}
 	}
+	return r.restoreCheckpointPackage(best)
+}
+
+func (r *Relayer) restoreCheckpointPackage(best checkpoint.PackageRecord) error {
 	pkg, err := decodeCheckpointPackageRecord(best)
 	if err != nil {
 		return fmt.Errorf("depositrelayer: decode emitted checkpoint %s: %w", best.Digest, err)

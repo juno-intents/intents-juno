@@ -189,6 +189,14 @@ func (s *stubDepositWitnessRefresher) RefreshDepositWitness(_ context.Context, a
 	return s.root, append([]byte(nil), s.item...), nil
 }
 
+type latestOnlyCheckpointStore struct {
+	*checkpoint.MemoryPackageStore
+}
+
+func (s *latestOnlyCheckpointStore) ListByState(context.Context, checkpoint.PackageState) ([]checkpoint.PackageRecord, error) {
+	return nil, errors.New("ListByState should not be used when latest checkpoint lookup is available")
+}
+
 func mustEmittedCheckpointRecord(
 	t *testing.T,
 	cp checkpoint.Checkpoint,
@@ -2608,9 +2616,9 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsOnChainStaleCheckpointRevert(t *
 		Now:               time.Now,
 		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
 			hex.EncodeToString(depositUsedCall[:4]): common.LeftPadBytes([]byte{0}, 32),
-			hex.EncodeToString(heightCall[:4]):    common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
-			hex.EncodeToString(blockHashCall[:4]): acceptedBlockHash[:],
-			hex.EncodeToString(rootCall[:4]):      acceptedRoot[:],
+			hex.EncodeToString(heightCall[:4]):      common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
+			hex.EncodeToString(blockHashCall[:4]):   acceptedBlockHash[:],
+			hex.EncodeToString(rootCall[:4]):        acceptedRoot[:],
 		}},
 	}, store, sender, &stubProofRequester{}, nil)
 	if err != nil {
@@ -4915,6 +4923,74 @@ func TestRelayer_FlushDueRestoresLatestEmittedCheckpointFromStore(t *testing.T) 
 	}
 	if !bytes.Equal(job.Deposit.ProofWitnessItem, witness[:]) {
 		t.Fatalf("deposit witness item changed unexpectedly")
+	}
+}
+
+func TestRelayer_RestoresLatestCheckpointWithoutListingAllEmittedPackages(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           125,
+		BlockHash:        common.HexToHash("0x2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x2112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, sigs := mustSignedCheckpoint(t, cp)
+
+	checkpointStore := &latestOnlyCheckpointStore{MemoryPackageStore: checkpoint.NewMemoryPackageStore()}
+	rec := mustEmittedCheckpointRecord(
+		t,
+		cp,
+		operatorAddrs,
+		sigs,
+		time.Unix(200, 0),
+		time.Unix(201, 0),
+	)
+	if err := checkpointStore.UpsertPackage(context.Background(), rec); err != nil {
+		t.Fatalf("UpsertPackage: %v", err)
+	}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		ClaimTTL:          10 * time.Minute,
+		RuntimeSettings: &stubDepositRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}},
+		BridgeSettings: &stubDepositBridgeSettingsProvider{snapshot: bridgeconfig.Snapshot{
+			MinDepositAmount: 1,
+		}},
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		TipHeightProvider: &stubTipHeightProvider{height: int64(cp.Height)},
+		CheckpointStore:   checkpointStore,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.FlushDue(ctx); err != nil {
+		t.Fatalf("FlushDue: %v", err)
+	}
+	if r.checkpoint == nil {
+		t.Fatalf("checkpoint was not restored")
+	}
+	if r.checkpoint.Height != cp.Height {
+		t.Fatalf("restored checkpoint height: got=%d want=%d", r.checkpoint.Height, cp.Height)
 	}
 }
 

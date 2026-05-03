@@ -30,6 +30,10 @@ type PackageStore interface {
 	UpdateClaimedPin(ctx context.Context, owner string, now time.Time, rec PackageRecord) error
 }
 
+type LatestPackageStore interface {
+	LatestByState(ctx context.Context, state PackageState) (PackageRecord, bool, error)
+}
+
 // IPFSPinner pins a package payload and returns the resulting CID.
 type IPFSPinner interface {
 	PinJSON(ctx context.Context, payload []byte) (string, error)
@@ -221,6 +225,29 @@ func (p *PackagePersistence) ListByState(ctx context.Context, state PackageState
 	return p.store.ListByState(ctx, state)
 }
 
+func (p *PackagePersistence) LatestByState(ctx context.Context, state PackageState) (PackageRecord, bool, error) {
+	if p == nil || p.store == nil {
+		return PackageRecord{}, false, fmt.Errorf("%w: package store required to find latest by state", ErrInvalidPersistenceConfig)
+	}
+	if latestStore, ok := p.store.(LatestPackageStore); ok {
+		return latestStore.LatestByState(ctx, state)
+	}
+	recs, err := p.store.ListByState(ctx, state)
+	if err != nil {
+		return PackageRecord{}, false, err
+	}
+	if len(recs) == 0 {
+		return PackageRecord{}, false, nil
+	}
+	best := recs[0]
+	for _, rec := range recs[1:] {
+		if newerPackageRecord(rec, best) {
+			best = rec
+		}
+	}
+	return best, true, nil
+}
+
 func (p *PackagePersistence) Get(ctx context.Context, digest common.Hash) (PackageRecord, error) {
 	if p == nil || p.store == nil {
 		return PackageRecord{}, fmt.Errorf("%w: package store required to get package", ErrInvalidPersistenceConfig)
@@ -372,6 +399,27 @@ func (s *MemoryPackageStore) ListByState(_ context.Context, state PackageState) 
 	return out, nil
 }
 
+func (s *MemoryPackageStore) LatestByState(_ context.Context, state PackageState) (PackageRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var best PackageRecord
+	found := false
+	for _, rec := range s.records {
+		if rec.State != state {
+			continue
+		}
+		if !found || newerPackageRecord(rec, best) {
+			best = rec
+			found = true
+		}
+	}
+	if !found {
+		return PackageRecord{}, false, nil
+	}
+	return clonePackageRecord(best), true, nil
+}
+
 func (s *MemoryPackageStore) ListReadyToPin(_ context.Context, now time.Time, limit int) ([]PackageRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -499,4 +547,18 @@ func clonePackageRecord(rec PackageRecord) PackageRecord {
 	return out
 }
 
+func newerPackageRecord(candidate, current PackageRecord) bool {
+	if candidate.Checkpoint.Height != current.Checkpoint.Height {
+		return candidate.Checkpoint.Height > current.Checkpoint.Height
+	}
+	if !candidate.EmittedAt.Equal(current.EmittedAt) {
+		return candidate.EmittedAt.After(current.EmittedAt)
+	}
+	if !candidate.PersistedAt.Equal(current.PersistedAt) {
+		return candidate.PersistedAt.After(current.PersistedAt)
+	}
+	return candidate.Digest.Hex() > current.Digest.Hex()
+}
+
 var _ PackageStore = (*MemoryPackageStore)(nil)
+var _ LatestPackageStore = (*MemoryPackageStore)(nil)
