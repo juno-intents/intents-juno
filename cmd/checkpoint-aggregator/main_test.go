@@ -31,6 +31,17 @@ func (p *stubCheckpointProducer) Close() error {
 	return nil
 }
 
+type noEmittedListPackageStore struct {
+	*checkpoint.MemoryPackageStore
+}
+
+func (s *noEmittedListPackageStore) ListByState(ctx context.Context, state checkpoint.PackageState) ([]checkpoint.PackageRecord, error) {
+	if state == checkpoint.PackageStateEmitted {
+		return nil, errors.New("emitted checkpoint packages must not be restored via full ListByState")
+	}
+	return s.MemoryPackageStore.ListByState(ctx, state)
+}
+
 func TestPublishCheckpointPackage_MarksEmittedAfterPublish(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +119,7 @@ func TestPublishCheckpointPackage_SignsCriticalQueuePayload(t *testing.T) {
 	digest := checkpoint.Digest(cp)
 	now := time.Unix(1_700_000_000, 0).UTC()
 
-	store := checkpoint.NewMemoryPackageStore()
+	store := &noEmittedListPackageStore{MemoryPackageStore: checkpoint.NewMemoryPackageStore()}
 	persist, err := checkpoint.NewPackagePersistence(checkpoint.PackagePersistenceConfig{
 		PackageStore: store,
 		Now:          func() time.Time { return now },

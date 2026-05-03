@@ -478,11 +478,11 @@ func restoreCheckpointState(
 	topic string,
 	log *slog.Logger,
 ) error {
-	emitted, err := persist.ListByState(ctx, checkpoint.PackageStateEmitted)
+	rec, ok, err := persist.LatestByState(ctx, checkpoint.PackageStateEmitted)
 	if err != nil {
 		return err
 	}
-	for _, rec := range emitted {
+	if ok {
 		agg.RestoreEmittedDigest(rec.Digest)
 		if log != nil {
 			log.Info("restored emitted checkpoint package", "digest", rec.Digest)
