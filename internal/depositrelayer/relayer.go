@@ -410,7 +410,7 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 		limit = r.cfg.MaxItems
 	}
 	if err := r.promoteSeenDeposits(ctx, limit); err != nil {
-		return err
+		r.log.Warn("depositrelayer: promote seen deposits failed; continuing with confirmed deposits", "err", err)
 	}
 	if err := r.restoreCheckpointFromStore(ctx); err != nil {
 		return err

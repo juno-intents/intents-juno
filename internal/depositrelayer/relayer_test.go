@@ -1042,6 +1042,73 @@ func TestRelayer_QuarantinesTerminalProofFailureBySplittingBatch(t *testing.T) {
 	}
 }
 
+func TestRelayer_ContinuesConfirmedDepositsWhenSeenPromotionFails(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	store := deposit.NewMemoryStore()
+	depositID := [32]byte(common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recipient20 [20]byte
+	copy(recipient20[:], recipient[:])
+	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
+		DepositID:        depositID,
+		Commitment:       [32]byte(common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    recipient20,
+		ProofWitnessItem: testDepositWitnessItem(),
+		JunoHeight:       100,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            3 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-1",
+		Now:               time.Now,
+		RuntimeSettings: &stubDepositRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}},
+		TipHeightProvider: &stubTipHeightProvider{err: errors.New("juno rpc unavailable")},
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if got, want := sender.calls, 1; got != want {
+		t.Fatalf("send calls: got %d want %d", got, want)
+	}
+}
+
 func TestRelayer_DefaultClaimTTLTracksProofRequestTimeout(t *testing.T) {
 	t.Parallel()
 
