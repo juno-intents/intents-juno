@@ -361,6 +361,38 @@ ensure_runtime_deposit_relayer_binary() {
   rm -f "$binary_path"
 }
 
+ensure_runtime_checkpoint_aggregator_binary() {
+  local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
+
+  requested_tag="$(jq -r '.deposit_relayer_release_tag // empty' "$operator_deploy")"
+  release_tag_marker="/var/lib/intents-juno/.checkpoint-aggregator-release-tag"
+
+  if [[ -n "$requested_tag" ]] \
+    && sudo test -x /usr/local/bin/checkpoint-aggregator \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+  if [[ -z "$requested_tag" && -x /usr/local/bin/checkpoint-aggregator ]]; then
+    return 0
+  fi
+
+  if [[ -z "$requested_tag" ]]; then
+    latest_release_json="$(curl -fsSL https://api.github.com/repos/juno-intents/intents-juno/releases/latest)"
+    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
+    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest checkpoint-aggregator release tag"
+    requested_tag="$latest_release_tag"
+  fi
+
+  asset_name="checkpoint-aggregator_linux_amd64"
+  binary_path="$(mktemp)"
+  download_github_release_asset_with_checksum "juno-intents/intents-juno" "$requested_tag" "$asset_name" "$binary_path"
+  sudo install -m 0755 "$binary_path" /usr/local/bin/checkpoint-aggregator
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -f "$binary_path"
+}
+
 ensure_runtime_withdraw_coordinator_binary() {
   local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
 
@@ -561,6 +593,7 @@ fetch_restore_package
 restore_runtime
 ensure_runtime_dkg_admin_binary
 ensure_runtime_juno_txsign_binary
+ensure_runtime_checkpoint_aggregator_binary
 ensure_runtime_deposit_relayer_binary
 ensure_runtime_withdraw_coordinator_binary
 ensure_runtime_withdraw_finalizer_binary
