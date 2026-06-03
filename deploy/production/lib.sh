@@ -467,6 +467,9 @@ production_inventory_app_role_json() {
         ops_public_dns_label: .app_host.ops_public_dns_label,
         public_scheme: .app_host.public_scheme,
         bridge_api_listen: .app_host.bridge_api_listen,
+        bridge_api: .app_host.bridge_api,
+        bridge_paused: .app_host.bridge_paused,
+        bridge_pause_message: .app_host.bridge_pause_message,
         backoffice_listen: .app_host.backoffice_listen,
         juno_rpc_url: .app_host.juno_rpc_url,
         service_urls: .app_host.service_urls,
@@ -3002,6 +3005,7 @@ production_render_app_handoff() {
   local bridge_record_name bridge_public_url backoffice_access_mode backoffice_record_name backoffice_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
+  local bridge_paused bridge_pause_message
   local juno_rpc_url juno_scan_url juno_scan_wallet_id operator_addresses_json base_relayer_signer_addresses_csv
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
@@ -3089,6 +3093,8 @@ production_render_app_handoff() {
   bridge_min_deposit_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_deposit_amount')"
   bridge_min_withdraw_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_withdraw_amount')"
   bridge_fee_bps="$(production_json_required "$shared_manifest" '.contracts.bridge_params.fee_bps')"
+  bridge_paused="$(jq -r '.bridge_api.paused // .bridge_api_paused // .bridge_paused // false' <<<"$app_json")"
+  bridge_pause_message="$(jq -r '.bridge_api.pause_message // .bridge_api_pause_message // .bridge_pause_message // "Bridge is paused."' <<<"$app_json")"
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   juno_scan_url="$(jq -r '.juno_scan_url // empty' <<<"$app_json")"
   juno_scan_wallet_id="$(jq -r '.juno_scan_wallet_id // empty' <<<"$app_json")"
@@ -3239,6 +3245,8 @@ production_render_app_handoff() {
     --argjson bridge_min_deposit_amount "$bridge_min_deposit_amount" \
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
+    --argjson bridge_paused "$bridge_paused" \
+    --arg bridge_pause_message "$bridge_pause_message" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
     --arg backoffice_public_url "$backoffice_public_url" \
     --arg backoffice_probe_url "$backoffice_probe_url" \
@@ -3306,7 +3314,9 @@ production_render_app_handoff() {
           withdrawal_expiry_window_seconds: $bridge_withdrawal_expiry_window_seconds,
           min_deposit_amount: $bridge_min_deposit_amount,
           min_withdraw_amount: $bridge_min_withdraw_amount,
-          fee_bps: $bridge_fee_bps
+          fee_bps: $bridge_fee_bps,
+          paused: $bridge_paused,
+          pause_message: $bridge_pause_message
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,

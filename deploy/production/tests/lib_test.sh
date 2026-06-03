@@ -3025,6 +3025,13 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.bridge_api = {
+      paused: true,
+      pause_message: "Bridge is paused while operators investigate a Junocash chain incident."
+    }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
@@ -3043,6 +3050,8 @@ EOF
   assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "https://bridge.alpha.junointents.com" "bridge public url"
   assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.junointents.com" "bridge probe url"
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
+  assert_eq "$(jq -r '.services.bridge_api.paused' "$app_manifest")" "true" "bridge paused setting"
+  assert_eq "$(jq -r '.services.bridge_api.pause_message' "$app_manifest")" "Bridge is paused while operators investigate a Junocash chain incident." "bridge pause message"
   assert_eq "$(jq -r '.services.backoffice.public_url // empty' "$app_manifest")" "" "backoffice public url"
   assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$app_manifest")" "false" "backoffice public publishing suppressed"
   assert_eq "$(jq -r '.services.backoffice.access.mode' "$app_manifest")" "wireguard" "backoffice access mode"
@@ -3086,7 +3095,8 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=200" "bridge env withdraw batch confirmation default"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_MIN_WITHDRAW_AMOUNT=200000000" "bridge env min withdraw amount"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_FEE_BPS=50" "bridge env fee bps"
-  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=false" "bridge env bridge pause default"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=true" "bridge env bridge pause setting"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSE_MESSAGE=Bridge\\ is\\ paused\\ while\\ operators\\ investigate\\ a\\ Junocash\\ chain\\ incident." "bridge env bridge pause message"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_REQUESTOR_ADDRESS=0x1234567890abcdef1234567890abcdef12345678" "backoffice env prover requestor address"

@@ -499,7 +499,27 @@ else
     fi
   fi
 
-  if [[ -n "$shared_proof_role_asg" ]]; then
+  if [[ "$bridge_paused" == "true" ]]; then
+    if [[ -n "$shared_ecs_cluster_arn" && -n "$shared_proof_requestor_service_name" && -n "$shared_proof_funder_service_name" ]]; then
+      ecs_services_json="$(AWS_PAGER="" aws "${aws_args[@]}" ecs describe-services \
+        --cluster "$shared_ecs_cluster_arn" \
+        --services "$shared_proof_requestor_service_name" "$shared_proof_funder_service_name" 2>/dev/null || true)"
+      if [[ -z "$ecs_services_json" ]] \
+        || ! jq -e --arg requestor "$shared_proof_requestor_service_name" --arg funder "$shared_proof_funder_service_name" '
+          def service($name): .services[]? | select(.serviceName == $name or (.serviceName == null and $name == ""));
+          ((service($requestor) | (.desiredCount // 0) == 0 and (.runningCount // 0) == 0) // false)
+          and ((service($funder) | (.desiredCount // 0) >= 1 and (.runningCount // 0) >= 1) // false)
+        ' >/dev/null <<<"$ecs_services_json"; then
+        shared_proof_services_status="failed"
+        shared_proof_services_detail="paused bridge requires proof requestor stopped and proof funder healthy"
+      else
+        shared_proof_services_detail="paused bridge has proof requestor stopped and proof funder healthy"
+      fi
+    else
+      shared_proof_services_status="skipped"
+      shared_proof_services_detail="paused bridge mode skips shared proof runtime health"
+    fi
+  elif [[ -n "$shared_proof_role_asg" ]]; then
     if ! proof_role_asg_json="$(check_asg_capacity "$shared_proof_role_asg" 2 || true)" || [[ -z "$proof_role_asg_json" ]]; then
       shared_proof_services_status="failed"
       shared_proof_services_detail="shared proof role asg does not have two healthy in-service instances"

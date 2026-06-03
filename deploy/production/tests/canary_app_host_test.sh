@@ -1023,7 +1023,7 @@ if [[ "$1" == "ec2" && "$2" == "describe-instances" ]]; then
   exit 0
 fi
 if [[ "$1" == "ecs" && "$2" == "describe-services" ]]; then
-  printf '{"services":[{"desiredCount":1,"runningCount":1},{"desiredCount":1,"runningCount":1}]}\n'
+  printf '{"services":[{"serviceName":"alpha-proof-requestor","desiredCount":0,"runningCount":0},{"serviceName":"alpha-proof-funder","desiredCount":1,"runningCount":1}]}\n'
   exit 0
 fi
 if [[ "$1" == "autoscaling" && "$2" == "describe-auto-scaling-groups" ]]; then
@@ -1093,6 +1093,8 @@ EOF
 
   assert_eq "$(jq -r '.checks.deposit_memo.status' "$output_json")" "passed" "deposit memo probe passed in paused mode"
   assert_contains "$(jq -r '.checks.deposit_memo.detail' "$output_json")" "paused mode" "deposit memo paused detail"
+  assert_eq "$(jq -r '.checks.shared_proof_services.status' "$output_json")" "passed" "paused canary accepts stopped proof requestor"
+  assert_contains "$(jq -r '.checks.shared_proof_services.detail' "$output_json")" "proof requestor stopped" "paused canary proof requestor detail"
   assert_contains "$(cat "$log_dir/curl.log")" "/v1/deposit-memo" "paused canary probes deposit memo endpoint"
   rm -rf "$workdir"
 }
