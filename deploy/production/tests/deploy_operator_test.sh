@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
