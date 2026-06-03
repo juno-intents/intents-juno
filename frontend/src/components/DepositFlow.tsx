@@ -73,7 +73,7 @@ export default function DepositFlow() {
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
     queryFn: getConfig,
-    refetchInterval: 30_000,
+    refetchInterval: instructionStep === 'closed' ? 5_000 : 1_000,
   })
 
   const {

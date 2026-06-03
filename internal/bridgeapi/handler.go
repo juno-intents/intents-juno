@@ -75,6 +75,10 @@ type PauseChecker interface {
 	IsPaused(ctx context.Context) (bool, error)
 }
 
+type FreshPauseChecker interface {
+	IsPausedFresh(ctx context.Context) (bool, error)
+}
+
 type DepositStatus struct {
 	Job        deposit.Job
 	BaseTxHash string
@@ -239,7 +243,7 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, r *http.Request) {
-	bridgePaused := h.currentBridgePaused(r.Context())
+	bridgePaused := h.currentBridgePaused(r.Context(), true)
 	minDepositAmount := h.cfg.MinDepositAmount
 	depositMinConfirmations := h.cfg.DepositMinConfirmations
 	if !bridgePaused {
@@ -304,12 +308,21 @@ func (h *handler) currentDepositMinConfirmations() (int64, error) {
 	return settings.DepositMinConfirmations, nil
 }
 
-func (h *handler) currentBridgePaused(ctx context.Context) bool {
+func (h *handler) currentBridgePaused(ctx context.Context, fresh bool) bool {
 	if h.cfg.BridgePaused {
 		return true
 	}
 	if h.cfg.PauseChecker == nil {
 		return false
+	}
+	if fresh {
+		if checker, ok := h.cfg.PauseChecker.(FreshPauseChecker); ok {
+			paused, err := checker.IsPausedFresh(ctx)
+			if err != nil {
+				return true
+			}
+			return paused
+		}
 	}
 	paused, err := h.cfg.PauseChecker.IsPaused(ctx)
 	if err != nil {
@@ -319,7 +332,7 @@ func (h *handler) currentBridgePaused(ctx context.Context) bool {
 }
 
 func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
-	if h.currentBridgePaused(r.Context()) {
+	if h.currentBridgePaused(r.Context(), true) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"version": "v1",
 			"error":   "bridge_paused",

@@ -690,17 +690,18 @@ EOF
       --app-terraform-output-json "$app_tf_json" \
       --skip-terraform-apply \
       --run-post-deploy-checks \
+      --app-binaries-release-tag app-binaries-v1.2.3-testnet \
       --output-dir "$output_dir" >/dev/null
 
   assert_file_exists "$output_dir/alpha/inventory.release-resolved.json" "deploy coordinator writes resolved role runtime inventory"
   assert_eq "$(jq -r '.app_role.app_ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedapp1234567" "deploy coordinator resolves app ami id before tfvars"
   assert_eq "$(jq -r '.wireguard_role.ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedwireguard1" "deploy coordinator resolves wireguard ami id before tfvars"
   assert_contains "$(cat "$resolver_log")" "--github-repo juno-intents/intents-juno" "deploy coordinator forwards the default github repo to the release resolver"
-  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "deploy coordinator refreshes the app runtime from the rendered handoffs before post-deploy checks"
+  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "deploy coordinator refreshes the app runtime from the pinned app-binaries release before post-deploy checks"
   assert_contains "$(cat "$provision_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator provisions the app edge from the rendered handoff"
   assert_contains "$(cat "$shared_canary_log")" "--shared-manifest $output_dir/alpha/shared-manifest.json" "deploy coordinator runs the shared canary after rendering the manifest"
   assert_contains "$(cat "$app_canary_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator runs the app canary after rendering the handoff"
-  assert_line_order "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "provision-app-edge --app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator refreshes app runtime before provisioning edge"
+  assert_line_order "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "provision-app-edge --app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator refreshes app runtime before provisioning edge"
   assert_file_exists "$output_dir/alpha/canaries/shared-services.json" "deploy coordinator stores the shared canary output"
   assert_file_exists "$output_dir/alpha/canaries/app.json" "deploy coordinator stores the app canary output"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/canaries/shared-services.json")" "true" "deploy coordinator requires a passing shared canary"

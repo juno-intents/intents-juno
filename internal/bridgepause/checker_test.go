@@ -122,6 +122,43 @@ func TestChecker_CachesResult(t *testing.T) {
 	}
 }
 
+func TestChecker_IsPausedFreshBypassesCachedFalse(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	caller := &mockCaller{result: encodeBool(false)}
+
+	c, err := NewChecker(caller, bridge, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+
+	ctx := context.Background()
+
+	paused, err := c.IsPaused(ctx)
+	if err != nil {
+		t.Fatalf("IsPaused: %v", err)
+	}
+	if paused {
+		t.Fatal("expected initial unpaused state")
+	}
+	if caller.calls != 1 {
+		t.Fatalf("expected 1 RPC call, got %d", caller.calls)
+	}
+
+	caller.result = encodeBool(true)
+	paused, err = c.IsPausedFresh(ctx)
+	if err != nil {
+		t.Fatalf("IsPausedFresh: %v", err)
+	}
+	if !paused {
+		t.Fatal("expected fresh paused state")
+	}
+	if caller.calls != 2 {
+		t.Fatalf("expected fresh call to bypass cache, got %d calls", caller.calls)
+	}
+}
+
 func TestChecker_CacheExpiry(t *testing.T) {
 	t.Parallel()
 

@@ -515,6 +515,9 @@ else
       else
         shared_proof_services_detail="paused bridge has proof requestor stopped and proof funder healthy"
       fi
+    elif [[ -n "$shared_proof_role_asg" ]]; then
+      shared_proof_services_status="skipped"
+      shared_proof_services_detail="paused bridge uses proof role ASG; ECS requestor containment is not applicable"
     else
       shared_proof_services_status="failed"
       shared_proof_services_detail="paused bridge requires shared proof ECS metadata to verify requestor stopped and funder healthy"
@@ -606,6 +609,7 @@ jq -n \
   --arg shared_proof_services_detail "$shared_proof_services_detail" \
   '{
     ready_for_deploy: $ready_for_deploy,
+    ready_for_test: $ready_for_deploy,
     checks: {
       inputs: {status: $input_status, detail: $input_detail},
       systemd: {status: $systemd_status, detail: $systemd_detail},

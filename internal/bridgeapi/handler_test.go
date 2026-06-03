@@ -76,12 +76,26 @@ func (s *stubJunoTipProvider) TipHeight(_ context.Context) (int64, error) {
 }
 
 type stubPauseChecker struct {
-	paused bool
-	err    error
+	paused       bool
+	freshPaused  bool
+	err          error
+	freshErr     error
+	calls        int
+	freshCalls   int
+	supportFresh bool
 }
 
 func (s *stubPauseChecker) IsPaused(context.Context) (bool, error) {
+	s.calls++
 	return s.paused, s.err
+}
+
+func (s *stubPauseChecker) IsPausedFresh(context.Context) (bool, error) {
+	s.freshCalls++
+	if !s.supportFresh {
+		return s.IsPaused(context.Background())
+	}
+	return s.freshPaused, s.freshErr
 }
 
 type stubRuntimeSettingsProvider struct {
@@ -400,6 +414,52 @@ func TestHandler_Config(t *testing.T) {
 			t.Fatalf("minDepositAmount: got %s want 7", got)
 		}
 	})
+
+	t.Run("uses fresh on-chain pause state instead of cached false", func(t *testing.T) {
+		pauseChecker := &stubPauseChecker{
+			paused:       false,
+			freshPaused:  true,
+			supportFresh: true,
+		}
+		h, err := NewHandler(Config{
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			MinDepositAmount:              7,
+			DepositMinConfirmations:       1,
+			BridgePauseMessage:            "Bridge is paused.",
+			BridgeSettings:                &stubBridgeSettingsProvider{err: context.Canceled},
+			PauseChecker:                  pauseChecker,
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if pauseChecker.freshCalls != 1 {
+			t.Fatalf("fresh pause calls: got %d want 1", pauseChecker.freshCalls)
+		}
+		if pauseChecker.calls != 0 {
+			t.Fatalf("cached pause calls: got %d want 0", pauseChecker.calls)
+		}
+
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out["bridgePaused"] != true {
+			t.Fatalf("bridgePaused: got %v want true", out["bridgePaused"])
+		}
+	})
 }
 
 func TestHandler_ProbeAliases(t *testing.T) {
@@ -548,6 +608,39 @@ func TestHandler_DepositMemoBridgePaused(t *testing.T) {
 		}
 
 		assertDepositMemoPaused(t, h)
+	})
+
+	t.Run("uses fresh on-chain pause state", func(t *testing.T) {
+		t.Parallel()
+
+		pauseChecker := &stubPauseChecker{
+			paused:       false,
+			freshPaused:  true,
+			supportFresh: true,
+		}
+		h, err := NewHandler(Config{
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			DepositMinConfirmations:       1,
+			BridgePauseMessage:            "Bridge is paused.",
+			PauseChecker:                  pauseChecker,
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+
+		assertDepositMemoPaused(t, h)
+		if pauseChecker.freshCalls != 1 {
+			t.Fatalf("fresh pause calls: got %d want 1", pauseChecker.freshCalls)
+		}
+		if pauseChecker.calls != 0 {
+			t.Fatalf("cached pause calls: got %d want 0", pauseChecker.calls)
+		}
 	})
 
 	t.Run("on-chain check error fails closed", func(t *testing.T) {
