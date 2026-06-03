@@ -81,6 +81,7 @@ shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_p
 shared_proof_role_asg="$(production_json_optional "$shared_manifest_path" '.shared_roles.proof.asg')"
 shared_proof_requestor_address="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.requestor_address')"
 shared_proof_rpc_url="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.rpc_url')"
+bridge_paused_expected="$(jq -r '.services.bridge_api.paused == true' "$app_deploy" 2>/dev/null || printf 'false')"
 
 require_funds_check="${PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK:-false}"
 http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
@@ -411,7 +412,15 @@ else
     bridge_config_detail="bridge-api /v1/config missing or mismatched runtime fields"
   fi
 
-  bridge_paused="$(jq -r '.bridgePaused == true' <<<"$bridge_config_json" 2>/dev/null || printf 'false')"
+  bridge_paused_live="$(jq -r '.bridgePaused == true' <<<"$bridge_config_json" 2>/dev/null || printf 'false')"
+  bridge_paused="$bridge_paused_live"
+  if [[ "$bridge_paused_expected" == "true" ]]; then
+    bridge_paused="true"
+    if [[ "$bridge_paused_live" != "true" ]]; then
+      bridge_config_status="failed"
+      bridge_config_detail="bridge-api /v1/config did not report expected paused mode"
+    fi
+  fi
   if [[ "$bridge_paused" == "true" ]]; then
     deposit_memo_json="$(http_get_status_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge paused deposit memo" "503" || true)"
     if [[ -z "$deposit_memo_json" ]] \

@@ -24,6 +24,7 @@ Options:
   --funder-key-file PATH                       Bridge deploy ephemeral funder key
   --ephemeral-funding-amount-wei AMOUNT        Bridge deploy ephemeral funding amount
   --existing-bridge-summary PATH               Optional bridge summary reuse path
+  --app-binaries-release-tag TAG               Pinned app-binaries release tag (required)
   --app-runtime-ami-release-tag TAG            Pinned app runtime AMI release tag (required)
   --shared-proof-services-image-release-tag TAG Pinned shared proof image release tag (required)
   --wireguard-role-ami-release-tag TAG         Pinned wireguard role AMI release tag (required)
@@ -84,6 +85,7 @@ deployer_key_file=""
 funder_key_file=""
 ephemeral_funding_amount_wei=""
 existing_bridge_summary=""
+app_binaries_release_tag=""
 app_runtime_ami_release_tag=""
 shared_proof_services_image_release_tag=""
 wireguard_role_ami_release_tag=""
@@ -103,6 +105,7 @@ while [[ $# -gt 0 ]]; do
     --funder-key-file) funder_key_file="$2"; shift 2 ;;
     --ephemeral-funding-amount-wei) ephemeral_funding_amount_wei="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
+    --app-binaries-release-tag) app_binaries_release_tag="$2"; shift 2 ;;
     --app-runtime-ami-release-tag) app_runtime_ami_release_tag="$2"; shift 2 ;;
     --shared-proof-services-image-release-tag) shared_proof_services_image_release_tag="$2"; shift 2 ;;
     --wireguard-role-ami-release-tag) wireguard_role_ami_release_tag="$2"; shift 2 ;;
@@ -327,6 +330,7 @@ run_shared_infra_e2e() {
 [[ -f "$inventory" ]] || die "inventory not found: $inventory"
 [[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
 [[ -f "$dkg_summary" ]] || die "dkg summary not found: $dkg_summary"
+[[ -n "$app_binaries_release_tag" ]] || die "--app-binaries-release-tag is required"
 [[ -n "$app_runtime_ami_release_tag" ]] || die "--app-runtime-ami-release-tag is required"
 [[ -n "$shared_proof_services_image_release_tag" ]] || die "--shared-proof-services-image-release-tag is required"
 [[ -n "$wireguard_role_ami_release_tag" ]] || die "--wireguard-role-ami-release-tag is required"
@@ -444,6 +448,7 @@ coordinator_args=(
   --bridge-deploy-binary "$bridge_deploy_binary"
   --output-dir "$output_root"
   --github-repo "$github_repo"
+  --app-binaries-release-tag "$app_binaries_release_tag"
 )
 if [[ -n "$dkg_completion" ]]; then
   coordinator_args+=(--dkg-completion "$dkg_completion")
@@ -476,6 +481,7 @@ app_runtime_refresh_path="$output_dir/app-runtime-refresh.json"
 "$refresh_app_runtime_bin" \
   --shared-manifest "$shared_manifest" \
   --app-deploy "$app_deploy" \
+  --app-binaries-release-tag "$app_binaries_release_tag" \
   --output-dir "$output_dir/app-runtime" >"$app_runtime_refresh_path"
 [[ "$(jq -r '.ready_for_deploy' "$app_runtime_refresh_path")" == "true" ]] || die "app runtime refresh failed"
 "$canary_app_bin" --app-deploy "$app_deploy" >"$output_dir/canaries/app.json"
@@ -562,6 +568,7 @@ release_lock="$output_dir/role-runtime-release-lock.json"
 jq -n \
   --arg workflow "reset-preview-role-runtime" \
   --arg inventory_path "$inventory" \
+  --arg app_binaries_release_tag "$app_binaries_release_tag" \
   --arg app_runtime_ami_release_tag "$app_runtime_ami_release_tag" \
   --arg shared_proof_services_image_release_tag "$shared_proof_services_image_release_tag" \
   --arg wireguard_role_ami_release_tag "$wireguard_role_ami_release_tag" \
@@ -578,6 +585,7 @@ jq -n \
     {
       workflow: $workflow,
       inventory_path: $inventory_path,
+      app_binaries_release_tag: $app_binaries_release_tag,
       app_runtime_ami_release_tag: $app_runtime_ami_release_tag,
       shared_proof_services_image_release_tag: $shared_proof_services_image_release_tag,
       wireguard_role_ami_release_tag: $wireguard_role_ami_release_tag,

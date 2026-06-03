@@ -403,6 +403,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
         --inventory "$inventory" \
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
@@ -413,6 +414,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
 
   assert_contains "$(cat "$log_file")" "refresh-app-runtime --shared-manifest $output_root/preview/shared-manifest.json" "rebuild refreshes app runtime from the rebuilt shared manifest"
   assert_contains "$(cat "$log_file")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes app runtime from the rebuilt app handoff"
+  assert_contains "$(cat "$log_file")" "--app-binaries-release-tag app-binaries-v2026.03.20-testnet" "rebuild refreshes app runtime from the selected app-binaries release"
   assert_contains "$(cat "$log_file")" "--output-dir $output_root/preview/app-runtime" "rebuild stores app runtime evidence in a dedicated directory"
   local refresh_line canary_line canary_count first_canary_line final_canary_line
   refresh_line="$(grep -n "refresh-app-runtime" "$log_file" | head -n1 | cut -d: -f1)"
@@ -473,6 +475,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_contains "$(cat "$ssm_commands")" "withdrawals.requested.v2" "rebuild ensures the withdraw request topic exists before preview validation"
   assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the remote shared infra validation output"
   assert_eq "$(jq -r '.app_runtime_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-runtime-refresh.json" "release lock records the app runtime refresh evidence"
+  assert_eq "$(jq -r '.app_binaries_release_tag' "$output_root/preview/role-runtime-release-lock.json")" "app-binaries-v2026.03.20-testnet" "release lock records the selected app-binaries release"
   assert_eq "$(jq -r '.app_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-backoffice-refresh.json" "release lock records the app backoffice refresh evidence"
   assert_eq "$(jq -r '.app_post_rollout_canary_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/canaries/app-post-final-rollout.json" "release lock records the final app canary evidence"
 
@@ -547,6 +550,7 @@ JSON
         --inventory "$inventory" \
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
@@ -616,6 +620,7 @@ EOF
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
         --funder-key-file "$tmp/funder.key" \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
@@ -690,6 +695,7 @@ EOF
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
         --funder-key-file "$tmp/funder.key" \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
@@ -762,6 +768,7 @@ EOF
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
         --funder-key-file "$tmp/funder.key" \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
@@ -853,6 +860,7 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
         --inventory "$inventory" \
         --dkg-summary "$dkg_summary" \
         --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
         --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
         --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
         --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \

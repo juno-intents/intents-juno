@@ -29,6 +29,7 @@ main() {
   assert_contains "$preview_workflow" 'must not use latest tags' "preview deploy workflow rejects latest tags"
 
   assert_contains "$reset_preview_workflow" 'operator_stack_ami_release_tag' "preview reset workflow requires the operator stack ami tag"
+  assert_contains "$reset_preview_workflow" '--app-binaries-release-tag "${{ inputs.app_binaries_release_tag }}"' "preview reset workflow refreshes app runtime from the selected app-binaries release"
   assert_contains "$reset_preview_workflow" 'upgrade-preview-inventory.sh' "preview reset workflow upgrades legacy preview inputs into the role runtime contract"
   assert_contains "$reset_preview_workflow" 'destroy-preview-role-runtime.sh' "preview reset workflow destroys the current preview role runtime before rebuild"
   assert_contains "$reset_preview_workflow" 'roll-preview-operators.sh' "preview reset workflow refreshes operators after the shared and app rebuild"
