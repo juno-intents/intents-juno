@@ -40,9 +40,10 @@ export default function WithdrawFlow() {
   const [decodeError, setDecodeError] = useState<string | null>(null)
   const [recentRecipients, setRecentRecipients] = useState<string[]>(loadRecentRecipients)
 
-  const { data: cfg } = useQuery({
+  const { data: cfg, refetch: refetchConfig } = useQuery({
     queryKey: ['bridge-config'],
     queryFn: getConfig,
+    refetchInterval: 30_000,
   })
 
   const bridgeAddress = cfg?.bridgeAddress as `0x${string}` | undefined
@@ -115,8 +116,19 @@ export default function WithdrawFlow() {
     }
   }, [recentRecipients])
 
-  const handleApprove = () => {
+  const refreshPauseState = async () => {
+    const freshCfg = (await refetchConfig()).data
+    const paused = freshCfg?.bridgePaused === true
+    if (paused) {
+      setStep('input')
+      setDecodeError(null)
+    }
+    return paused
+  }
+
+  const handleApprove = async () => {
     if (bridgePaused || !wjunoAddress || !bridgeAddress || formError) return
+    if (await refreshPauseState()) return
     approve({
       address: wjunoAddress as `0x${string}`,
       abi: WJUNO_ABI,
@@ -128,6 +140,7 @@ export default function WithdrawFlow() {
 
   const handleRequestWithdraw = async () => {
     if (bridgePaused || !bridgeAddress || !amount || !junoRecipient || formError) return
+    if (await refreshPauseState()) return
     setDecodeError(null)
     try {
       const orchardHex = await decodeRecipient(junoRecipient)

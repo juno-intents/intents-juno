@@ -516,8 +516,8 @@ else
         shared_proof_services_detail="paused bridge has proof requestor stopped and proof funder healthy"
       fi
     else
-      shared_proof_services_status="skipped"
-      shared_proof_services_detail="paused bridge mode skips shared proof runtime health"
+      shared_proof_services_status="failed"
+      shared_proof_services_detail="paused bridge requires shared proof ECS metadata to verify requestor stopped and funder healthy"
     fi
   elif [[ -n "$shared_proof_role_asg" ]]; then
     if ! proof_role_asg_json="$(check_asg_capacity "$shared_proof_role_asg" 2 || true)" || [[ -z "$proof_role_asg_json" ]]; then
