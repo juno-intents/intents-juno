@@ -1187,7 +1187,91 @@ production_certificate_sha256_hex() {
 }
 
 production_materialize_operator_dkg_backup_zip() {
-  die "local dkg backup packaging is disabled; use runtime_material_ref.mode=s3-kms-zip"
+  [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "local dkg backup packaging is disabled; use runtime_material_ref.mode=s3-kms-zip"
+
+  local backup_zip_src="$1"
+  local backup_zip_dst="$2"
+  local dkg_tls_dir="${3:-}"
+  local tmp_dir tmp_json coordinator_client_fingerprint
+
+  [[ -f "$backup_zip_src" ]] || die "dkg backup zip not found: $backup_zip_src"
+  mkdir -p "$(dirname "$backup_zip_dst")"
+
+  if [[ -z "$dkg_tls_dir" ]]; then
+    if [[ "$backup_zip_src" != "$backup_zip_dst" ]]; then
+      cp "$backup_zip_src" "$backup_zip_dst"
+    fi
+    return 0
+  fi
+
+  [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
+  for required in ca.pem coordinator-client.pem coordinator-client.key; do
+    [[ -f "$dkg_tls_dir/$required" ]] || die "dkg_tls_dir missing required file: $dkg_tls_dir/$required"
+  done
+  have_cmd unzip || die "required command not found: unzip"
+  have_cmd zip || die "required command not found: zip"
+
+  tmp_dir="$(mktemp -d)"
+  unzip -q "$backup_zip_src" -d "$tmp_dir" || {
+    rm -rf "$tmp_dir"
+    die "failed to unpack dkg backup zip: $backup_zip_src"
+  }
+
+  [[ -f "$tmp_dir/manifest.json" ]] || {
+    rm -rf "$tmp_dir"
+    die "dkg backup zip missing manifest.json: $backup_zip_src"
+  }
+  [[ -f "$tmp_dir/payload/admin-config.json" ]] || {
+    rm -rf "$tmp_dir"
+    die "dkg backup zip missing payload/admin-config.json: $backup_zip_src"
+  }
+
+  mkdir -p "$tmp_dir/payload/tls"
+  cp "$dkg_tls_dir/ca.pem" "$tmp_dir/payload/tls/ca.pem"
+  cp "$dkg_tls_dir/coordinator-client.pem" "$tmp_dir/payload/tls/coordinator-client.pem"
+  cp "$dkg_tls_dir/coordinator-client.key" "$tmp_dir/payload/tls/coordinator-client.key"
+  chmod 0600 "$tmp_dir/payload/tls/coordinator-client.key" || true
+
+  coordinator_client_fingerprint="$(production_certificate_sha256_hex "$dkg_tls_dir/coordinator-client.pem")"
+  tmp_json="$(mktemp)"
+  jq \
+    --arg fingerprint "$coordinator_client_fingerprint" \
+    '.grpc = ((.grpc // {}) + {
+      coordinator_client_cert_sha256: $fingerprint,
+      tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+      tls_client_key_pem_path: "./tls/coordinator-client.key"
+    })' \
+    "$tmp_dir/payload/admin-config.json" >"$tmp_json"
+  mv "$tmp_json" "$tmp_dir/payload/admin-config.json"
+
+  tmp_json="$(mktemp)"
+  jq \
+    --arg tls_ca_path "$dkg_tls_dir/ca.pem" \
+    --arg coordinator_client_cert_path "$dkg_tls_dir/coordinator-client.pem" \
+    --arg coordinator_client_key_path "$dkg_tls_dir/coordinator-client.key" \
+    '.includes = ((.includes // {}) + {
+      tls_ca_cert: "payload/tls/ca.pem",
+      coordinator_client_cert: "payload/tls/coordinator-client.pem",
+      coordinator_client_key: "payload/tls/coordinator-client.key"
+    })
+    | .source_paths = ((.source_paths // {}) + {
+      tls_ca_cert: $tls_ca_path,
+      coordinator_client_cert: $coordinator_client_cert_path,
+      coordinator_client_key: $coordinator_client_key_path
+    })' \
+    "$tmp_dir/manifest.json" >"$tmp_json"
+  mv "$tmp_json" "$tmp_dir/manifest.json"
+
+  rm -f "$backup_zip_dst"
+  (
+    cd "$tmp_dir"
+    zip -qr "$backup_zip_dst" manifest.json payload
+  ) || {
+    rm -rf "$tmp_dir"
+    die "failed to pack normalized dkg backup zip: $backup_zip_dst"
+  }
+
+  rm -rf "$tmp_dir"
 }
 
 production_base_relayer_allowed_selectors() {
@@ -1215,11 +1299,109 @@ PY
 }
 
 production_refresh_operator_secret_contract() {
-  die "operator secret contract refresh is disabled; use runtime_config_secret_id on-host hydration"
+  [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "operator secret contract refresh is disabled; use runtime_config_secret_id on-host hydration"
+
+  local inventory="$1"
+  local inventory_dir="$2"
+  local shared_manifest="$3"
+  local operator_json="$4"
+  local secret_contract_file="$5"
+  local current_dsn existing_dsn checkpoint_blob_bucket
+
+  [[ -f "$secret_contract_file" ]] || return 0
+
+  existing_dsn="$(production_env_first_value "$secret_contract_file" CHECKPOINT_POSTGRES_DSN APP_POSTGRES_DSN || true)"
+  existing_dsn="${existing_dsn#literal:}"
+  if [[ -n "$existing_dsn" ]]; then
+    current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
+    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
+  fi
+
+  checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
+  if [[ -z "$checkpoint_blob_bucket" ]]; then
+    checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
+  fi
+  if [[ -n "$checkpoint_blob_bucket" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
+    production_secret_contract_upsert_literal "$secret_contract_file" WITHDRAW_BLOB_BUCKET "$checkpoint_blob_bucket"
+  fi
 }
 
 production_refresh_app_secret_contract() {
-  die "app secret contract refresh is disabled; use runtime_config_secret_id on-host hydration"
+  [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "app secret contract refresh is disabled; use runtime_config_secret_id on-host hydration"
+
+  local inventory="$1"
+  local inventory_dir="$2"
+  local shared_manifest="$3"
+  local secret_contract_file="$4"
+  local current_dsn existing_dsn updated_any="false"
+  local app_juno_rpc_user app_juno_rpc_pass operator_secret_json operator_secret_rel operator_secret_file
+  local operator_aws_profile operator_aws_region allow_local_resolvers="false"
+  local operator_juno_rpc_user="" operator_juno_rpc_pass="" candidate_user_raw candidate_pass_raw candidate_user candidate_pass
+
+  [[ -f "$secret_contract_file" ]] || return 0
+
+  existing_dsn="$(production_env_first_value "$secret_contract_file" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
+  existing_dsn="${existing_dsn#literal:}"
+  if [[ -n "$existing_dsn" ]]; then
+    current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
+    if grep -q '^APP_POSTGRES_DSN=' "$secret_contract_file"; then
+      production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+      updated_any="true"
+    fi
+    if grep -q '^CHECKPOINT_POSTGRES_DSN=' "$secret_contract_file"; then
+      production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
+      updated_any="true"
+    fi
+    if [[ "$updated_any" != "true" ]]; then
+      production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+    fi
+  fi
+
+  app_juno_rpc_user="$(production_env_first_value "$secret_contract_file" JUNO_RPC_USER APP_JUNO_RPC_USER || true)"
+  app_juno_rpc_pass="$(production_env_first_value "$secret_contract_file" JUNO_RPC_PASS APP_JUNO_RPC_PASS || true)"
+  if [[ -n "$app_juno_rpc_user" && -n "$app_juno_rpc_pass" ]]; then
+    return 0
+  fi
+
+  allow_local_resolvers="true"
+  while IFS= read -r operator_secret_json; do
+    operator_secret_rel="$(jq -r '.secret_contract_file // empty' <<<"$operator_secret_json")"
+    [[ -n "$operator_secret_rel" ]] || continue
+    operator_secret_file="$(production_abs_path "$inventory_dir" "$operator_secret_rel")"
+    [[ -f "$operator_secret_file" ]] || continue
+    operator_aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_secret_json")"
+    operator_aws_region="$(jq -r '.aws_region // empty' <<<"$operator_secret_json")"
+
+    candidate_user_raw="$(production_env_first_value "$operator_secret_file" JUNO_RPC_USER APP_JUNO_RPC_USER || true)"
+    if [[ -n "$candidate_user_raw" ]]; then
+      production_validate_secret_resolver "$candidate_user_raw" "$allow_local_resolvers"
+      candidate_user="$(production_resolve_secret_value "$candidate_user_raw" "$operator_aws_profile" "$operator_aws_region")"
+      if [[ -z "$operator_juno_rpc_user" ]]; then
+        operator_juno_rpc_user="$candidate_user"
+      elif [[ "$operator_juno_rpc_user" != "$candidate_user" ]]; then
+        die "operator secret contracts disagree on JUNO_RPC_USER"
+      fi
+    fi
+
+    candidate_pass_raw="$(production_env_first_value "$operator_secret_file" JUNO_RPC_PASS APP_JUNO_RPC_PASS || true)"
+    if [[ -n "$candidate_pass_raw" ]]; then
+      production_validate_secret_resolver "$candidate_pass_raw" "$allow_local_resolvers"
+      candidate_pass="$(production_resolve_secret_value "$candidate_pass_raw" "$operator_aws_profile" "$operator_aws_region")"
+      if [[ -z "$operator_juno_rpc_pass" ]]; then
+        operator_juno_rpc_pass="$candidate_pass"
+      elif [[ "$operator_juno_rpc_pass" != "$candidate_pass" ]]; then
+        die "operator secret contracts disagree on JUNO_RPC_PASS"
+      fi
+    fi
+  done < <(jq -c '.operators[]?' "$inventory")
+
+  if [[ -z "$app_juno_rpc_user" && -n "$operator_juno_rpc_user" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" JUNO_RPC_USER "$operator_juno_rpc_user"
+  fi
+  if [[ -z "$app_juno_rpc_pass" && -n "$operator_juno_rpc_pass" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" JUNO_RPC_PASS "$operator_juno_rpc_pass"
+  fi
 }
 
 production_aws_describe_instance_field() {
@@ -1478,7 +1660,29 @@ production_resolve_optional_aws_sm_secret() {
 }
 
 production_resolve_secret_contract() {
-  die "local secret contract resolution is disabled; use runtime_config_secret_id with host-side hydration"
+  [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "local secret contract resolution is disabled; use runtime_config_secret_id with host-side hydration"
+
+  local input_file="$1"
+  local allow_local="$2"
+  local aws_profile="$3"
+  local aws_region="$4"
+  local output_file="$5"
+
+  : >"$output_file"
+
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    [[ "$raw_line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$raw_line" =~ ^[[:space:]]*$ ]] && continue
+
+    local key="${raw_line%%=*}"
+    local resolver="${raw_line#*=}"
+    [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "invalid env key in secret contract: $key"
+    production_validate_secret_resolver "$resolver" "$allow_local"
+    local resolved
+    resolved="$(production_resolve_secret_value "$resolver" "$aws_profile" "$aws_region")"
+    [[ "$resolved" != *$'\n'* ]] || die "multiline secret values are not supported for $key"
+    printf '%s=%s\n' "$key" "$resolved" >>"$output_file"
+  done <"$input_file"
 }
 
 production_env_get_value() {
@@ -1873,6 +2077,18 @@ production_derive_owallet_keys_from_ufvk() {
   deposit_ivk="$(production_normalize_prefixed_hex "$deposit_ivk" 128 "SP1_DEPOSIT_OWALLET_IVK_HEX")"
   withdraw_ovk="$(production_normalize_prefixed_hex "$withdraw_ovk" 64 "SP1_WITHDRAW_OWALLET_OVK_HEX")"
   printf '%s\n%s\n' "$deposit_ivk" "$withdraw_ovk"
+}
+
+production_test_default_deposit_owallet_ivk() {
+  printf '0x'
+  printf '1%.0s' $(seq 1 128)
+  printf '\n'
+}
+
+production_test_default_withdraw_owallet_ovk() {
+  printf '0x'
+  printf '2%.0s' $(seq 1 64)
+  printf '\n'
 }
 
 production_port_from_listen_addr() {
@@ -2793,7 +3009,7 @@ production_render_app_handoff() {
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json edge_viewer_certificate_arn
   local wireguard_source_cidrs_json backoffice_access_json backoffice_dns_label
   local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json tf_app_role_json
-  local runtime_config_secret_id runtime_config_secret_region
+  local runtime_config_secret_id runtime_config_secret_region app_known_hosts_file app_secret_contract_file
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -2823,6 +3039,9 @@ production_render_app_handoff() {
     )"
   fi
   manifest_version="3"
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+    manifest_version="2"
+  fi
   app_role_json="$app_json"
   proof_role_json="$(production_json_optional "$shared_manifest" '.shared_roles.proof // {}')"
   if [[ -z "$proof_role_json" || "$proof_role_json" == "null" ]]; then
@@ -2843,11 +3062,13 @@ production_render_app_handoff() {
   [[ -n "$public_endpoint" || -n "$edge_public_lb_dns_name" ]] || die "app_role.public_endpoint or app_role.public_lb.dns_name is required when inventory.app_role or inventory.app_host is present"
   aws_profile="$(jq -r '.aws_profile // empty' <<<"$app_json")"
   aws_region="$(jq -r '.aws_region // empty' <<<"$app_json")"
-  [[ -z "$(jq -r '.known_hosts_file // empty' <<<"$app_json")" ]] || die "app_role must not set known_hosts_file when environment=$env_slug"
-  [[ -z "$(jq -r '.secret_contract_file // empty' <<<"$app_json")" ]] || die "app_role must not set secret_contract_file when environment=$env_slug"
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" != "true" ]]; then
+    [[ -z "$(jq -r '.known_hosts_file // empty' <<<"$app_json")" ]] || die "app_role must not set known_hosts_file when environment=$env_slug"
+    [[ -z "$(jq -r '.secret_contract_file // empty' <<<"$app_json")" ]] || die "app_role must not set secret_contract_file when environment=$env_slug"
+  fi
   runtime_config_secret_id="$(jq -r '.runtime_config_secret_id // empty' <<<"$app_json")"
   runtime_config_secret_region="$(jq -r '.runtime_config_secret_region // empty' <<<"$app_json")"
-  [[ -n "$runtime_config_secret_id" ]] || die "app_role.runtime_config_secret_id is required when inventory.app_role or inventory.app_host is present"
+  [[ -n "$runtime_config_secret_id" || "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "app_role.runtime_config_secret_id is required when inventory.app_role or inventory.app_host is present"
   if [[ -z "$runtime_config_secret_region" ]]; then
     runtime_config_secret_region="$aws_region"
   fi
@@ -2968,6 +3189,26 @@ production_render_app_handoff() {
   app_dir="$(production_app_dir "$output_dir")"
   mkdir -p "$app_dir"
   manifest_path="$app_dir/app-deploy.json"
+  app_known_hosts_file=""
+  app_secret_contract_file=""
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+    local app_known_hosts_src app_secret_contract_src
+    app_known_hosts_src="$(jq -r '.known_hosts_file // empty' <<<"$app_json")"
+    app_secret_contract_src="$(jq -r '.secret_contract_file // empty' <<<"$app_json")"
+    if [[ -n "$app_known_hosts_src" ]]; then
+      app_known_hosts_src="$(production_abs_path "$inventory_dir" "$app_known_hosts_src")"
+      [[ -f "$app_known_hosts_src" ]] || die "app known_hosts file not found: $app_known_hosts_src"
+      app_known_hosts_file="$app_dir/known_hosts"
+      cp "$app_known_hosts_src" "$app_known_hosts_file"
+    fi
+    if [[ -n "$app_secret_contract_src" ]]; then
+      app_secret_contract_src="$(production_abs_path "$inventory_dir" "$app_secret_contract_src")"
+      [[ -f "$app_secret_contract_src" ]] || die "app secret contract file not found: $app_secret_contract_src"
+      app_secret_contract_file="$app_dir/app-secrets.env"
+      cp "$app_secret_contract_src" "$app_secret_contract_file"
+      production_refresh_app_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$app_secret_contract_file"
+    fi
+  fi
 
   jq -n \
     --arg version "$manifest_version" \
@@ -2975,6 +3216,8 @@ production_render_app_handoff() {
     --arg shared_manifest_path "$shared_manifest" \
     --arg runtime_config_secret_id "$runtime_config_secret_id" \
     --arg runtime_config_secret_region "$runtime_config_secret_region" \
+    --arg known_hosts_file "$app_known_hosts_file" \
+    --arg secret_contract_file "$app_secret_contract_file" \
     --arg app_host "$app_host" \
     --arg app_user "$app_user" \
     --arg runtime_dir "$runtime_dir" \
@@ -3032,6 +3275,8 @@ production_render_app_handoff() {
       shared_manifest_path: $shared_manifest_path,
       runtime_config_secret_id: $runtime_config_secret_id,
       runtime_config_secret_region: $runtime_config_secret_region,
+      known_hosts_file: (if $known_hosts_file == "" then null else $known_hosts_file end),
+      secret_contract_file: (if $secret_contract_file == "" then null else $secret_contract_file end),
       app_host: (if $app_host == "" then null else $app_host end),
       app_role: $app_role,
       wireguard_role: $wireguard_role,
@@ -3143,6 +3388,7 @@ production_render_operator_handoffs() {
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local shared_aws_profile shared_aws_region
+  local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
   local manifest_version withdraw_operator_endpoints_json
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -3160,7 +3406,14 @@ production_render_operator_handoffs() {
     dkg_tls_dir="$(production_abs_path "$inventory_dir" "$dkg_tls_dir")"
     [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
   fi
+  shared_owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
+  signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
+  derived_deposit_owallet_ivk=""
+  derived_withdraw_owallet_ovk=""
   manifest_version="3"
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+    manifest_version="2"
+  fi
   withdraw_operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
 
   local rollout_state="$output_dir/rollout-state.json"
@@ -3169,7 +3422,8 @@ production_render_operator_handoffs() {
   local operator_count index
   operator_count="$(jq -r '.operators | length' "$inventory")"
   for ((index = 0; index < operator_count; index++)); do
-    local operator_json operator_id handoff_dir manifest_path public_dns_name public_endpoint
+    local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
+    local known_hosts_dst secrets_dst backup_zip_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index
     local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id deposit_relayer_release_tag
     local operator_aws_profile operator_aws_region runtime_config_secret_id runtime_config_secret_region
@@ -3181,6 +3435,9 @@ production_render_operator_handoffs() {
     handoff_dir="$(production_operator_dir "$output_dir" "$operator_id")"
     mkdir -p "$handoff_dir"
 
+    known_hosts_src="$(jq -r '.known_hosts_file // empty' <<<"$operator_json")"
+    secrets_src="$(jq -r '.secret_contract_file // empty' <<<"$operator_json")"
+    backup_zip_src="$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")"
     public_endpoint="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
     local operator_role_json
@@ -3203,9 +3460,11 @@ production_render_operator_handoffs() {
     operator_aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
     operator_aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
-    [[ -z "$(jq -r '.known_hosts_file // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set known_hosts_file when environment=$env_slug"
-    [[ -z "$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set dkg_backup_zip when environment=$env_slug"
-    [[ -z "$(jq -r '.secret_contract_file // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set secret_contract_file when environment=$env_slug"
+    if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" != "true" ]]; then
+      [[ -z "$(jq -r '.known_hosts_file // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set known_hosts_file when environment=$env_slug"
+      [[ -z "$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set dkg_backup_zip when environment=$env_slug"
+      [[ -z "$(jq -r '.secret_contract_file // empty' <<<"$operator_json")" ]] || die "operator $operator_id must not set secret_contract_file when environment=$env_slug"
+    fi
     runtime_config_secret_id="$(jq -r '.runtime_config_secret_id // empty' <<<"$operator_json")"
     runtime_config_secret_region="$(jq -r '.runtime_config_secret_region // empty' <<<"$operator_json")"
     runtime_material_mode="$(jq -r '.runtime_material_ref.mode // empty' <<<"$operator_json")"
@@ -3248,16 +3507,110 @@ production_render_operator_handoffs() {
       )"
     fi
 
-    [[ "$runtime_material_mode" == "s3-kms-zip" ]] || die "operator $operator_id must set runtime_material_ref.mode=s3-kms-zip when environment=$env_slug"
-    [[ -n "$runtime_material_bucket" ]] || die "operator $operator_id runtime_material_ref.bucket is required"
-    [[ -n "$runtime_material_key" ]] || die "operator $operator_id runtime_material_ref.key is required"
-    [[ -n "$runtime_material_region" ]] || die "operator $operator_id runtime_material_ref.region is required"
-    [[ -n "$runtime_material_kms_key_id" ]] || die "operator $operator_id runtime_material_ref.kms_key_id is required"
-    [[ -n "$runtime_config_secret_id" ]] || die "operator $operator_id runtime_config_secret_id is required"
-    if [[ -z "$runtime_config_secret_region" ]]; then
-      runtime_config_secret_region="${operator_aws_region:-$shared_aws_region}"
+    known_hosts_dst=""
+    secrets_dst=""
+    backup_zip_dst=""
+    if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+      if [[ -n "$known_hosts_src" ]]; then
+        known_hosts_src="$(production_abs_path "$inventory_dir" "$known_hosts_src")"
+        [[ -f "$known_hosts_src" ]] || die "known_hosts file not found: $known_hosts_src"
+        known_hosts_dst="$handoff_dir/known_hosts"
+        cp "$known_hosts_src" "$known_hosts_dst"
+      fi
+
+      if [[ -n "$secrets_src" ]]; then
+        secrets_src="$(production_abs_path "$inventory_dir" "$secrets_src")"
+        [[ -f "$secrets_src" ]] || die "secret contract file not found: $secrets_src"
+        secrets_dst="$handoff_dir/operator-secrets.env"
+        cp "$secrets_src" "$secrets_dst"
+	        production_refresh_operator_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$operator_json" "$secrets_dst"
+	        if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst" || ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
+	          local -a derived_owallet_keys
+	          if [[ -z "$derived_deposit_owallet_ivk" || -z "$derived_withdraw_owallet_ovk" ]]; then
+	            local derived_owallet_output
+	            if derived_owallet_output="$(production_derive_owallet_keys_from_ufvk "$signer_ufvk" 2>/dev/null)"; then
+	              mapfile -t derived_owallet_keys <<<"$derived_owallet_output"
+	            elif [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+	              derived_owallet_keys=(
+	                "$(production_test_default_deposit_owallet_ivk)"
+	                "$(production_test_default_withdraw_owallet_ovk)"
+	              )
+	            else
+	              production_derive_owallet_keys_from_ufvk "$signer_ufvk" >/dev/null
+	            fi
+	            [[ "${#derived_owallet_keys[@]}" -eq 2 ]] || die "ufvk derive output must contain deposit ivk and withdraw ovk"
+	            derived_deposit_owallet_ivk="${derived_owallet_keys[0]}"
+	            derived_withdraw_owallet_ovk="${derived_owallet_keys[1]}"
+	          fi
+          if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst"; then
+            production_secret_contract_upsert_literal "$secrets_dst" DEPOSIT_OWALLET_IVK "$derived_deposit_owallet_ivk"
+          fi
+          if ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
+            production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_OWALLET_OVK "$derived_withdraw_owallet_ovk"
+          fi
+        fi
+        operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
+        if [[ -z "$operator_txsign_signer_key" ]]; then
+          operator_txsign_signer_key="$(production_env_get_value "$secrets_dst" "JUNO_TXSIGN_SIGNER_KEYS" || true)"
+          operator_txsign_signer_key="${operator_txsign_signer_key#literal:}"
+        fi
+        [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
+        production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
+        local withdraw_extend_signer_keys source_withdraw_extend_signer_keys dkg_withdraw_extend_signer_keys
+        local -a withdraw_extend_signer_values=()
+        withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" || true)"
+        case "$withdraw_extend_signer_keys" in
+          literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
+            withdraw_extend_signer_keys="$(production_resolve_secret_value "$withdraw_extend_signer_keys" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")")"
+            ;;
+        esac
+        if [[ -z "$withdraw_extend_signer_keys" ]]; then
+          source_withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "JUNO_TXSIGN_SIGNER_KEYS" || true)"
+          case "$source_withdraw_extend_signer_keys" in
+            literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
+              source_withdraw_extend_signer_keys="$(production_resolve_secret_value "$source_withdraw_extend_signer_keys" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")")"
+              ;;
+          esac
+          if [[ -n "$source_withdraw_extend_signer_keys" ]]; then
+            source_withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$source_withdraw_extend_signer_keys")"
+            IFS=, read -r -a withdraw_extend_signer_values <<<"$source_withdraw_extend_signer_keys"
+            if (( ${#withdraw_extend_signer_values[@]} > 1 )); then
+              withdraw_extend_signer_keys="$source_withdraw_extend_signer_keys"
+            fi
+          fi
+        fi
+        if [[ -z "$withdraw_extend_signer_keys" ]]; then
+          dkg_withdraw_extend_signer_keys="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
+          if [[ -n "$dkg_withdraw_extend_signer_keys" ]]; then
+            withdraw_extend_signer_keys="$dkg_withdraw_extend_signer_keys"
+          elif [[ -n "$source_withdraw_extend_signer_keys" ]]; then
+            withdraw_extend_signer_keys="$source_withdraw_extend_signer_keys"
+          fi
+        fi
+        [[ -n "$withdraw_extend_signer_keys" ]] || die "operator $operator_id is missing withdraw extend signer keys"
+        withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$withdraw_extend_signer_keys")"
+        production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
+        production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
+        production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
+      fi
+
+      if [[ -n "$backup_zip_src" ]]; then
+        backup_zip_src="$(production_abs_path "$inventory_dir" "$backup_zip_src")"
+        backup_zip_dst="$handoff_dir/dkg-backup.zip"
+        production_materialize_operator_dkg_backup_zip "$backup_zip_src" "$backup_zip_dst" "$dkg_tls_dir"
+      fi
+    else
+      [[ "$runtime_material_mode" == "s3-kms-zip" ]] || die "operator $operator_id must set runtime_material_ref.mode=s3-kms-zip when environment=$env_slug"
+      [[ -n "$runtime_material_bucket" ]] || die "operator $operator_id runtime_material_ref.bucket is required"
+      [[ -n "$runtime_material_key" ]] || die "operator $operator_id runtime_material_ref.key is required"
+      [[ -n "$runtime_material_region" ]] || die "operator $operator_id runtime_material_ref.region is required"
+      [[ -n "$runtime_material_kms_key_id" ]] || die "operator $operator_id runtime_material_ref.kms_key_id is required"
+      [[ -n "$runtime_config_secret_id" ]] || die "operator $operator_id runtime_config_secret_id is required"
+      if [[ -z "$runtime_config_secret_region" ]]; then
+        runtime_config_secret_region="${operator_aws_region:-$shared_aws_region}"
+      fi
+      [[ -n "$runtime_config_secret_region" ]] || die "operator $operator_id runtime_config_secret_region is required"
     fi
-    [[ -n "$runtime_config_secret_region" ]] || die "operator $operator_id runtime_config_secret_region is required"
 
     jq -n \
       --arg version "$manifest_version" \
@@ -3278,6 +3631,9 @@ production_render_operator_handoffs() {
       --arg runtime_material_kms_key_id "$runtime_material_kms_key_id" \
       --arg runtime_config_secret_id "$runtime_config_secret_id" \
       --arg runtime_config_secret_region "$runtime_config_secret_region" \
+      --arg known_hosts_file "$known_hosts_dst" \
+      --arg secret_contract_file "$secrets_dst" \
+      --arg dkg_backup_zip "$backup_zip_dst" \
       --arg withdraw_coordinator_juno_wallet_id "$withdraw_coordinator_juno_wallet_id" \
       --arg withdraw_finalizer_juno_scan_wallet_id "$withdraw_finalizer_juno_scan_wallet_id" \
       --arg deposit_scan_juno_scan_wallet_id "$deposit_scan_juno_scan_wallet_id" \
@@ -3322,6 +3678,9 @@ production_render_operator_handoffs() {
         ),
         runtime_config_secret_id: (if $runtime_config_secret_id == "" then null else $runtime_config_secret_id end),
         runtime_config_secret_region: (if $runtime_config_secret_region == "" then null else $runtime_config_secret_region end),
+        known_hosts_file: (if $known_hosts_file == "" then null else $known_hosts_file end),
+        secret_contract_file: (if $secret_contract_file == "" then null else $secret_contract_file end),
+        dkg_backup_zip: (if $dkg_backup_zip == "" then null else $dkg_backup_zip end),
         withdraw_coordinator_juno_wallet_id: (if $withdraw_coordinator_juno_wallet_id == "" then null else $withdraw_coordinator_juno_wallet_id end),
         withdraw_finalizer_juno_scan_wallet_id: (if $withdraw_finalizer_juno_scan_wallet_id == "" then null else $withdraw_finalizer_juno_scan_wallet_id end),
         deposit_scan_juno_scan_wallet_id: (if $deposit_scan_juno_scan_wallet_id == "" then null else $deposit_scan_juno_scan_wallet_id end),
@@ -3407,10 +3766,20 @@ production_render_operator_stack_env() {
     deposit_scan_wallet_id="$operator_withdraw_coordinator_juno_wallet_id"
   fi
   deposit_owallet_ivk="$(production_env_first_value "$resolved_secret_env" DEPOSIT_OWALLET_IVK || true)"
-  withdraw_owallet_ovk="$(production_env_first_value "$resolved_secret_env" WITHDRAW_OWALLET_OVK || true)"
-  if [[ -z "$deposit_owallet_ivk" || -z "$withdraw_owallet_ovk" ]]; then
-    mapfile -t derived_owallet_keys < <(production_derive_owallet_keys_from_ufvk "$signer_ufvk")
-    [[ ${#derived_owallet_keys[@]} -ge 2 ]] || die "failed to derive operator oWallet keys from signer_ufvk"
+	  withdraw_owallet_ovk="$(production_env_first_value "$resolved_secret_env" WITHDRAW_OWALLET_OVK || true)"
+	  if [[ -z "$deposit_owallet_ivk" || -z "$withdraw_owallet_ovk" ]]; then
+	    local derived_owallet_output
+	    if derived_owallet_output="$(production_derive_owallet_keys_from_ufvk "$signer_ufvk" 2>/dev/null)"; then
+	      mapfile -t derived_owallet_keys <<<"$derived_owallet_output"
+	    elif [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+	      derived_owallet_keys=(
+	        "$(production_test_default_deposit_owallet_ivk)"
+	        "$(production_test_default_withdraw_owallet_ovk)"
+	      )
+	    else
+	      production_derive_owallet_keys_from_ufvk "$signer_ufvk" >/dev/null
+	    fi
+	    [[ ${#derived_owallet_keys[@]} -ge 2 ]] || die "failed to derive operator oWallet keys from signer_ufvk"
     if [[ -z "$deposit_owallet_ivk" ]]; then
       deposit_owallet_ivk="${derived_owallet_keys[0]}"
     fi
@@ -3553,7 +3922,7 @@ production_render_bridge_api_env() {
   local output_file="$4"
 
   local owallet_ua listen_addr withdrawal_expiry_window_seconds min_deposit_amount min_withdraw_amount fee_bps
-  local bridge_paused bridge_pause_message
+  local bridge_paused bridge_pause_message app_postgres_dsn
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
 
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -3567,10 +3936,14 @@ production_render_bridge_api_env() {
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
   runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
+  app_postgres_dsn=""
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+    app_postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
+  fi
 
   cat >"$output_file" <<EOF
 BRIDGE_API_LISTEN_ADDR=$listen_addr
-BRIDGE_API_POSTGRES_DSN=
+BRIDGE_API_POSTGRES_DSN=$app_postgres_dsn
 BRIDGE_API_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BRIDGE_API_BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_API_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
@@ -3603,7 +3976,8 @@ production_render_backoffice_env() {
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  local sp1_requestor_address sp1_rpc_url render_juno_rpc
+  local sp1_requestor_address sp1_rpc_url render_juno_rpc app_postgres_dsn backoffice_auth_secret
+  local ipfs_api_bearer_token cloudflare_tunnel_token juno_rpc_user juno_rpc_pass min_deposit_admin_private_key
   juno_rpc_url="$(production_json_optional "$app_deploy" '.juno_rpc_url')"
   listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
   operator_addresses="$(jq -r '.operator_addresses | join(",")' "$app_deploy")"
@@ -3623,12 +3997,28 @@ production_render_backoffice_env() {
   juno_scan_wallet_id="$(production_json_optional "$app_deploy" '.juno_scan_wallet_id')"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
+  app_postgres_dsn=""
+  backoffice_auth_secret=""
+  ipfs_api_bearer_token=""
+  cloudflare_tunnel_token=""
+  juno_rpc_user=""
+  juno_rpc_pass=""
+  min_deposit_admin_private_key=""
+  if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
+    app_postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
+    backoffice_auth_secret="$(production_env_get_value "$resolved_secret_env" APP_BACKOFFICE_AUTH_SECRET || true)"
+    ipfs_api_bearer_token="$(production_env_get_value "$resolved_secret_env" APP_IPFS_API_BEARER_TOKEN || true)"
+    cloudflare_tunnel_token="$(production_env_get_value "$resolved_secret_env" CLOUDFLARE_TUNNEL_TOKEN || true)"
+    juno_rpc_user="$(production_env_first_value "$resolved_secret_env" APP_JUNO_RPC_USER JUNO_RPC_USER || true)"
+    juno_rpc_pass="$(production_env_first_value "$resolved_secret_env" APP_JUNO_RPC_PASS JUNO_RPC_PASS || true)"
+    min_deposit_admin_private_key="$(production_env_get_value "$resolved_secret_env" APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY || true)"
+  fi
 
   cat >"$output_file" <<EOF
 BACKOFFICE_LISTEN_ADDR=$listen_addr
-BACKOFFICE_POSTGRES_DSN=
+BACKOFFICE_POSTGRES_DSN=$app_postgres_dsn
 BACKOFFICE_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
-BACKOFFICE_AUTH_SECRET=
+BACKOFFICE_AUTH_SECRET=$backoffice_auth_secret
 BACKOFFICE_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BACKOFFICE_WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$shared_manifest")
 BACKOFFICE_OWALLET_UA=$(jq -r '.contracts.owallet_ua' "$shared_manifest")
@@ -3641,12 +4031,12 @@ BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_conf
 BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
-BACKOFFICE_IPFS_API_BEARER_TOKEN=
-BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=
+BACKOFFICE_IPFS_API_BEARER_TOKEN=$ipfs_api_bearer_token
+BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=$cloudflare_tunnel_token
 BACKOFFICE_JUNO_SCAN_BEARER_TOKEN=
-BACKOFFICE_JUNO_RPC_USER=
-BACKOFFICE_JUNO_RPC_PASS=
-MIN_DEPOSIT_ADMIN_PRIVATE_KEY=
+BACKOFFICE_JUNO_RPC_USER=$juno_rpc_user
+BACKOFFICE_JUNO_RPC_PASS=$juno_rpc_pass
+MIN_DEPOSIT_ADMIN_PRIVATE_KEY=$min_deposit_admin_private_key
 EOF
 
   if [[ -n "$sp1_requestor_address" ]]; then
@@ -3680,7 +4070,36 @@ EOF
 }
 
 production_render_junocashd_conf() {
-  die "runner-side junocashd.conf rendering is disabled; use host-side runtime hydration"
+  [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]] || die "runner-side junocashd.conf rendering is disabled; use host-side runtime hydration"
+
+  local env_file="$1"
+  local output_file="$2"
+  local juno_rpc_user juno_rpc_pass juno_rpc_bind juno_rpc_allow_ips
+  juno_rpc_user="$(production_env_get_value "$env_file" JUNO_RPC_USER)"
+  juno_rpc_pass="$(production_env_get_value "$env_file" JUNO_RPC_PASS)"
+  juno_rpc_bind="$(production_env_get_value "$env_file" JUNO_RPC_BIND)"
+  juno_rpc_allow_ips="$(production_env_get_value "$env_file" JUNO_RPC_ALLOW_IPS)"
+  [[ -n "$juno_rpc_user" ]] || die "operator stack env is missing JUNO_RPC_USER"
+  [[ -n "$juno_rpc_pass" ]] || die "operator stack env is missing JUNO_RPC_PASS"
+  [[ -n "$juno_rpc_bind" ]] || die "operator stack env is missing JUNO_RPC_BIND"
+  [[ -n "$juno_rpc_allow_ips" ]] || die "operator stack env is missing JUNO_RPC_ALLOW_IPS"
+
+  {
+    printf 'server=1\n'
+    printf 'rpcbind=%s\n' "$juno_rpc_bind"
+    printf 'rpcallowip=127.0.0.1\n'
+    local allow_ip
+    IFS=',' read -r -a rpc_allow_ip_entries <<<"$juno_rpc_allow_ips"
+    for allow_ip in "${rpc_allow_ip_entries[@]}"; do
+      [[ -n "$allow_ip" ]] || continue
+      [[ "$allow_ip" == "127.0.0.1" ]] && continue
+      printf 'rpcallowip=%s\n' "$allow_ip"
+    done
+    printf 'rpcport=18232\n'
+    printf 'rpcuser=%s\n' "$juno_rpc_user"
+    printf 'rpcpassword=%s\n' "$juno_rpc_pass"
+    printf 'txunpaidactionlimit=10000\n'
+  } >"$output_file"
 }
 
 production_rollout_reserve() {
