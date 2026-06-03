@@ -12,11 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeapi"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
+	"github.com/juno-intents/intents-juno/internal/bridgepause"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -60,6 +62,7 @@ func main() {
 		feeBps                          = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
 		bridgePaused                    = flag.Bool("bridge-paused", false, "pause public bridge actions while keeping read-only endpoints available")
 		bridgePauseMessage              = flag.String("bridge-pause-message", "Bridge is paused.", "message returned by /v1/config and paused action endpoints")
+		bridgePauseCacheTTL             = flag.Duration("bridge-pause-cache-ttl", 10*time.Second, "cache TTL for bridge paused() eth_call checks")
 
 		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
@@ -111,6 +114,10 @@ func main() {
 	}
 	if *memoCacheTTL <= 0 || *memoCacheMaxEntries <= 0 {
 		fmt.Fprintln(os.Stderr, "error: memo cache settings must be > 0")
+		os.Exit(2)
+	}
+	if *bridgePauseCacheTTL <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --bridge-pause-cache-ttl must be > 0")
 		os.Exit(2)
 	}
 	if *depositMinConfirmations <= 0 || *withdrawPlannerMinConfirmations <= 0 || *withdrawBatchConfirmations <= 0 {
@@ -199,6 +206,16 @@ func main() {
 	}
 	go bridgeSettingsCache.Start(ctx)
 
+	pauseChecker, err := bridgepause.NewChecker(
+		bridgePauseCaller{client: baseClient},
+		common.HexToAddress(*bridgeAddr),
+		*bridgePauseCacheTTL,
+	)
+	if err != nil {
+		log.Error("init bridge pause checker", "err", err)
+		os.Exit(2)
+	}
+
 	withdrawReader, err := bridgeapi.NewPostgresWithdrawalReader(pool)
 	if err != nil {
 		log.Error("init withdrawal status reader", "err", err)
@@ -251,6 +268,7 @@ func main() {
 		BridgePauseMessage:            *bridgePauseMessage,
 		RuntimeSettings:               runtimeSettingsCache,
 		BridgeSettings:                bridgeSettingsCache,
+		PauseChecker:                  pauseChecker,
 		JunoTipProvider:               junoTipProvider,
 		RateLimitPerIPPerSecond:       *rateLimitPerSecond,
 		RateLimitBurst:                *rateLimitBurst,
@@ -317,4 +335,12 @@ func bridgeAPIReadinessCheck(
 		checks = append(checks, bridgeSettingsReady)
 	}
 	return healthz.CombineReadinessChecks(checks...)
+}
+
+type bridgePauseCaller struct {
+	client *ethclient.Client
+}
+
+func (c bridgePauseCaller) CallContract(ctx context.Context, to common.Address, data []byte) ([]byte, error) {
+	return c.client.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
 }

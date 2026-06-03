@@ -165,7 +165,10 @@ describe('DepositFlow', () => {
 
     await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
     await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
-    expect(screen.getByRole('button', { name: 'I agree' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'I agree' }))
+    await screen.findByRole('button', { name: 'Manual Send' })
+    await user.click(screen.getByRole('button', { name: 'Manual Send' }))
+    expect(screen.getByText('Memo (required)')).toBeInTheDocument()
 
     act(() => {
       client.setQueryData(['bridge-config'], {
@@ -185,10 +188,9 @@ describe('DepositFlow', () => {
     })
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'I agree' })).not.toBeInTheDocument()
+      expect(screen.queryByText('Memo (required)')).not.toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: 'Deposit instructions paused' })).toBeDisabled()
-    expect(getDepositMemo).not.toHaveBeenCalled()
   })
 
   it('renders transport-specific instruction content inside the modal flow', async () => {
