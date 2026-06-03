@@ -234,21 +234,26 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	minDepositAmount, err := h.currentMinDepositAmount()
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"version": "v1",
-			"error":   "bridge_settings_not_ready",
-		})
-		return
-	}
-	depositMinConfirmations, err := h.currentDepositMinConfirmations()
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"version": "v1",
-			"error":   "runtime_settings_not_ready",
-		})
-		return
+	minDepositAmount := h.cfg.MinDepositAmount
+	depositMinConfirmations := h.cfg.DepositMinConfirmations
+	if !h.cfg.BridgePaused {
+		var err error
+		minDepositAmount, err = h.currentMinDepositAmount()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"version": "v1",
+				"error":   "bridge_settings_not_ready",
+			})
+			return
+		}
+		depositMinConfirmations, err = h.currentDepositMinConfirmations()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"version": "v1",
+				"error":   "runtime_settings_not_ready",
+			})
+			return
+		}
 	}
 
 	w.Header().Set("Cache-Control", "no-store")

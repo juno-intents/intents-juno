@@ -273,6 +273,48 @@ func TestHandler_Config(t *testing.T) {
 			t.Fatalf("bridgePauseMessage: got %v", got)
 		}
 	})
+
+	t.Run("paused state does not require settings providers", func(t *testing.T) {
+		h, err := NewHandler(Config{
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			MinDepositAmount:              7,
+			DepositMinConfirmations:       1,
+			BridgePaused:                  true,
+			BridgePauseMessage:            "Bridge is paused.",
+			RuntimeSettings:               &stubRuntimeSettingsProvider{err: context.Canceled},
+			BridgeSettings:                &stubBridgeSettingsProvider{err: context.Canceled},
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out["bridgePaused"] != true {
+			t.Fatalf("bridgePaused: got %v want true", out["bridgePaused"])
+		}
+		if got := out["minDepositAmount"].(string); got != "7" {
+			t.Fatalf("minDepositAmount: got %s want 7", got)
+		}
+		if got := int(out["depositMinConfirmations"].(float64)); got != 1 {
+			t.Fatalf("depositMinConfirmations: got %d want 1", got)
+		}
+	})
 }
 
 func TestHandler_ProbeAliases(t *testing.T) {

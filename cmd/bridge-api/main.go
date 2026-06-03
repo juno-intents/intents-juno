@@ -259,7 +259,8 @@ func main() {
 		MemoCacheMaxEntries:           *memoCacheMaxEntries,
 		DepositLister:                 depositLister,
 		WithdrawalLister:              withdrawalLister,
-		ReadinessCheck: healthz.CombineReadinessChecks(
+		ReadinessCheck: bridgeAPIReadinessCheck(
+			*bridgePaused,
 			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 			runtimeSettingsCache.Ready,
 			bridgeSettingsCache.Ready,
@@ -300,4 +301,20 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+func bridgeAPIReadinessCheck(
+	bridgePaused bool,
+	postgresReady func(context.Context) error,
+	runtimeSettingsReady func(context.Context) error,
+	bridgeSettingsReady func(context.Context) error,
+) func(context.Context) error {
+	checks := []func(context.Context) error{
+		postgresReady,
+		runtimeSettingsReady,
+	}
+	if !bridgePaused {
+		checks = append(checks, bridgeSettingsReady)
+	}
+	return healthz.CombineReadinessChecks(checks...)
 }
