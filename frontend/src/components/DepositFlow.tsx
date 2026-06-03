@@ -142,12 +142,14 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
 
     setMemoRequestError(null)
     const result = await refetch()
-    if (result.data) {
+    if (!result.isError && result.data) {
       setTransport(null)
       setInstructionStep('transport')
       return
     }
 
+    setTransport(null)
+    setInstructionStep('warnings')
     setMemoRequestError(formatQueryError(result.error))
   }
 

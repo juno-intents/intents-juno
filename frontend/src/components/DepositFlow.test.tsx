@@ -279,4 +279,29 @@ describe('DepositFlow', () => {
     await user.click(screen.getByRole('button', { name: 'I agree' }))
     expect(await screen.findByRole('button', { name: 'QR Code' })).toBeInTheDocument()
   })
+
+  it('does not reuse a cached memo when refetch fails after pause', async () => {
+    const user = userEvent.setup()
+    const { client } = renderDepositFlow()
+
+    client.setQueryData(['deposit-memo', CONNECTED_ADDRESS], {
+      version: 'test',
+      baseRecipient: CONNECTED_ADDRESS,
+      oWalletUA: 'jtest1stale',
+      nonce: '1',
+      memoHex: `${'cd'.repeat(68)}${'00'.repeat(444)}`,
+      memoBase64: 'stale-memo',
+    })
+    vi.mocked(getDepositMemo).mockRejectedValueOnce(new Error('API 503: bridge_paused'))
+
+    await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
+    await user.click(screen.getByRole('button', { name: 'Generate Deposit Instructions' }))
+    await user.click(screen.getByRole('button', { name: 'I agree' }))
+
+    expect(await screen.findByText('API 503: bridge_paused')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'QR Code' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Junocash CLI' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Manual Send' })).not.toBeInTheDocument()
+    expect(screen.queryByText('jtest1stale')).not.toBeInTheDocument()
+  })
 })
