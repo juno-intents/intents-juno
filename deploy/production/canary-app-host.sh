@@ -169,6 +169,38 @@ http_get_with_retry() {
   return 1
 }
 
+http_get_status_with_retry() {
+  local url="$1"
+  local label="$2"
+  local expected_status="$3"
+  local response_file error_file
+  local curl_status http_status attempt
+
+  response_file="$(mktemp)"
+  error_file="$(mktemp)"
+  for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
+    : >"$response_file"
+    : >"$error_file"
+    set +e
+    http_status="$(curl -sS -o "$response_file" -w '%{http_code}' "$url" 2>"$error_file")"
+    curl_status=$?
+    set -e
+    if (( curl_status == 0 )) && [[ "$http_status" == "$expected_status" ]]; then
+      cat "$response_file"
+      rm -f "$response_file" "$error_file"
+      return 0
+    fi
+    if (( attempt < http_retry_max_attempts )); then
+      sleep "$http_retry_sleep_seconds"
+    fi
+  done
+  [[ ! -s "$response_file" ]] || cat "$response_file" >&2
+  [[ ! -s "$error_file" ]] || cat "$error_file" >&2
+  printf 'http probe failed label=%s url=%s expected_status=%s actual_status=%s\n' "$label" "$url" "$expected_status" "${http_status:-unknown}" >&2
+  rm -f "$response_file" "$error_file"
+  return 1
+}
+
 ssm_http_get_with_retry() {
   local instance_id="$1"
   local url="$2"
@@ -379,15 +411,31 @@ else
     bridge_config_detail="bridge-api /v1/config missing or mismatched runtime fields"
   fi
 
-  deposit_memo_json="$(http_get_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge deposit memo" || true)"
-  if [[ -z "$deposit_memo_json" ]] \
-    || ! jq -e --arg recipient "${deposit_probe_base_recipient,,}" '
-      (.baseRecipient | ascii_downcase) == $recipient
-      and (.nonce | type == "string" and test("^[0-9]+$"))
-      and (.memoHex | type == "string" and test("^[0-9a-fA-F]{1024}$"))
-    ' >/dev/null <<<"$deposit_memo_json"; then
-    deposit_memo_status="failed"
-    deposit_memo_detail="bridge-api /v1/deposit-memo missing baseRecipient, nonce, or memoHex"
+  bridge_paused="$(jq -r '.bridgePaused == true' <<<"$bridge_config_json" 2>/dev/null || printf 'false')"
+  if [[ "$bridge_paused" == "true" ]]; then
+    deposit_memo_json="$(http_get_status_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge paused deposit memo" "503" || true)"
+    if [[ -z "$deposit_memo_json" ]] \
+      || ! jq -e '
+        .error == "bridge_paused"
+        and (.message | type == "string" and length > 0)
+      ' >/dev/null <<<"$deposit_memo_json"; then
+      deposit_memo_status="failed"
+      deposit_memo_detail="bridge-api paused mode did not return bridge_paused deposit memo error"
+    else
+      deposit_memo_status="passed"
+      deposit_memo_detail="bridge-api paused mode returns bridge_paused deposit memo error"
+    fi
+  else
+    deposit_memo_json="$(http_get_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge deposit memo" || true)"
+    if [[ -z "$deposit_memo_json" ]] \
+      || ! jq -e --arg recipient "${deposit_probe_base_recipient,,}" '
+        (.baseRecipient | ascii_downcase) == $recipient
+        and (.nonce | type == "string" and test("^[0-9]+$"))
+        and (.memoHex | type == "string" and test("^[0-9a-fA-F]{1024}$"))
+      ' >/dev/null <<<"$deposit_memo_json"; then
+      deposit_memo_status="failed"
+      deposit_memo_detail="bridge-api /v1/deposit-memo missing baseRecipient, nonce, or memoHex"
+    fi
   fi
 
   bridge_html="$(http_get_with_retry "${bridge_probe_url}/" "bridge frontend html" || true)"

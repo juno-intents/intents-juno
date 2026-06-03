@@ -92,11 +92,22 @@ export default function DepositFlow() {
   )
   const amountError = validateDepositAmount(amount, cfg?.minDepositAmount)
   const formError = recipientError || amountError
+  const bridgePaused = cfg?.bridgePaused === true
+  const bridgePauseMessage = cfg?.bridgePauseMessage || 'Bridge is paused.'
   const cliAmount = amount.trim()
   const cliModeArg = runtimeConfig.junoCliModeFlag.trim()
   const qrValue = memo
     ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}` : ''}${walletMemo ? `${cliAmount ? '&' : '?'}memo=${walletMemo}` : ''}`
-    : ''
+      : ''
+
+  useEffect(() => {
+    if (!bridgePaused) {
+      return
+    }
+    setInstructionStep('closed')
+    setTransport(null)
+    setMemoRequestError(null)
+  }, [bridgePaused])
   const cliCommand = memo
     ? `FROM="YOUR_JUNO_ADDRESS"
 TO="${memo.oWalletUA}"
@@ -115,7 +126,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   }
 
   const handleGenerate = () => {
-    if (!cfg || !effectiveRecipient || formError) {
+    if (!cfg || bridgePaused || !effectiveRecipient || formError) {
       return
     }
 
@@ -125,7 +136,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   }
 
   const handleAgree = async () => {
-    if (!cfg || !effectiveRecipient || formError) {
+    if (!cfg || bridgePaused || !effectiveRecipient || formError) {
       return
     }
 
@@ -347,8 +358,14 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
             Deposits below {formatJuno(cfg.minDepositAmount)} JUNO will not be recognized and will be lost.
           </div>
         )}
-        <button className="primary" onClick={handleGenerate} disabled={!cfg || !effectiveRecipient || !!formError}>
-          Generate Deposit Instructions
+        {bridgePaused && (
+          <div className="pause-inline" role="status">
+            <div className="pause-inline-title">Bridge is paused</div>
+            <div>{bridgePauseMessage}</div>
+          </div>
+        )}
+        <button className="primary" onClick={handleGenerate} disabled={!cfg || bridgePaused || !effectiveRecipient || !!formError}>
+          {bridgePaused ? 'Deposit instructions paused' : 'Generate Deposit Instructions'}
         </button>
       </div>
 

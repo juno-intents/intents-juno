@@ -37,8 +37,8 @@ func main() {
 			pgxpoolutil.DefaultHealthCheckPeriod,
 			"pgxpool health check period",
 		)
-		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
-		junoRPCURL = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, enables deposit confirmation progress)")
+		baseRPCURL  = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
+		junoRPCURL  = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, enables deposit confirmation progress)")
 		junoRPCUser = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
 		junoRPCPass = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
 
@@ -58,6 +58,8 @@ func main() {
 		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 200, "default withdraw batch confirmations used to seed runtime settings")
 		minWithdrawAmount               = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
 		feeBps                          = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
+		bridgePaused                    = flag.Bool("bridge-paused", false, "pause public bridge actions while keeping read-only endpoints available")
+		bridgePauseMessage              = flag.String("bridge-pause-message", "Bridge is paused.", "message returned by /v1/config and paused action endpoints")
 
 		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
@@ -245,6 +247,8 @@ func main() {
 		DepositMinConfirmations:       *depositMinConfirmations,
 		MinWithdrawAmount:             *minWithdrawAmount,
 		FeeBps:                        uint32(*feeBps),
+		BridgePaused:                  *bridgePaused,
+		BridgePauseMessage:            *bridgePauseMessage,
 		RuntimeSettings:               runtimeSettingsCache,
 		BridgeSettings:                bridgeSettingsCache,
 		JunoTipProvider:               junoTipProvider,

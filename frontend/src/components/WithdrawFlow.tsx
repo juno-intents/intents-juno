@@ -10,6 +10,19 @@ import { parseAmountToZats, upsertRecentRecipients, validateJunoRecipient, valid
 
 const RECENT_RECIPIENTS_KEY = 'juno-bridge:recent-juno-recipients'
 
+function loadRecentRecipients(): string[] {
+  try {
+    const raw = window.localStorage?.getItem(RECENT_RECIPIENTS_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function formatJuno(zatoshi: string): string {
   try {
     return formatUnits(BigInt(zatoshi), 8)
@@ -25,18 +38,7 @@ export default function WithdrawFlow() {
   const [step, setStep] = useState<'input' | 'approve' | 'request' | 'success'>('input')
   const [successTxHash, setSuccessTxHash] = useState<string | null>(null)
   const [decodeError, setDecodeError] = useState<string | null>(null)
-  const [recentRecipients, setRecentRecipients] = useState<string[]>(() => {
-    const raw = window.localStorage.getItem(RECENT_RECIPIENTS_KEY)
-    if (!raw) {
-      return []
-    }
-    try {
-      const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
-    } catch {
-      return []
-    }
-  })
+  const [recentRecipients, setRecentRecipients] = useState<string[]>(loadRecentRecipients)
 
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
@@ -98,17 +100,23 @@ export default function WithdrawFlow() {
   }, [approveConfirmed, refetchAllowance])
 
   const parsedAmount = parseAmountToZats(amount) ?? 0n
+  const bridgePaused = cfg?.bridgePaused === true
+  const bridgePauseMessage = cfg?.bridgePauseMessage || 'Bridge is paused.'
   const hasSufficientAllowance = allowance !== undefined && parsedAmount > 0n && (allowance as bigint) >= parsedAmount
   const amountError = validateWithdrawAmount(amount, cfg?.minWithdrawAmount, balance as bigint | undefined)
   const recipientError = validateJunoRecipient(junoRecipient, runtimeConfig.baseChain.id)
   const formError = decodeError || amountError || recipientError
 
   useEffect(() => {
-    window.localStorage.setItem(RECENT_RECIPIENTS_KEY, JSON.stringify(recentRecipients))
+    try {
+      window.localStorage?.setItem(RECENT_RECIPIENTS_KEY, JSON.stringify(recentRecipients))
+    } catch {
+      // Ignore storage failures; recent recipients are only a local convenience.
+    }
   }, [recentRecipients])
 
   const handleApprove = () => {
-    if (!wjunoAddress || !bridgeAddress || formError) return
+    if (bridgePaused || !wjunoAddress || !bridgeAddress || formError) return
     approve({
       address: wjunoAddress as `0x${string}`,
       abi: WJUNO_ABI,
@@ -119,7 +127,7 @@ export default function WithdrawFlow() {
   }
 
   const handleRequestWithdraw = async () => {
-    if (!bridgeAddress || !amount || !junoRecipient || formError) return
+    if (bridgePaused || !bridgeAddress || !amount || !junoRecipient || formError) return
     setDecodeError(null)
     try {
       const orchardHex = await decodeRecipient(junoRecipient)
@@ -275,27 +283,38 @@ export default function WithdrawFlow() {
           )}
           {formError && <div className="error-box">{formError}</div>}
         </div>
-        {step === 'input' && !hasSufficientAllowance && (
-          <button className="primary" onClick={handleApprove} disabled={!amount || !junoRecipient || !address || !!formError}>
+        {bridgePaused && (
+          <>
+            <div className="pause-inline" role="status">
+              <div className="pause-inline-title">Bridge is paused</div>
+              <div>{bridgePauseMessage}</div>
+            </div>
+            <button className="primary" disabled>
+              Withdrawals paused
+            </button>
+          </>
+        )}
+        {!bridgePaused && step === 'input' && !hasSufficientAllowance && (
+          <button className="primary" onClick={handleApprove} disabled={bridgePaused || !amount || !junoRecipient || !address || !!formError}>
             Approve wJUNO
           </button>
         )}
-        {step === 'input' && hasSufficientAllowance && (
-          <button className="primary" onClick={handleRequestWithdraw} disabled={!amount || !junoRecipient || !address || !!formError}>
+        {!bridgePaused && step === 'input' && hasSufficientAllowance && (
+          <button className="primary" onClick={handleRequestWithdraw} disabled={bridgePaused || !amount || !junoRecipient || !address || !!formError}>
             Request Withdrawal
           </button>
         )}
-        {step === 'approve' && !approveConfirmed && (
+        {!bridgePaused && step === 'approve' && !approveConfirmed && (
           <button className="primary" disabled>
             Waiting for approval...
           </button>
         )}
-        {step === 'approve' && approveConfirmed && (
-          <button className="primary" onClick={handleRequestWithdraw} disabled={!!formError}>
+        {!bridgePaused && step === 'approve' && approveConfirmed && (
+          <button className="primary" onClick={handleRequestWithdraw} disabled={bridgePaused || !!formError}>
             Request Withdrawal
           </button>
         )}
-        {step === 'request' && !requestConfirmed && (
+        {!bridgePaused && step === 'request' && !requestConfirmed && (
           <button className="primary" disabled>
             Waiting for on-chain confirmation...
           </button>

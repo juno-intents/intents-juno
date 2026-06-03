@@ -36,6 +36,8 @@ type Config struct {
 	DepositMinConfirmations       int64
 	MinWithdrawAmount             uint64
 	FeeBps                        uint32
+	BridgePaused                  bool
+	BridgePauseMessage            string
 	NonceFn                       func() (uint64, error)
 
 	RuntimeSettings RuntimeSettingsProvider
@@ -260,6 +262,8 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"depositMinConfirmations":       depositMinConfirmations,
 		"minWithdrawAmount":             strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
 		"feeBps":                        h.cfg.FeeBps,
+		"bridgePaused":                  h.cfg.BridgePaused,
+		"bridgePauseMessage":            h.bridgePauseMessage(),
 	}
 	if h.cfg.WJunoAddress != (common.Address{}) {
 		resp["wjunoAddress"] = h.cfg.WJunoAddress.Hex()
@@ -290,6 +294,15 @@ func (h *handler) currentDepositMinConfirmations() (int64, error) {
 }
 
 func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.BridgePaused {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "bridge_paused",
+			"message": h.bridgePauseMessage(),
+		})
+		return
+	}
+
 	baseRecipientStr := strings.TrimSpace(r.URL.Query().Get("baseRecipient"))
 	if !common.IsHexAddress(baseRecipientStr) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -351,6 +364,14 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 	body = append(body, '\n')
 	h.memoCache.Set(cacheKey, body, h.cfg.Now().UTC())
 	writeJSONBytes(w, http.StatusOK, body)
+}
+
+func (h *handler) bridgePauseMessage() string {
+	msg := strings.TrimSpace(h.cfg.BridgePauseMessage)
+	if msg == "" {
+		return "Bridge is paused."
+	}
+	return msg
 }
 
 func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {

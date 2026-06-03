@@ -3553,6 +3553,7 @@ production_render_bridge_api_env() {
   local output_file="$4"
 
   local owallet_ua listen_addr withdrawal_expiry_window_seconds min_deposit_amount min_withdraw_amount fee_bps
+  local bridge_paused bridge_pause_message
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
 
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -3561,6 +3562,8 @@ production_render_bridge_api_env() {
   min_deposit_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_deposit_amount')"
   min_withdraw_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_withdraw_amount')"
   fee_bps="$(production_json_optional "$app_deploy" '.services.bridge_api.fee_bps')"
+  bridge_paused="$(production_json_optional "$app_deploy" '.services.bridge_api.paused')"
+  bridge_pause_message="$(production_json_optional "$app_deploy" '.services.bridge_api.pause_message')"
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
   runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
@@ -3579,6 +3582,8 @@ BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_conf
 BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BRIDGE_API_MIN_WITHDRAW_AMOUNT=${min_withdraw_amount:-0}
 BRIDGE_API_FEE_BPS=${fee_bps:-0}
+BRIDGE_API_BRIDGE_PAUSED=${bridge_paused:-false}
+BRIDGE_API_BRIDGE_PAUSE_MESSAGE=$(printf '%q' "${bridge_pause_message:-Bridge is paused.}")
 EOF
 
   local wjuno_address

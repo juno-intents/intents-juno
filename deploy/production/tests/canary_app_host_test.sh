@@ -860,6 +860,243 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_accepts_paused_deposit_memo() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].known_hosts_file = null
+    | .operators[0].dkg_backup_zip = null
+    | .operators[0].secret_contract_file = null
+    | .operators[0].runtime_material_ref = {
+        mode: "s3-kms-zip",
+        bucket: "alpha-runtime-materials",
+        key: "operators/op1/runtime-material.zip",
+        region: "us-east-1",
+        kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555"
+      }
+    | .operators[0].runtime_config_secret_id = "alpha/op1/runtime-config"
+    | .operators[0].runtime_config_secret_region = "us-east-1"
+    | .app_host.known_hosts_file = null
+    | .app_host.secret_contract_file = null
+    | .app_role.known_hosts_file = null
+    | .app_role.secret_contract_file = null
+    | .app_role.runtime_config_secret_id = "alpha/app/runtime-config"
+    | .app_role.runtime_config_secret_region = "us-east-1"
+    | .app_role.public_bridge_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/bridge-alpha"
+    | .app_role.internal_backoffice_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/backoffice-alpha"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = {
+      value: "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared"
+    }
+    | .shared_proof_requestor_service_name = {
+      value: "alpha-proof-requestor"
+    }
+    | .shared_proof_funder_service_name = {
+      value: "alpha-proof-funder"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  jq 'del(.app_role)' "$app_manifest" >"$app_manifest.tmp"
+  mv "$app_manifest.tmp" "$app_manifest"
+  output_json="$workdir/canary.json"
+
+cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "$*" == *"curl -fsS "* ]]; then
+  eval "${@: -1}"
+  exit $?
+fi
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
+output_file=""
+write_format=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o)
+      output_file="$2"
+      shift 2
+      ;;
+    -w)
+      write_format="$2"
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+url="${@: -1}"
+emit_response() {
+  local status="$1"
+  local body="$2"
+  if [[ -n "$output_file" ]]; then
+    printf '%b' "$body" >"$output_file"
+  else
+    printf '%b' "$body"
+  fi
+  if [[ -n "$write_format" ]]; then
+    printf '%s' "$status"
+  fi
+}
+case "$url" in
+  https://bridge.alpha.*/readyz|http://127.0.0.1:8090/readyz)
+    emit_response "200" '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.*/v1/config)
+    emit_response "200" '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2,"bridgePaused":true,"bridgePauseMessage":"Bridge is paused."}\n'
+    ;;
+  https://bridge.alpha.*/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    emit_response "503" '{"version":"v1","error":"bridge_paused","message":"Bridge is paused."}\n'
+    ;;
+  https://bridge.alpha.*/)
+    emit_response "200" '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  http://127.0.0.1:8090/api/settings/runtime)
+    emit_response "200" '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  http://127.0.0.1:8090/api/funds)
+    emit_response "200" '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
+    ;;
+  http://127.0.0.1:8090/)
+    emit_response "200" '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
+if [[ "$1" == "--profile" ]]; then
+  shift 2
+fi
+if [[ "$1" == "--region" ]]; then
+  shift 2
+fi
+if [[ "$1" == "ec2" && "$2" == "describe-instances" ]]; then
+  printf 'i-app001\n'
+  exit 0
+fi
+if [[ "$1" == "ecs" && "$2" == "describe-services" ]]; then
+  printf '{"services":[{"desiredCount":1,"runningCount":1},{"desiredCount":1,"runningCount":1}]}\n'
+  exit 0
+fi
+if [[ "$1" == "autoscaling" && "$2" == "describe-auto-scaling-groups" ]]; then
+  printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"InstanceId":"i-proof001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-proof002","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+  exit 0
+fi
+if [[ "$1" == "ssm" && "$2" == "send-command" ]]; then
+  case "$*" in
+    *"systemctl is-active bridge-api"*)
+      printf '{"Command":{"CommandId":"cmd-bridge-systemd"}}\n'
+      ;;
+    *"systemctl is-active backoffice"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-systemd"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/readyz"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-readyz"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/api/settings/runtime"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-settings"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/api/funds"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-funds"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-ui"}}\n'
+      ;;
+    *)
+      printf '{"Command":{"CommandId":"cmd-generic"}}\n'
+      ;;
+  esac
+  exit 0
+fi
+if [[ "$1" == "ssm" && "$2" == "get-command-invocation" ]]; then
+  case "$*" in
+    *"cmd-bridge-systemd"*|*"cmd-backoffice-systemd"*)
+      printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-readyz"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"status\\":\\"ok\\"}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-settings"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"version\\":\\"v1\\",\\"data\\":{\\"minDepositAmount\\":\\"201005025\\",\\"minDepositAdmin\\":\\"0x0000000000000000000000000000000000000abc\\",\\"depositMinConfirmations\\":2,\\"withdrawPlannerMinConfirmations\\":3,\\"withdrawBatchConfirmations\\":4}}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-funds"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"version\\":\\"v1\\",\\"bridge\\":{\\"wjunoBalanceRaw\\":\\"0\\",\\"wjunoBalanceFormatted\\":\\"0.0\\"},\\"operators\\":[{\\"address\\":\\"0x660B5284fF10C873050a286A124127e3E310ad05\\",\\"balanceWei\\":\\"2000000000000000\\",\\"balanceEth\\":\\"0.002\\",\\"belowThreshold\\":false}],\\"prover\\":{\\"address\\":\\"0x4444444444444444444444444444444444444444\\",\\"creditsRaw\\":\\"123\\",\\"creditsFormatted\\":\\"0.000000000000000123\\",\\"network\\":\\"succinct\\",\\"detail\\":\\"shared proof requestor\\"},\\"mpcWallet\\":{\\"address\\":\\"jtest1exampleaddress\\",\\"total\\":\\"1.25\\",\\"detail\\":\\"app-host rpc\\"}}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-ui"*)
+      printf '{"Status":"Success","StandardOutputContent":"<!doctype html><html><body>JUNO BACKOFFICE</body></html>\\n","StandardErrorContent":""}\n'
+      ;;
+    *)
+      printf '{"Status":"Success","StandardOutputContent":"","StandardErrorContent":""}\n'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected aws invocation: %s\n' "$*" >&2
+exit 1
+EOF
+  chmod +x "$fake_bin/ssh" "$fake_bin/curl" "$fake_bin/aws"
+
+  TEST_LOG_DIR="$log_dir" \
+  PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS=1 \
+  PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS=0 \
+  PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_eq "$(jq -r '.checks.deposit_memo.status' "$output_json")" "passed" "deposit memo probe passed in paused mode"
+  assert_contains "$(jq -r '.checks.deposit_memo.detail' "$output_json")" "paused mode" "deposit memo paused detail"
+  assert_contains "$(cat "$log_dir/curl.log")" "/v1/deposit-memo" "paused canary probes deposit memo endpoint"
+  rm -rf "$workdir"
+}
+
 test_canary_app_host_retries_transient_public_tls_failures() {
   local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
   workdir="$(mktemp -d)"
@@ -1743,6 +1980,7 @@ main() {
   test_canary_app_host_blocks_bridge_config_contract_mismatch
   test_canary_app_host_rejects_missing_shared_proof_capacity
   test_canary_app_host_blocks_deposit_memo_probe_failure
+  test_canary_app_host_accepts_paused_deposit_memo
   test_canary_app_host_retries_transient_public_tls_failures
   test_canary_app_host_rejects_non_https_manifest
   test_canary_app_host_prefers_role_capacity_checks_over_ecs_when_present

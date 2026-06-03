@@ -29,6 +29,8 @@ export default function Layout() {
   })
 
   const chainLabel = baseChainDisplayName(cfg?.baseChainId ?? runtimeConfig.baseChain.id)
+  const bridgePaused = cfg?.bridgePaused === true
+  const bridgePauseMessage = cfg?.bridgePauseMessage || 'Bridge is paused.'
   const openGuide = () => {
     setGuideOpen(true)
     setMenuOpen(false)
@@ -122,6 +124,12 @@ export default function Layout() {
           </div>
         )}
       </header>
+      {bridgePaused && (
+        <div className="pause-banner" role="status">
+          <div className="pause-banner-title">Bridge is paused</div>
+          <div className="pause-banner-copy">{bridgePauseMessage}</div>
+        </div>
+      )}
       <div className="layout">
         <div className="panel-left">
           <div className="section-label">Core Bridge</div>

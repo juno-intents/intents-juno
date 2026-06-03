@@ -3096,6 +3096,7 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=200" "bridge env withdraw batch confirmation default"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_MIN_WITHDRAW_AMOUNT=200000000" "bridge env min withdraw amount"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_FEE_BPS=50" "bridge env fee bps"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=false" "bridge env bridge pause default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_REQUESTOR_ADDRESS=0x1234567890abcdef1234567890abcdef12345678" "backoffice env prover requestor address"
@@ -3115,6 +3116,47 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
+  rm -rf "$workdir"
+}
+
+test_render_bridge_api_env_supports_paused_mode() {
+  local workdir shared_manifest app_manifest resolved_env bridge_env
+  workdir="$(mktemp -d)"
+  shared_manifest="$workdir/shared.json"
+  app_manifest="$workdir/app.json"
+  resolved_env="$workdir/resolved.env"
+  bridge_env="$workdir/bridge-api.env"
+
+  cat >"$shared_manifest" <<'JSON'
+{
+  "contracts": {
+    "base_rpc_url": "https://base.example.invalid",
+    "base_chain_id": 8453,
+    "bridge": "0x2222222222222222222222222222222222222222",
+    "wjuno": "0x3333333333333333333333333333333333333333",
+    "owallet_ua": "u1alphaexample"
+  }
+}
+JSON
+  cat >"$app_manifest" <<'JSON'
+{
+  "services": {
+    "bridge_api": {
+      "listen_addr": "127.0.0.1:8082",
+      "paused": true,
+      "pause_message": "Bridge is paused while operators investigate a Junocash chain incident."
+    }
+  }
+}
+JSON
+  cat >"$resolved_env" <<'EOF'
+APP_POSTGRES_DSN=literal:postgres://alpha
+EOF
+
+  production_render_bridge_api_env "$shared_manifest" "$app_manifest" "$resolved_env" "$bridge_env"
+
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=true" "bridge env pause mode"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSE_MESSAGE=Bridge\\ is\\ paused\\ while\\ operators\\ investigate\\ a\\ Junocash\\ chain\\ incident." "bridge env pause message is shell escaped"
   rm -rf "$workdir"
 }
 
@@ -4039,6 +4081,7 @@ main() {
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
+  test_render_bridge_api_env_supports_paused_mode
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
   test_render_manifests_allow_external_dns_without_route53_zone
   test_render_backoffice_env_preserves_non_loopback_juno_rpc_url

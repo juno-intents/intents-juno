@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { runtimeConfig } from '../config/runtime'
 import Layout from './Layout'
+
+const mockGetConfig = vi.hoisted(() => vi.fn())
 
 vi.mock('@rainbow-me/rainbowkit', () => ({
   ConnectButton: ({ showBalance }: { showBalance?: boolean }) => (
@@ -12,7 +14,10 @@ vi.mock('@rainbow-me/rainbowkit', () => ({
 }))
 
 vi.mock('../api/bridge', () => ({
-  getConfig: vi.fn().mockResolvedValue({
+  getConfig: mockGetConfig,
+}))
+
+const defaultConfig = {
     version: 'v1',
     baseChainId: 8453,
     bridgeAddress: '0x0F65702343DE210098c2d83302B96E516CE3072f',
@@ -23,8 +28,7 @@ vi.mock('../api/bridge', () => ({
     depositMinConfirmations: 200,
     minWithdrawAmount: '200000000',
     feeBps: 50,
-  }),
-}))
+}
 
 vi.mock('./DepositFlow', () => ({
   default: () => <div>DepositFlow</div>,
@@ -71,6 +75,11 @@ function renderLayout() {
 }
 
 describe('Layout', () => {
+  beforeEach(() => {
+    mockGetConfig.mockReset()
+    mockGetConfig.mockResolvedValue(defaultConfig)
+  })
+
   it('renders a whitepaper link beside the guide actions', () => {
     renderLayout()
 
@@ -101,5 +110,18 @@ describe('Layout', () => {
     const pill = screen.getByText(runtimeConfig.junoNetworkLabel).closest('.status-pill')
     expect(pill).toBeInTheDocument()
     expect(pill).not.toHaveClass('status-pill-neutral')
+  })
+
+  it('shows the bridge pause banner from runtime config', async () => {
+    mockGetConfig.mockResolvedValueOnce({
+      ...defaultConfig,
+      bridgePaused: true,
+      bridgePauseMessage: 'Bridge is paused while operators investigate a Junocash chain incident.',
+    })
+
+    renderLayout()
+
+    expect(await screen.findByText('Bridge is paused')).toBeInTheDocument()
+    expect(screen.getByText('Bridge is paused while operators investigate a Junocash chain incident.')).toBeInTheDocument()
   })
 })

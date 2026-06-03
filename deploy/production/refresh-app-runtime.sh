@@ -270,6 +270,8 @@ args=(
   --withdraw-batch-confirmations "${BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS}"
   --min-withdraw-amount "${BRIDGE_API_MIN_WITHDRAW_AMOUNT}"
   --fee-bps "${BRIDGE_API_FEE_BPS}"
+  --bridge-paused "${BRIDGE_API_BRIDGE_PAUSED:-false}"
+  --bridge-pause-message "${BRIDGE_API_BRIDGE_PAUSE_MESSAGE:-Bridge is paused.}"
 )
 
 if [[ -n "${BRIDGE_API_WJUNO_ADDRESS:-}" ]]; then

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAccount } from 'wagmi'
@@ -39,11 +39,12 @@ function renderDepositFlow() {
     },
   })
 
-  return render(
+  const result = render(
     <QueryClientProvider client={client}>
       <DepositFlow />
     </QueryClientProvider>,
   )
+  return { client, ...result }
 }
 
 describe('DepositFlow', () => {
@@ -126,6 +127,68 @@ describe('DepositFlow', () => {
     expect(await screen.findByRole('button', { name: 'QR Code' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Junocash CLI' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Manual Send' })).toBeInTheDocument()
+  })
+
+  it('disables deposit instruction generation while the bridge is paused', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getConfig).mockResolvedValueOnce({
+      version: 'test',
+      baseChainId: 84532,
+      bridgeAddress: '0xbridge',
+      wjunoAddress: '0xwjuno',
+      oWalletUA: 'jtest1bridgewallet',
+      withdrawalExpiryWindowSeconds: 600,
+      minDepositAmount: '201005025',
+      depositMinConfirmations: 1,
+      minWithdrawAmount: '100000000',
+      feeBps: 50,
+      bridgePaused: true,
+      bridgePauseMessage: 'Bridge is paused while operators investigate a Junocash chain incident.',
+    })
+
+    renderDepositFlow()
+
+    expect(await screen.findByText('Bridge is paused')).toBeInTheDocument()
+    expect(screen.getByText('Bridge is paused while operators investigate a Junocash chain incident.')).toBeInTheDocument()
+
+    await user.type(screen.getByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
+    const generateButton = screen.getByRole('button', { name: 'Deposit instructions paused' })
+    expect(generateButton).toBeDisabled()
+
+    await user.click(generateButton)
+    expect(getDepositMemo).not.toHaveBeenCalled()
+  })
+
+  it('closes open deposit instructions when the bridge becomes paused', async () => {
+    const user = userEvent.setup()
+    const { client } = renderDepositFlow()
+
+    await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
+    await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
+    expect(screen.getByRole('button', { name: 'I agree' })).toBeInTheDocument()
+
+    act(() => {
+      client.setQueryData(['bridge-config'], {
+        version: 'test',
+        baseChainId: 84532,
+        bridgeAddress: '0xbridge',
+        wjunoAddress: '0xwjuno',
+        oWalletUA: 'jtest1bridgewallet',
+        withdrawalExpiryWindowSeconds: 600,
+        minDepositAmount: '201005025',
+        depositMinConfirmations: 1,
+        minWithdrawAmount: '100000000',
+        feeBps: 50,
+        bridgePaused: true,
+        bridgePauseMessage: 'Bridge is paused.',
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'I agree' })).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: 'Deposit instructions paused' })).toBeDisabled()
+    expect(getDepositMemo).not.toHaveBeenCalled()
   })
 
   it('renders transport-specific instruction content inside the modal flow', async () => {
