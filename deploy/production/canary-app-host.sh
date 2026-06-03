@@ -81,12 +81,15 @@ shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_p
 shared_proof_role_asg="$(production_json_optional "$shared_manifest_path" '.shared_roles.proof.asg')"
 shared_proof_requestor_address="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.requestor_address')"
 shared_proof_rpc_url="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.rpc_url')"
+bridge_paused_expected="$(jq -r '.services.bridge_api.paused == true' "$app_deploy" 2>/dev/null || printf 'false')"
 
 require_funds_check="${PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK:-false}"
 http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
 http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
 infra_retry_max_attempts="${PRODUCTION_CANARY_INFRA_MAX_ATTEMPTS:-24}"
 infra_retry_sleep_seconds="${PRODUCTION_CANARY_INFRA_RETRY_SLEEP_SECONDS:-10}"
+ssm_poll_attempts="${PRODUCTION_CANARY_SSM_POLL_ATTEMPTS:-30}"
+ssm_poll_interval_seconds="${PRODUCTION_CANARY_SSM_POLL_INTERVAL_SECONDS:-2}"
 deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 
 bridge_probe_url="${bridge_probe_url%/}"
@@ -169,6 +172,38 @@ http_get_with_retry() {
   return 1
 }
 
+http_get_status_with_retry() {
+  local url="$1"
+  local label="$2"
+  local expected_status="$3"
+  local response_file error_file
+  local curl_status http_status attempt
+
+  response_file="$(mktemp)"
+  error_file="$(mktemp)"
+  for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
+    : >"$response_file"
+    : >"$error_file"
+    set +e
+    http_status="$(curl -sS -o "$response_file" -w '%{http_code}' "$url" 2>"$error_file")"
+    curl_status=$?
+    set -e
+    if (( curl_status == 0 )) && [[ "$http_status" == "$expected_status" ]]; then
+      cat "$response_file"
+      rm -f "$response_file" "$error_file"
+      return 0
+    fi
+    if (( attempt < http_retry_max_attempts )); then
+      sleep "$http_retry_sleep_seconds"
+    fi
+  done
+  [[ ! -s "$response_file" ]] || cat "$response_file" >&2
+  [[ ! -s "$error_file" ]] || cat "$error_file" >&2
+  printf 'http probe failed label=%s url=%s expected_status=%s actual_status=%s\n' "$label" "$url" "$expected_status" "${http_status:-unknown}" >&2
+  rm -f "$response_file" "$error_file"
+  return 1
+}
+
 ssm_http_get_with_retry() {
   local instance_id="$1"
   local url="$2"
@@ -183,7 +218,7 @@ ssm_http_get_with_retry() {
     : >"$error_file"
     printf -v remote_cmd 'curl -fsS %q' "$url"
     set +e
-    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" >"$response_file" 2>"$error_file"
+    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" "$ssm_poll_attempts" "$ssm_poll_interval_seconds" >"$response_file" 2>"$error_file"
     ssm_status=$?
     set -e
     if (( ssm_status == 0 )); then
@@ -216,7 +251,35 @@ set +a
 curl -fsS -H "Authorization: Bearer \${BACKOFFICE_AUTH_SECRET}" "http://127.0.0.1:8090${path}"
 EOF
 )"
-  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd"
+  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" "$ssm_poll_attempts" "$ssm_poll_interval_seconds"
+}
+
+frontend_has_pause_markers() {
+  local html="$1"
+  local asset_path asset_url asset_body
+
+  if [[ "$html" == *"Deposit instructions paused"* && "$html" == *"Withdrawals paused"* ]]; then
+    return 0
+  fi
+
+  while IFS= read -r asset_path; do
+    [[ -n "$asset_path" ]] || continue
+    case "$asset_path" in
+      http://*|https://*) asset_url="$asset_path" ;;
+      /*) asset_url="${bridge_probe_url}${asset_path}" ;;
+      *) asset_url="${bridge_probe_url}/${asset_path}" ;;
+    esac
+    asset_body="$(http_get_with_retry "$asset_url" "bridge frontend asset" || true)"
+    if [[ "$asset_body" == *"Deposit instructions paused"* && "$asset_body" == *"Withdrawals paused"* ]]; then
+      return 0
+    fi
+  done < <(
+    grep -Eo '(src|href)="[^"]+\.js[^"]*"' <<<"$html" \
+      | sed -E 's/^[^"]+"([^"]+)"/\1/' \
+      | sort -u
+  )
+
+  return 1
 }
 
 check_asg_capacity_once() {
@@ -349,7 +412,7 @@ else
     systemd_services+=(cloudflared-backoffice)
   fi
   for svc in "${systemd_services[@]}"; do
-    svc_status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
+    svc_status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc" "$ssm_poll_attempts" "$ssm_poll_interval_seconds" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
     if [[ "$svc_status" != "active" ]]; then
       systemd_status="failed"
       systemd_detail="service inactive: $svc"
@@ -379,21 +442,48 @@ else
     bridge_config_detail="bridge-api /v1/config missing or mismatched runtime fields"
   fi
 
-  deposit_memo_json="$(http_get_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge deposit memo" || true)"
-  if [[ -z "$deposit_memo_json" ]] \
-    || ! jq -e --arg recipient "${deposit_probe_base_recipient,,}" '
-      (.baseRecipient | ascii_downcase) == $recipient
-      and (.nonce | type == "string" and test("^[0-9]+$"))
-      and (.memoHex | type == "string" and test("^[0-9a-fA-F]{1024}$"))
-    ' >/dev/null <<<"$deposit_memo_json"; then
-    deposit_memo_status="failed"
-    deposit_memo_detail="bridge-api /v1/deposit-memo missing baseRecipient, nonce, or memoHex"
+  bridge_paused_live="$(jq -r '.bridgePaused == true' <<<"$bridge_config_json" 2>/dev/null || printf 'false')"
+  bridge_paused="$bridge_paused_live"
+  if [[ "$bridge_paused_expected" == "true" ]]; then
+    bridge_paused="true"
+    if [[ "$bridge_paused_live" != "true" ]]; then
+      bridge_config_status="failed"
+      bridge_config_detail="bridge-api /v1/config did not report expected paused mode"
+    fi
+  fi
+  if [[ "$bridge_paused" == "true" ]]; then
+    deposit_memo_json="$(http_get_status_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge paused deposit memo" "503" || true)"
+    if [[ -z "$deposit_memo_json" ]] \
+      || ! jq -e '
+        .error == "bridge_paused"
+        and (.message | type == "string" and length > 0)
+      ' >/dev/null <<<"$deposit_memo_json"; then
+      deposit_memo_status="failed"
+      deposit_memo_detail="bridge-api paused mode did not return bridge_paused deposit memo error"
+    else
+      deposit_memo_status="passed"
+      deposit_memo_detail="bridge-api paused mode returns bridge_paused deposit memo error"
+    fi
+  else
+    deposit_memo_json="$(http_get_with_retry "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" "bridge deposit memo" || true)"
+    if [[ -z "$deposit_memo_json" ]] \
+      || ! jq -e --arg recipient "${deposit_probe_base_recipient,,}" '
+        (.baseRecipient | ascii_downcase) == $recipient
+        and (.nonce | type == "string" and test("^[0-9]+$"))
+        and (.memoHex | type == "string" and test("^[0-9a-fA-F]{1024}$"))
+      ' >/dev/null <<<"$deposit_memo_json"; then
+      deposit_memo_status="failed"
+      deposit_memo_detail="bridge-api /v1/deposit-memo missing baseRecipient, nonce, or memoHex"
+    fi
   fi
 
   bridge_html="$(http_get_with_retry "${bridge_probe_url}/" "bridge frontend html" || true)"
   if [[ "$bridge_html" != *"<html"* && "$bridge_html" != *"<!doctype html"* ]]; then
     bridge_frontend_status="failed"
     bridge_frontend_detail="bridge frontend did not return HTML"
+  elif [[ "$bridge_paused_expected" == "true" ]] && ! frontend_has_pause_markers "$bridge_html"; then
+    bridge_frontend_status="failed"
+    bridge_frontend_detail="bridge frontend bundle does not include paused deposit and withdrawal states"
   fi
 
   if [[ "$backoffice_probe_transport" == "ssm-local" ]]; then
@@ -441,17 +531,47 @@ else
     fi
 
     backoffice_funds_json="$(ssm_backoffice_authenticated_get "$instance_id" "/api/funds" 2>/dev/null || true)"
-    if [[ -z "$backoffice_funds_json" ]] \
+    if [[ -n "$backoffice_funds_json" ]] \
+      && jq -e '((.prover.error // "") | length > 0) or ((.mpcWallet.error // "") | length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
+      backoffice_funds_status="failed"
+      backoffice_funds_detail="backoffice funds API reports runtime error"
+    elif [[ -z "$backoffice_funds_json" ]] \
       || ! jq -e '.operators | select(type == "array" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.mpcWallet.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.prover.network | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.prover.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
       backoffice_funds_status="failed"
       backoffice_funds_detail="backoffice funds API missing prover or MPC wallet fields"
+    else
+      backoffice_funds_status="passed"
+      backoffice_funds_detail="backoffice funds API passed"
     fi
   fi
 
-  if [[ -n "$shared_proof_role_asg" ]]; then
+  if [[ "$bridge_paused" == "true" ]]; then
+    if [[ -n "$shared_ecs_cluster_arn" && -n "$shared_proof_requestor_service_name" && -n "$shared_proof_funder_service_name" ]]; then
+      ecs_services_json="$(AWS_PAGER="" aws "${aws_args[@]}" ecs describe-services \
+        --cluster "$shared_ecs_cluster_arn" \
+        --services "$shared_proof_requestor_service_name" "$shared_proof_funder_service_name" 2>/dev/null || true)"
+      if [[ -z "$ecs_services_json" ]] \
+        || ! jq -e --arg requestor "$shared_proof_requestor_service_name" --arg funder "$shared_proof_funder_service_name" '
+          def service($name): .services[]? | select(.serviceName == $name or (.serviceName == null and $name == ""));
+          ((service($requestor) | (.desiredCount // 0) == 0 and (.runningCount // 0) == 0) // false)
+          and ((service($funder) | (.desiredCount // 0) >= 1 and (.runningCount // 0) >= 1) // false)
+        ' >/dev/null <<<"$ecs_services_json"; then
+        shared_proof_services_status="failed"
+        shared_proof_services_detail="paused bridge requires proof requestor stopped and proof funder healthy"
+      else
+        shared_proof_services_detail="paused bridge has proof requestor stopped and proof funder healthy"
+      fi
+    elif [[ -n "$shared_proof_role_asg" ]]; then
+      shared_proof_services_status="skipped"
+      shared_proof_services_detail="paused bridge uses proof role ASG; ECS requestor containment is not applicable"
+    else
+      shared_proof_services_status="failed"
+      shared_proof_services_detail="paused bridge requires shared proof ECS metadata to verify requestor stopped and funder healthy"
+    fi
+  elif [[ -n "$shared_proof_role_asg" ]]; then
     if ! proof_role_asg_json="$(check_asg_capacity "$shared_proof_role_asg" 2 || true)" || [[ -z "$proof_role_asg_json" ]]; then
       shared_proof_services_status="failed"
       shared_proof_services_detail="shared proof role asg does not have two healthy in-service instances"
@@ -538,6 +658,7 @@ jq -n \
   --arg shared_proof_services_detail "$shared_proof_services_detail" \
   '{
     ready_for_deploy: $ready_for_deploy,
+    ready_for_test: $ready_for_deploy,
     checks: {
       inputs: {status: $input_status, detail: $input_detail},
       systemd: {status: $systemd_status, detail: $systemd_detail},

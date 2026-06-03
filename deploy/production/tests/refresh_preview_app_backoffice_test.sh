@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 assert_not_contains() {
   local haystack="$1"
   local needle="$2"
@@ -153,12 +155,17 @@ JSON
 
 write_refresh_app_secret_contract() {
   local target="$1"
+  export TEST_PREVIEW_APP_POSTGRES_DSN="postgres://preview"
+  export TEST_PREVIEW_BACKOFFICE_AUTH_SECRET="backoffice-token"
+  export TEST_PREVIEW_JUNO_RPC_USER="juno"
+  export TEST_PREVIEW_JUNO_RPC_PASS="rpcpass"
+  export TEST_PREVIEW_MIN_DEPOSIT_ADMIN_PRIVATE_KEY="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   cat >"$target" <<'EOF'
-APP_POSTGRES_DSN=literal:postgres://preview
-BACKOFFICE_AUTH_SECRET=literal:backoffice-token
-JUNO_RPC_USER=literal:juno
-JUNO_RPC_PASS=literal:rpcpass
-MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+APP_POSTGRES_DSN=env:TEST_PREVIEW_APP_POSTGRES_DSN
+BACKOFFICE_AUTH_SECRET=env:TEST_PREVIEW_BACKOFFICE_AUTH_SECRET
+JUNO_RPC_USER=env:TEST_PREVIEW_JUNO_RPC_USER
+JUNO_RPC_PASS=env:TEST_PREVIEW_JUNO_RPC_PASS
+MIN_DEPOSIT_ADMIN_PRIVATE_KEY=env:TEST_PREVIEW_MIN_DEPOSIT_ADMIN_PRIVATE_KEY
 EOF
 }
 
@@ -178,8 +185,11 @@ JSON
 write_refresh_operator_secret_contract() {
   local target="$1"
   local key="$2"
+  local env_name
+  env_name="TEST_PREVIEW_BASE_RELAYER_KEY_$(basename "$target" | tr '[:lower:].-' '[:upper:]__')"
+  export "$env_name=$key"
   cat >"$target" <<EOF
-BASE_RELAYER_PRIVATE_KEYS=literal:$key
+BASE_RELAYER_PRIVATE_KEYS=env:$env_name
 EOF
 }
 

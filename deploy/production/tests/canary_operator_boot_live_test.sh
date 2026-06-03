@@ -49,13 +49,38 @@ resolve_parameters() {
   printf '%s' "\$raw"
 }
 
+decode_ssm_command() {
+  local wrapped="\$1"
+  awk '
+    /__INTENTS_JUNO_SSM_COMMAND__/ && !seen {
+      seen = 1
+      next
+    }
+    /^__INTENTS_JUNO_SSM_COMMAND__\$/ && seen {
+      exit
+    }
+    seen {
+      print
+    }
+  ' <<<"\$wrapped" | base64 --decode
+}
+
 case "\$*" in
   *"ec2 describe-instances"*"--query Reservations[].Instances[].InstanceId"* )
     printf 'i-op001\n'
     ;;
   *"ssm send-command"* )
     params="\$(resolve_parameters "\$@" || true)"
-    printf '%s\n' "\$params" >>"$log_dir/commands.log"
+    command_text="\$(jq -r '.commands[0] // empty' <<<"\$params" 2>/dev/null || true)"
+    if [[ -n "\$command_text" ]]; then
+      if decoded="\$(decode_ssm_command "\$command_text" 2>/dev/null)" && [[ -n "\$decoded" ]]; then
+        printf '%s\n' "\$decoded" >>"$log_dir/commands.log"
+      else
+        printf '%s\n' "\$command_text" >>"$log_dir/commands.log"
+      fi
+    else
+      printf '%s\n' "\$params" >>"$log_dir/commands.log"
+    fi
     counter_file="$log_dir/command-counter"
     counter=0
     if [[ -f "\$counter_file" ]]; then

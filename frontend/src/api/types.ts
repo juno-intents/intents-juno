@@ -9,6 +9,8 @@ export interface BridgeConfig {
   depositMinConfirmations: number
   minWithdrawAmount: string
   feeBps: number
+  bridgePaused?: boolean
+  bridgePauseMessage?: string
 }
 
 export interface DepositMemo {

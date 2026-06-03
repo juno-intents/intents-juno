@@ -60,9 +60,21 @@ func (c *Checker) IsPaused(ctx context.Context) (bool, error) {
 		return c.cached, nil
 	}
 
+	return c.queryPausedLocked(ctx)
+}
+
+// IsPausedFresh returns true if Bridge.paused() returns true without using a cached result.
+// On RPC error, returns true (fail-safe: assume paused).
+func (c *Checker) IsPausedFresh(ctx context.Context) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.queryPausedLocked(ctx)
+}
+
+func (c *Checker) queryPausedLocked(ctx context.Context) (bool, error) {
 	result, err := c.caller.CallContract(ctx, c.bridgeAddr, pausedSelector)
 	if err != nil {
-		// Fail-safe: assume paused on RPC error.
 		return true, fmt.Errorf("bridgepause: rpc error (fail-safe: assuming paused): %w", err)
 	}
 

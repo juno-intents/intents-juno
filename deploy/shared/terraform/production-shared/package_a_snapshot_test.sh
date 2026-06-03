@@ -59,6 +59,16 @@ main() {
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/variables.tf")"
+  shared_proof_requestor_desired_count_block="$(awk '
+    /variable "shared_proof_requestor_desired_count" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/variables.tf")"
+  shared_proof_funder_desired_count_block="$(awk '
+    /variable "shared_proof_funder_desired_count" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/variables.tf")"
   key_rotation="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-key-rotation.md")"
   failover="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-requestor-failover.md")"
   restore_runbook="$(cat "$REPO_ROOT/deploy/shared/runbooks/aurora-dr-restore.md")"
@@ -199,7 +209,11 @@ main() {
   assert_contains "$main_tf" 'name  = "SP1_WITHDRAW_PROGRAM_URL"' "production-shared proof task env includes withdraw program url"
   assert_contains "$main_tf" 'trimspace(var.shared_sp1_deposit_program_url_override) != "" ? trimspace(var.shared_sp1_deposit_program_url_override)' "production-shared prefers the explicit deposit program url override when provided"
   assert_contains "$main_tf" 'trimspace(var.shared_sp1_withdraw_program_url_override) != "" ? trimspace(var.shared_sp1_withdraw_program_url_override)' "production-shared prefers the explicit withdraw program url override when provided"
-  assert_contains "$main_tf" 'shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0' "production-shared blocks active proof services without requestor address"
+  assert_contains "$main_tf" 'shared_proof_requestor_desired_count         = coalesce(var.shared_proof_requestor_desired_count, var.shared_ecs_desired_count)' "production-shared allows proof-requestor desired count override"
+  assert_contains "$main_tf" 'shared_proof_funder_desired_count            = coalesce(var.shared_proof_funder_desired_count, var.shared_ecs_desired_count)' "production-shared allows proof-funder desired count override"
+  assert_contains "$main_tf" 'desired_count   = local.shared_proof_requestor_desired_count' "production-shared scales proof-requestor independently"
+  assert_contains "$main_tf" 'desired_count   = local.shared_proof_funder_desired_count' "production-shared scales proof-funder independently"
+  assert_contains "$main_tf" 'shared_sp1_requestor_address must be set when a shared proof service desired count is > 0' "production-shared blocks active proof services without requestor address"
   assert_contains "$main_tf" 'task_role_arn            = aws_iam_role.proof_requestor_task.arn' "requestor task definition uses dedicated runtime role"
   assert_contains "$main_tf" 'task_role_arn            = aws_iam_role.proof_funder_task.arn' "funder task definition uses dedicated runtime role"
   assert_contains "$main_tf" 'sid = "AllowMSKConnect"' "proof runtime task roles can connect to MSK"
@@ -320,6 +334,8 @@ main() {
   assert_not_contains "$password_block" 'default' "shared postgres password has no default"
   assert_contains "$variables_tf" 'variable "shared_proof_service_image_ecr_repository_arn"' "explicit proof-service ECR repository ARN input"
   assert_contains "$shared_ecs_desired_count_block" 'default     = 0' "shared proof services stay idle until runtime rollout"
+  assert_contains "$shared_proof_requestor_desired_count_block" 'default     = null' "proof-requestor desired count defaults to the shared proof count"
+  assert_contains "$shared_proof_funder_desired_count_block" 'default     = null' "proof-funder desired count defaults to the shared proof count"
 
   assert_contains "$key_rotation" 'configured proof-services ECR repository' "rotation runbook documents scoped repository access"
   assert_contains "$key_rotation" 'aws autoscaling start-instance-refresh' "rotation runbook documents proof-role instance refresh"

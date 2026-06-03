@@ -169,6 +169,7 @@ jobs:
             --dkg-summary "${{ inputs.dkg_summary_path }}"
             --bridge-deploy-binary .ci/bin/bridge-deploy_linux_amd64
             --output-dir .ci/preview-output
+            --app-binaries-release-tag "${{ inputs.app_binaries_release_tag }}"
             --github-repo "${{ github.repository }}"
           )
           if [[ -n "${{ inputs.dkg_completion_path }}" ]]; then

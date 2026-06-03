@@ -36,10 +36,13 @@ type Config struct {
 	DepositMinConfirmations       int64
 	MinWithdrawAmount             uint64
 	FeeBps                        uint32
+	BridgePaused                  bool
+	BridgePauseMessage            string
 	NonceFn                       func() (uint64, error)
 
 	RuntimeSettings RuntimeSettingsProvider
 	BridgeSettings  BridgeSettingsProvider
+	PauseChecker    PauseChecker
 	JunoTipProvider JunoTipProvider
 
 	RateLimitPerIPPerSecond float64
@@ -66,6 +69,14 @@ type BridgeSettingsProvider interface {
 
 type JunoTipProvider interface {
 	TipHeight(ctx context.Context) (int64, error)
+}
+
+type PauseChecker interface {
+	IsPaused(ctx context.Context) (bool, error)
+}
+
+type FreshPauseChecker interface {
+	IsPausedFresh(ctx context.Context) (bool, error)
 }
 
 type DepositStatus struct {
@@ -231,22 +242,28 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	minDepositAmount, err := h.currentMinDepositAmount()
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"version": "v1",
-			"error":   "bridge_settings_not_ready",
-		})
-		return
-	}
-	depositMinConfirmations, err := h.currentDepositMinConfirmations()
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"version": "v1",
-			"error":   "runtime_settings_not_ready",
-		})
-		return
+func (h *handler) handleConfig(w http.ResponseWriter, r *http.Request) {
+	bridgePaused := h.currentBridgePaused(r.Context(), true)
+	minDepositAmount := h.cfg.MinDepositAmount
+	depositMinConfirmations := h.cfg.DepositMinConfirmations
+	if !bridgePaused {
+		var err error
+		minDepositAmount, err = h.currentMinDepositAmount()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"version": "v1",
+				"error":   "bridge_settings_not_ready",
+			})
+			return
+		}
+		depositMinConfirmations, err = h.currentDepositMinConfirmations()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"version": "v1",
+				"error":   "runtime_settings_not_ready",
+			})
+			return
+		}
 	}
 
 	w.Header().Set("Cache-Control", "no-store")
@@ -260,6 +277,8 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"depositMinConfirmations":       depositMinConfirmations,
 		"minWithdrawAmount":             strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
 		"feeBps":                        h.cfg.FeeBps,
+		"bridgePaused":                  bridgePaused,
+		"bridgePauseMessage":            h.bridgePauseMessage(),
 	}
 	if h.cfg.WJunoAddress != (common.Address{}) {
 		resp["wjunoAddress"] = h.cfg.WJunoAddress.Hex()
@@ -289,7 +308,39 @@ func (h *handler) currentDepositMinConfirmations() (int64, error) {
 	return settings.DepositMinConfirmations, nil
 }
 
+func (h *handler) currentBridgePaused(ctx context.Context, fresh bool) bool {
+	if h.cfg.BridgePaused {
+		return true
+	}
+	if h.cfg.PauseChecker == nil {
+		return false
+	}
+	if fresh {
+		if checker, ok := h.cfg.PauseChecker.(FreshPauseChecker); ok {
+			paused, err := checker.IsPausedFresh(ctx)
+			if err != nil {
+				return true
+			}
+			return paused
+		}
+	}
+	paused, err := h.cfg.PauseChecker.IsPaused(ctx)
+	if err != nil {
+		return true
+	}
+	return paused
+}
+
 func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
+	if h.currentBridgePaused(r.Context(), true) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "bridge_paused",
+			"message": h.bridgePauseMessage(),
+		})
+		return
+	}
+
 	baseRecipientStr := strings.TrimSpace(r.URL.Query().Get("baseRecipient"))
 	if !common.IsHexAddress(baseRecipientStr) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -351,6 +402,14 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 	body = append(body, '\n')
 	h.memoCache.Set(cacheKey, body, h.cfg.Now().UTC())
 	writeJSONBytes(w, http.StatusOK, body)
+}
+
+func (h *handler) bridgePauseMessage() string {
+	msg := strings.TrimSpace(h.cfg.BridgePauseMessage)
+	if msg == "" {
+		return "Bridge is paused."
+	}
+	return msg
 }
 
 func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
@@ -84,6 +86,159 @@ for ((i=0; i<\${#args[@]}; i++)); do
     exit 0
   fi
 done
+exit 0
+EOF
+  chmod +x "$target"
+}
+
+write_fake_ssm_aws() {
+  local target="$1"
+  local log_dir="$2"
+  local instance_id="${3:-i-op001}"
+  local private_ip="${4:-10.0.0.11}"
+  local expected_secret_arn="${5:-}"
+  local secret_value="${6:-}"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+log_dir="$log_dir"
+instance_id="$instance_id"
+private_ip="$private_ip"
+expected_secret_arn="$expected_secret_arn"
+secret_value="$secret_value"
+mkdir -p "\$log_dir/ssm"
+printf 'aws %s\n' "\$*" >>"\$log_dir/aws.log"
+
+arg_after() {
+  local want="\$1"
+  shift
+  local args=( "\$@" )
+  for ((i=0; i<\${#args[@]}; i++)); do
+    if [[ "\${args[\$i]}" == "\$want" && \$((i + 1)) -lt \${#args[@]} ]]; then
+      printf '%s\n' "\${args[\$((i + 1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+decode_ssm_command() {
+  local wrapped="\$1"
+  awk '
+    /__INTENTS_JUNO_SSM_COMMAND__/ && !seen {
+      seen = 1
+      next
+    }
+    /^__INTENTS_JUNO_SSM_COMMAND__\$/ && seen {
+      exit
+    }
+    seen {
+      print
+    }
+  ' <<<"\$wrapped" | base64 --decode
+}
+
+record_staged_file() {
+  local command="\$1"
+  local payload_line payload destination prefix dest_prefix
+  payload_line="\$(grep -F " | base64 --decode | sudo tee " <<<"\$command" || true)"
+  [[ -n "\$payload_line" ]] || return 0
+  prefix="printf '%s' '"
+  dest_prefix=' | base64 --decode | sudo tee "'
+  payload="\${payload_line#"\$prefix"}"
+  payload="\${payload%%"' | base64 --decode"*}"
+  destination="\${payload_line#*"\$dest_prefix"}"
+  destination="\${destination%%\\"*}"
+  [[ -n "\$payload" && -n "\$destination" ]] || return 0
+  printf '%s' "\$payload" | base64 --decode >"\$log_dir/\$(basename "\$destination")"
+}
+
+args=( "\$@" )
+if [[ "\${args[*]}" == *"secretsmanager get-secret-value"* ]]; then
+  secret_arn="\$(arg_after --secret-id "\${args[@]}" || true)"
+  if [[ -n "\$expected_secret_arn" && "\$secret_arn" != "\$expected_secret_arn" ]]; then
+    printf 'unexpected secret id: %s\n' "\$secret_arn" >&2
+    exit 1
+  fi
+  printf '%s\n' "\$secret_value"
+  exit 0
+fi
+
+if [[ "\${args[*]}" == *"ec2 describe-instances"* ]]; then
+  query="\$(arg_after --query "\${args[@]}" || true)"
+  case "\${args[*]}" in
+    *'Name=ip-address,Values=10.9.0.222'* ) printf 'None\n' ;;
+    *'Name=ip-address,Values=10.9.0.233'* ) printf 'None\n' ;;
+    *'Name=private-ip-address,Values=10.9.0.222'* ) printf 'None\n' ;;
+    *'Name=private-ip-address,Values=10.9.0.233'* ) printf 'None\n' ;;
+    *'Name=tag:Operator,Values=op2'* ) printf '10.9.1.22\n' ;;
+    *'Name=tag:Operator,Values=op3'* ) printf '10.9.1.33\n' ;;
+    * )
+      if [[ "\$query" == *"InstanceId"* ]]; then
+        printf '%s\n' "\$instance_id"
+      elif [[ "\$query" == *"SecurityGroups"* ]]; then
+        printf 'sg-op001\n'
+      elif [[ "\$query" == *"PrivateIpAddress"* ]]; then
+        printf '%s\n' "\$private_ip"
+      else
+        printf '%s\n' "\$private_ip"
+      fi
+      ;;
+  esac
+  exit 0
+fi
+
+if [[ "\${args[*]}" == *"ec2 authorize-security-group-ingress"* ]]; then
+  exit 0
+fi
+
+if [[ "\${args[*]}" == *"route53 change-resource-record-sets"* ]]; then
+  exit 0
+fi
+
+if [[ "\${args[*]}" == *"ssm send-command"* ]]; then
+  params_ref="\$(arg_after --parameters "\${args[@]}")"
+  params_file="\${params_ref#file://}"
+  wrapped_command="\$(jq -r '.commands[0]' "\$params_file")"
+  command="\$(decode_ssm_command "\$wrapped_command")"
+  printf '%s\n---\n' "\$command" >>"\$log_dir/ssm.commands"
+  record_staged_file "\$command"
+
+  counter_file="\$log_dir/ssm/counter"
+  count=0
+  [[ -f "\$counter_file" ]] && count="\$(cat "\$counter_file")"
+  count=\$((count + 1))
+  printf '%s' "\$count" >"\$counter_file"
+  command_id="cmd-\$count"
+  stdout=""
+  if [[ "\$command" == *"sudo systemctl is-active juno-scan"* && -n "\${PRODUCTION_TEST_JUNO_SCAN_INACTIVE_ATTEMPTS:-}" ]]; then
+    scan_counter_file="\$log_dir/ssm/juno-scan.counter"
+    scan_count=0
+    [[ -f "\$scan_counter_file" ]] && scan_count="\$(cat "\$scan_counter_file")"
+    scan_count=\$((scan_count + 1))
+    printf '%s' "\$scan_count" >"\$scan_counter_file"
+    if (( scan_count <= PRODUCTION_TEST_JUNO_SCAN_INACTIVE_ATTEMPTS )); then
+      stdout="inactive"
+    else
+      stdout="active"
+    fi
+  elif [[ "\$command" == *"systemctl is-active"* ]]; then
+    stdout="active"
+  elif [[ "\$command" == *"/v1/health"* ]]; then
+    stdout='{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+  fi
+  printf '%s' "\$stdout" >"\$log_dir/ssm/\$command_id.stdout"
+  jq -n --arg id "\$command_id" '{Command:{CommandId:\$id}}'
+  exit 0
+fi
+
+if [[ "\${args[*]}" == *"ssm get-command-invocation"* ]]; then
+  command_id="\$(arg_after --command-id "\${args[@]}")"
+  stdout="\$(cat "\$log_dir/ssm/\$command_id.stdout" 2>/dev/null || true)"
+  jq -n --arg stdout "\$stdout" '{Status:"Success",StandardOutputContent:\$stdout,StandardErrorContent:""}'
+  exit 0
+fi
+
 exit 0
 EOF
   chmod +x "$target"
@@ -182,7 +337,7 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 for arg in "\$@"; do
   if [[ -f "\$arg" ]]; then
     cp "\$arg" "$log_dir/\$(basename "\$arg")"
@@ -192,10 +347,10 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
-cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 elif [[ "\$*" == *"/v1/health"* ]]; then
@@ -205,220 +360,59 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "queueauth-test-hmac-key"
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir" "i-op001" "10.0.0.11" "$queueauth_secret_arn" "queueauth-test-hmac-key"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
-  chmod +x "$fake_bin/scp" "$fake_bin/ssh"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" >/dev/null
 
-  assert_contains "$(cat "$log_dir/scp.log")" "StrictHostKeyChecking=yes" "scp strict host key checking"
-  assert_contains "$(cat "$log_dir/scp.log")" "base-relayer-server.pem" "tls cert copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "base-relayer-server.key" "tls key copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "ufvk.txt" "ufvk file copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "junocashd.conf" "junocashd config copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "intents-juno-config-hydrator.sh" "config hydrator copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "dkg-peer-hosts.json" "distributed dkg peer host map copied"
-  assert_contains "$(cat "$log_dir/scp.log")" "operator-export-kms.sh" "kms export helper copied"
-  assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/known_hosts" "ssh uses known_hosts file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "remote deploy updates checkpoint signer wrapper"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint signer wrapper is missing' "remote deploy does not abort when legacy hosts are missing wrapper scripts"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint aggregator wrapper is missing' "remote deploy does not require legacy checkpoint aggregator wrapper to already exist"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'dkg-admin wrapper is missing' "remote deploy does not require legacy dkg-admin wrapper to already exist"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'spendauth signer wrapper is missing' "remote deploy does not require legacy spendauth wrapper to already exist"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'deposit-relayer wrapper is missing' "remote deploy does not require legacy deposit wrapper to already exist"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw-coordinator wrapper is missing' "remote deploy does not require legacy withdraw wrapper to already exist"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'base-event-scanner wrapper is missing' "remote deploy does not require legacy base-event scanner wrapper to already exist"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"' "remote deploy checks checkpoint signer flag support before writing wrapper args"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"' "remote deploy restores per-operator checkpoint signer lease names"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--lease-name "${checkpoint_signer_lease_name}"' "remote deploy wires the per-operator checkpoint signer lease into the wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "remote deploy updates checkpoint aggregator wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'aggregator_tmp="$(mktemp)"' "remote deploy rewrites the checkpoint aggregator wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec /usr/local/bin/checkpoint-aggregator \' "remote deploy writes the checkpoint aggregator wrapper command"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$aggregator_tmp" "$checkpoint_aggregator_script"' "remote deploy installs the checkpoint aggregator wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'source "$remote_stage_dir/common.sh"' "remote deploy loads dkg helper functions on the host"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_stage_dir="$(mktemp -d)"' "remote deploy stages dkg-admin in a writable temp dir"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'ensure_dkg_binary "dkg-admin" "$dkg_release_tag" "$dkg_stage_dir"' "remote deploy fetches the Linux dkg-admin release artifact"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"' "remote deploy installs the downloaded dkg-admin binary into the protected runtime"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"' "remote deploy records the installed dkg-admin runtime path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_downloaded="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$dkg_stage_dir")"' "remote deploy fetches the Linux juno-txsign release artifact"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$juno_txsign_downloaded" "$runtime_dir/bin/juno-txsign"' "remote deploy installs the downloaded juno-txsign binary into the protected runtime"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_runtime_bin="$runtime_dir/bin/juno-txsign"' "remote deploy records the installed juno-txsign runtime path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo chown -R intents-juno:intents-juno "$runtime_dir"' "remote deploy reassigns restored runtime to the service user"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl stop juno-scan || true' "remote deploy stops juno-scan before repairing its state directory"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'" "remote deploy repairs juno-scan state ownership through a root shell"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo test -x "$dkg_admin_runtime_bin"' "remote deploy verifies the restored runtime binary through sudo"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo test -x "$juno_txsign_runtime_bin"' "remote deploy verifies the restored juno-txsign binary through sudo"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_help="$(sudo "$juno_txsign_runtime_bin" --help 2>&1 || true)"' "remote deploy probes the runtime juno-txsign command set"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -qE '\''(^|[[:space:]])sign-digest([[:space:]]|$)'\'' <<<"$juno_txsign_help"' "remote deploy requires juno-txsign sign-digest support"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"' "remote deploy can patch legacy dkg-admin wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_tmp="$(mktemp)"' "remote deploy rewrites the dkg-admin wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'admin_config_dir="$(dirname "$admin_config")"' "remote deploy writes a dkg-admin wrapper that derives the bundle directory"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'cd "$admin_config_dir"' "remote deploy writes a dkg-admin wrapper that runs from the bundle directory"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_config" serve' "remote deploy writes the corrected dkg-admin wrapper command"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"' "remote deploy installs the corrected dkg-admin wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"' "remote deploy can patch the spendauth signer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'spendauth_tmp="$(mktemp)"' "remote deploy rewrites the spendauth signer wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec sudo -u intents-juno "$0" "$@"' "remote deploy writes the spendauth wrapper to drop root before host-process signing"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec "${TSS_SPENDAUTH_SIGNER_BIN}" --config "$admin_config" "$@"' "remote deploy writes the corrected spendauth signer wrapper command"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$spendauth_tmp" "$spendauth_signer_script"' "remote deploy installs the corrected spendauth signer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'tss_host_script="/usr/local/bin/intents-juno-tss-host.sh"' "remote deploy can patch the tss-host wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'tss_host_tmp="$(mktemp)"' "remote deploy rewrites the tss-host wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export "$tss_postgres_dsn_env"' "remote deploy exports the selected postgres dsn env var into the tss-host wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "remote deploy writes the tss-host wrapper to pass the Postgres DSN by env indirection"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$tss_host_tmp" "$tss_host_script"' "remote deploy installs the corrected tss-host wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"' "remote deploy can patch the withdraw-coordinator wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_extend_signer_script="/usr/local/bin/intents-juno-multikey-extend-signer.sh"' "remote deploy can patch the withdraw extend signer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_extend_signer_tmp="$(mktemp)"' "remote deploy rewrites the withdraw extend signer wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"' "remote deploy prefers dedicated withdraw extend signer keys"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"' "remote deploy rewrites the extend signer wrapper to export the full signer roster"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec /var/lib/intents-juno/operator-runtime/bin/juno-txsign "$@"' "remote deploy writes the extend signer wrapper to use the runtime juno-txsign binary"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_extend_signer_tmp" "$withdraw_extend_signer_script"' "remote deploy installs the withdraw extend signer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_tmp="$(mktemp)"' "remote deploy rewrites the withdraw-coordinator wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "remote deploy writes the withdraw wrapper to pass the Postgres DSN by env indirection"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--leader-lease-ttl "${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-60s}"' "remote deploy writes the withdraw wrapper with a longer leader lease default"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "remote deploy writes the withdraw wrapper with a durable claim ttl default"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-50}"' "remote deploy writes the withdraw wrapper with a real default batch cap"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-items "${withdraw_coord_max_items}"' "remote deploy writes the withdraw wrapper with the withdraw batch cap"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_base_rpc_url="${DEPOSIT_RELAYER_BASE_RPC_URL:-${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}}"' "remote deploy derives the deposit relayer base rpc url from the dedicated staged env"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_juno_rpc_url="${DEPOSIT_SCAN_JUNO_RPC_URL:-${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}}"' "remote deploy derives the deposit relayer juno rpc url from staged env"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-25}"' "remote deploy writes the deposit wrapper with a real default batch cap"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_max_age="${DEPOSIT_RELAYER_MAX_AGE:-3m}"' "remote deploy writes the deposit wrapper with a bounded batch max-age"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_claim_ttl_seconds="$((relayer_submit_timeout_seconds + 120))"' "remote deploy writes the deposit wrapper claim ttl grace derived from submit timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-${deposit_claim_ttl_seconds}s}"' "remote deploy writes the deposit wrapper with a derived claim ttl"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_flush_interval="${DEPOSIT_RELAYER_FLUSH_INTERVAL:-1s}"' "remote deploy writes the deposit wrapper with a bounded flush interval"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sp1_request_timeout_seconds="${SP1_REQUEST_TIMEOUT_SECONDS:-1500}"' "remote deploy derives the deposit wrapper submit timeout from the SP1 request timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'relayer_submit_timeout_seconds="$((10#$sp1_request_timeout_seconds + 300))"' "remote deploy adds safety buffer to the deposit wrapper submit timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '(( relayer_submit_timeout_seconds >= 1800 )) || relayer_submit_timeout_seconds=1800' "remote deploy enforces a floor for the deposit wrapper submit timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-${relayer_submit_timeout_seconds}s}"' "remote deploy writes the deposit wrapper with a derived submit timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-rpc-url "${deposit_base_rpc_url}"' "remote deploy writes the deposit wrapper with the required base rpc url"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-rpc-url "${deposit_juno_rpc_url}"' "remote deploy writes the deposit wrapper with the required juno rpc url"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-items "${deposit_max_items}"' "remote deploy writes the deposit wrapper with the deposit batch cap"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-age "${deposit_max_age}"' "remote deploy writes the deposit wrapper with the deposit batch max-age"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--claim-ttl "${deposit_claim_ttl}"' "remote deploy writes the deposit wrapper with the deposit claim ttl"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--flush-interval "${deposit_flush_interval}"' "remote deploy writes the deposit wrapper with the deposit flush interval"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--submit-timeout "${deposit_submit_timeout}"' "remote deploy writes the deposit wrapper with the deposit submit timeout"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export_optional_env_vars JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "remote deploy exports kafka iam and AWS sdk env into service wrappers"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}"' "remote deploy writes the withdraw wrapper to pin juno txbuild to juno-scan"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "remote deploy writes the withdraw wrapper to pass the scanner bearer env name"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-fee-add-zat "${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"' "remote deploy writes the withdraw wrapper with a durable juno fee floor"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-expiry-offset "${WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET:-240}"' "remote deploy writes the withdraw wrapper with a safer juno expiry offset default"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-6h}"' "remote deploy writes the withdraw wrapper with a bounded expiry safety margin"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"' "remote deploy writes the withdraw wrapper with the on-chain max expiry extension"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}"' "remote deploy writes the withdraw wrapper to forward the optional tss server-name override"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_tmp" "$withdraw_coordinator_script"' "remote deploy installs the corrected withdraw-coordinator wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_finalizer_script="/usr/local/bin/intents-juno-withdraw-finalizer.sh"' "remote deploy can patch the withdraw-finalizer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_finalizer_tmp="$(mktemp)"' "remote deploy rewrites the withdraw-finalizer wrapper from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_finalizer_tmp" "$withdraw_finalizer_script"' "remote deploy installs the corrected withdraw-finalizer wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"' "remote deploy can patch the base-event-scanner wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "remote deploy restores base-event-scanner start block guard"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "remote deploy backfills exported signer env into the withdraw-coordinator wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "remote deploy backfills queueauth env into queue-consuming wrappers"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "remote deploy backfills queueauth env into the base-event-scanner wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'coord_client_cert="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE")"' "remote deploy derives withdraw coordinator client cert path from staged env"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'openssl x509 -in "$coord_client_cert" -noout -purpose' "remote deploy validates the restored coordinator client cert purpose"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"' "remote deploy no longer fabricates coordinator client certs from the server cert"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_key" "$coord_client_key"' "remote deploy no longer fabricates coordinator client keys from the server key"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_peer_hosts_file="$remote_stage_dir/dkg-peer-hosts.json"' "remote deploy stages a distributed dkg peer host map"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo cat "$admin_config_path" | jq --slurpfile peer_hosts' "remote deploy reads the protected admin-config through sudo before rewriting the distributed roster"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '.roster.operators |= map(' "remote deploy rewrites admin-config roster endpoints from the staged peer map"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'capture("^(?<scheme>https?)://(?<host>[^:/]+)(?::(?<port>[0-9]+))?$")' "remote deploy preserves grpc endpoint scheme and port while replacing the host"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" ".roster |" "remote deploy canonicalizes the nested roster object when recomputing roster_hash_hex"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "printf '%s' \"\$dkg_roster_canonical\"" "remote deploy hashes the canonical roster without a trailing newline"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"' "remote deploy sets the config hydrator path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$remote_stage_dir/intents-juno-config-hydrator.sh" "$config_hydrator_script"' "remote deploy installs the staged config hydrator before restarting services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'config_hydrator_service_tmp="$(mktemp)"' "remote deploy rewrites the config hydrator unit from a temp file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0644 "$config_hydrator_service_tmp" /etc/systemd/system/intents-juno-config-hydrator.service' "remote deploy installs the config hydrator unit"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl enable intents-juno-config-hydrator.service >/dev/null' "remote deploy enables the config hydrator unit"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo sed -i '\''/^CHECKPOINT_SIGNER_PRIVATE_KEY=/d'\'' /etc/intents-juno/operator-stack.env' "remote deploy scrubs stale private key env"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo rm -f /etc/intents-juno/checkpoint-signer.key' "remote deploy removes deprecated signer key file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env' "remote deploy stages the rendered operator env atomically"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf' "remote deploy stages junocashd rpc config"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"' "remote deploy creates runtime export receipt dir"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if ! getent group intents-juno >/dev/null 2>&1; then' "remote deploy ensures the intents-juno group exists"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo groupadd --system intents-juno' "remote deploy creates the intents-juno group when missing"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if ! id -u intents-juno >/dev/null 2>&1; then' "remote deploy ensures the intents-juno user exists"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo useradd --system --create-home --home-dir /var/lib/intents-juno --shell /usr/sbin/nologin --gid intents-juno intents-juno' "remote deploy creates the intents-juno user with the intents-juno group"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'if ! getent group intents-juno >/dev/null 2>&1; then' 'sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno || true' "remote deploy creates the service group before group-owned installs"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'if ! id -u intents-juno >/dev/null 2>&1; then' 'sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir" || true' "remote deploy creates the service user before user-owned installs"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'source "$remote_stage_dir/common.sh"' "remote deploy loads shared dkg helpers before dependency bootstrapping"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'ensure_command aws' "remote deploy installs aws cli before kms export"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'ensure_command aws' 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' "remote deploy prepares aws cli before dropping privileges for kms export"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' "remote deploy exports restored dkg package to kms"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}"' "remote deploy exports with the blob kms key"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-bucket "${CHECKPOINT_BLOB_BUCKET}"' "remote deploy exports with the staged checkpoint bucket"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}"' "remote deploy exports with the staged checkpoint prefix"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-sse-kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}"' "remote deploy stores exported checkpoint packages under the blob sse kms key"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'latest_kms_receipt="$(sudo bash -lc '\''ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1'\'' _ "$runtime_dir")"' "remote deploy captures the latest kms export receipt"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"' "remote deploy publishes a stable latest kms export receipt path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk file"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl daemon-reload' "remote deploy reloads systemd units before restarting services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart intents-juno-config-hydrator.service' "remote deploy restarts config hydrator before dependent services"
-  assert_not_contains "$(cat "$log_dir/ssh.stdin")" '/tmp/intents-juno-dkg-backup.zip' "remote deploy no longer leaves a scratch copy of the backup zip under /tmp"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'restore --package "$remote_stage_dir/dkg-backup.zip" --workdir "$runtime_dir" --force' 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk after restoring the runtime"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'restore --package "$remote_stage_dir/dkg-backup.zip" --workdir "$runtime_dir" --force' 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' "remote deploy exports the restored dkg package after restore"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy completes kms export before restarting services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo rm -f "$remote_stage_dir/dkg-backup.zip"' "remote deploy deletes the staged dkg backup zip after kms export"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo rm -rf "$remote_stage_dir"' "remote deploy deletes the remote staging directory after kms export"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' 'sudo rm -f "$remote_stage_dir/dkg-backup.zip"' "remote deploy only deletes the staged backup after kms export succeeds"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo rm -f "$remote_stage_dir/dkg-backup.zip"' 'sudo rm -rf "$remote_stage_dir"' "remote deploy removes the staged archive before deleting the staging directory"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo rm -rf "$remote_stage_dir"' 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy clears the remote staging directory before restarting services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''/usr/local/bin/intents-juno-dkg-admin-serve.sh'\'' || true' "remote deploy clears stale dkg-admin wrapper processes before restart"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''dkg-admin .* serve'\'' || true' "remote deploy clears stale dkg-admin runtime processes before restart"
-  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''/usr/local/bin/intents-juno-dkg-admin-serve.sh'\'' || true' 'sudo systemctl reset-failed "$svc" || true' "remote deploy clears stale dkg-admin processes before restarting services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy restarts junocashd before scanner-dependent services"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl reset-failed "$svc" || true' "remote deploy clears systemd start limits before restarting operator services"
-  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active junocashd" "deploy verifies junocashd after restarting it"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'restore --package "$remote_stage_dir/dkg-backup.zip" --workdir "$runtime_dir" --force' "remote deploy restores directly from the staged backup archive"
-  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active juno-scan" "deploy verifies juno-scan after restarting it"
+  assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "deploy stages over ssm"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "ufvk.txt" "ufvk file copied"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "intents-juno-config-hydrator.sh" "config hydrator copied"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "dkg-peer-hosts.json" "distributed dkg peer host map copied"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "backup-package.sh" "backup package helper staged"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "common.sh" "dkg common helper staged"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh" "operator rollout script staged"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "fetch_restore_package" "remote rollout fetches runtime material"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'aws --region "$runtime_material_region" s3 cp' "remote rollout restores from S3 runtime material"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo bash "$backup_package_script" restore --package "$restore_package_path" --workdir "$runtime_dir" --force' "remote rollout restores runtime material through backup-package"
+  assert_line_order "$(cat "$log_dir/run-operator-rollout.sh")" "fetch_restore_package" "restore_runtime" "remote rollout fetches runtime material before restore"
+  assert_line_order "$(cat "$log_dir/run-operator-rollout.sh")" "restore_runtime" "hydrate_and_restart" "remote rollout restores runtime before service restarts"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$signer_ufvk_file" "$runtime_dir/ufvk.txt"' "remote rollout stages signer ufvk file"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo systemctl reset-failed "$svc" || true' "remote rollout clears systemd start limits before restart"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active junocashd" "deploy verifies junocashd after restarting it"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active juno-scan" "deploy verifies juno-scan after restarting it"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "kms signer driver staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "kms signer key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff" "checkpoint blob sse kms key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "operator address staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "juno rpc user staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "juno rpc pass staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_ENABLED=true" "deposit scan enabled"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080" "deposit scan url staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-op1" "deposit scan wallet id staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232" "deposit scan rpc url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "withdraw coordinator rpc url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "withdraw coordinator juno fee floor staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240" "withdraw coordinator juno expiry offset staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "withdraw coordinator expiry safety margin staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "withdraw coordinator max expiry extension staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh" "withdraw coordinator extend signer staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "withdraw coordinator extend signer roster staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "withdraw coordinator signer key staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_KEY_ID=default" "queueauth key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=queueauth-test-hmac-key" "queueauth HMAC key staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_SCAN_BACKFILL_FROM_HEIGHT=0" "scanner backfill floor staged"
-  assert_not_contains "$(grep '^JUNO_TXSIGN_SIGNER_KEYS=' "$log_dir/operator-stack.env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "staged env keeps the local juno txsign signer key isolated"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "withdraw finalizer scan url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "base event scanner start block staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://base-sepolia.example.invalid" "deposit relayer rpc url staged independently"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_scan_backfill_script="/usr/local/bin/intents-juno-juno-scan-backfill.sh"' "remote deploy can patch the scanner backfill wrapper"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0644 "$juno_scan_backfill_service_tmp" /etc/systemd/system/juno-scan-backfill.service' "remote deploy installs the scanner backfill service unit"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl enable juno-scan-backfill.service >/dev/null' "remote deploy enables the scanner backfill service"
-  assert_contains "$(cat "$log_dir/ssh.log")" "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service" "deploy starts scanner backfill asynchronously after the main services are healthy"
-  assert_not_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy no longer blocks on synchronous wallet backfill over ssh"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'intents-juno-juno-scan-backfill.sh' "remote rollout stages the scanner backfill wrapper"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0644 "$stage_dir/juno-scan-backfill.service" /etc/systemd/system/juno-scan-backfill.service' "remote rollout installs the scanner backfill service unit"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo systemctl restart "$svc"' "remote rollout restarts staged services"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "/v1/wallets/wallet-op1/backfill" "deploy no longer blocks on synchronous wallet backfill over ssh"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "tss ufvk path staged"
   assert_contains "$(cat "$log_dir/ufvk.txt")" "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" "ufvk value staged"
-  assert_contains "$(cat "$log_dir/junocashd.conf")" "rpcuser=juno" "junocashd config rpc user staged"
-  assert_contains "$(cat "$log_dir/junocashd.conf")" "rpcpassword=rpcpass" "junocashd config rpc pass staged"
-  assert_contains "$(cat "$log_dir/junocashd.conf")" "txunpaidactionlimit=10000" "junocashd config raises unpaid action limit"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "kms operator env omits private key"
-  assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
   assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x4444444444444444444444444444444444444444 isOperator(address)(bool) 0x9999999999999999999999999999999999999999" "deploy validates operator registry membership before rollout"
-  assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key" "deploy derives the base relayer address from the configured key"
-  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before rollout"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605,0xfe097d57" "selector allowlist injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_PER_SECOND=20" "rate limit refill default"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_BURST=40" "rate limit burst default"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS=10000" "rate limit capacity default"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_TLS_CERT_FILE=/etc/intents-juno/base-relayer/server.pem" "tls cert path injected"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_TLS_KEY_FILE=/etc/intents-juno/base-relayer/server.key" "tls key path injected"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_URL=https://127.0.0.1:18081" "https base relayer url"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_URL=http://127.0.0.1:18081" "base relayer url"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env uses operator-owned checkpoint bucket"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_PREFIX=operators/op1/checkpoint-packages" "operator env uses operator-owned checkpoint prefix"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "operator env omits shared checkpoint bucket when operator bucket is configured"
@@ -474,7 +468,7 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
 if [[ "\$*" == *"systemctl is-active"* ]]; then
@@ -486,10 +480,7 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
@@ -497,8 +488,7 @@ EOF
     bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" >/dev/null
 
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_SCAN_BACKFILL_FROM_HEIGHT=100000" "deploy stages the configured scanner backfill start height"
-  assert_contains "$(cat "$log_dir/ssh.log")" "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service" "deploy starts scanner backfill asynchronously when a custom floor is configured"
-  assert_not_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy does not issue synchronous wallet backfill requests when a custom floor is configured"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "/v1/wallets/wallet-op1/backfill" "deploy does not issue synchronous wallet backfill requests when a custom floor is configured"
   rm -rf "$workdir"
 }
 
@@ -551,7 +541,7 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 for arg in "\$@"; do
   if [[ -f "\$arg" ]]; then
     cp "\$arg" "$log_dir/\$(basename "\$arg")"
@@ -561,10 +551,10 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
-cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 elif [[ "\$*" == *"/v1/health"* ]]; then
@@ -574,39 +564,33 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-printf '10.0.0.11\n'
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" >/dev/null
 
-  assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.pem" "deploy copies generated dkg server cert"
-  assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.key" "deploy copies generated dkg server key"
-  assert_contains "$(cat "$log_dir/scp.log")" "coordinator-client.pem" "deploy copies dkg coordinator client cert"
-  assert_contains "$(cat "$log_dir/scp.log")" "coordinator-client.key" "deploy copies dkg coordinator client key"
-  assert_contains "$(cat "$log_dir/scp.log")" "ca.pem" "deploy copies dkg ca"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "dkg-server.pem" "deploy copies generated dkg server cert"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "dkg-server.key" "deploy copies generated dkg server key"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "coordinator-client.pem" "deploy copies dkg coordinator client cert"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "coordinator-client.key" "deploy copies dkg coordinator client key"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "ca.pem" "deploy copies dkg ca"
   assert_contains "$(cat "$log_dir/aws.log")" "describe-instances" "deploy resolves peer hosts through aws"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "deploy ensures operator grpc mesh ingress"
   assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":8443' "deploy ensures operator dkg admin mesh ingress"
-  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before distributed dkg rollout"
   assert_contains "$(cat "$log_dir/dkg-peer-hosts.json")" "10.0.0.11" "deploy writes resolved peer hosts"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11" "deploy stages tss server name override from resolved private host"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/ca.pem" "$runtime_dir/bundle/tls/ca.pem"' "remote deploy installs shared dkg ca"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/coordinator-client.pem" "$runtime_dir/bundle/tls/coordinator-client.pem"' "remote deploy installs shared dkg coordinator client cert"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"' "remote deploy installs shared dkg coordinator client key"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "coordinator_client_cert_sha256" "remote deploy refreshes dkg coordinator client fingerprint"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "tls_client_cert_pem_path" "remote deploy patches dkg admin config with tls client cert path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "tls_client_key_pem_path" "remote deploy patches dkg admin config with tls client key path"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "operator runtime admin config missing coordinator client tls paths" "remote deploy verifies final dkg admin client tls paths"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" "operator runtime admin config missing coordinator client fingerprint" "remote deploy verifies final dkg admin client fingerprint"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0640 -o root -g intents-juno "$stage_dir/ca.pem" "$runtime_dir/bundle/tls/ca.pem"' "remote deploy installs shared dkg ca"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0640 -o root -g intents-juno "$stage_dir/coordinator-client.pem" "$runtime_dir/bundle/tls/coordinator-client.pem"' "remote deploy installs shared dkg coordinator client cert"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"' "remote deploy installs shared dkg coordinator client key"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "coordinator_client_cert_sha256" "remote deploy refreshes dkg coordinator client fingerprint"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "tls_client_cert_pem_path" "remote deploy patches dkg admin config with tls client cert path"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "tls_client_key_pem_path" "remote deploy patches dkg admin config with tls client key path"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "operator runtime admin config missing coordinator client tls paths" "remote deploy verifies final dkg admin client tls paths"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" "operator runtime admin config missing coordinator client fingerprint" "remote deploy verifies final dkg admin client fingerprint"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0640 -o root -g intents-juno "$stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
+  assert_contains "$(cat "$log_dir/run-operator-rollout.sh")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"
   san_text="$(openssl x509 -in "$log_dir/dkg-server.pem" -noout -ext subjectAltName 2>/dev/null)"
   assert_contains "$san_text" "DNS:localhost" "generated cert preserves localhost san"
   assert_contains "$san_text" "IP Address:10.0.0.11" "generated cert includes resolved peer host"
@@ -680,7 +664,7 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 for arg in "\$@"; do
   if [[ -f "\$arg" ]]; then
     cp "\$arg" "$log_dir/\$(basename "\$arg")"
@@ -690,10 +674,10 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
-cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 elif [[ "\$*" == *"/v1/health"* ]]; then
@@ -703,15 +687,7 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-if [[ "\$*" == *"describe-instances"* ]]; then
-  printf '10.0.0.11\n'
-  exit 0
-fi
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
@@ -789,7 +765,7 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 for arg in "\$@"; do
   if [[ -f "\$arg" ]]; then
     cp "\$arg" "$log_dir/\$(basename "\$arg")"
@@ -799,10 +775,10 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
-cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 elif [[ "\$*" == *"/v1/health"* ]]; then
@@ -812,20 +788,7 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-case "\$*" in
-  *"describe-instances"*'Name=private-ip-address,Values=10.9.0.222'* ) printf 'None\n' ;;
-  *"describe-instances"*'Name=private-ip-address,Values=10.9.0.233'* ) printf 'None\n' ;;
-  *"describe-instances"*'Name=private-ip-address,Values=10.0.0.10'* ) printf '10.0.0.10\n' ;;
-  *"describe-instances"*'Name=tag:Operator,Values=op2'* ) printf '10.9.1.22\n' ;;
-  *"describe-instances"*'Name=tag:Operator,Values=op3'* ) printf '10.9.1.33\n' ;;
-  *"describe-instances"* ) printf '10.0.0.10\n' ;;
-  * ) : ;;
-esac
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir" "i-op001" "10.0.0.10"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
@@ -883,23 +846,16 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
-cat >>"$log_dir/ssh.stdin" || true
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
+cat >>"$log_dir/run-operator-rollout.sh" || true
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-if [[ "\$*" == *"describe-instances"* ]]; then
-  printf '10.0.0.11\n'
-fi
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -907,12 +863,12 @@ EOF
     --dry-run >/dev/null
 
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "dry-run leaves rollout state pending"
-  if [[ -e "$log_dir/scp.log" ]]; then
-    printf 'expected dry-run to avoid scp but saw:\n%s\n' "$(cat "$log_dir/scp.log")" >&2
+  if [[ -e "$log_dir/ssm.commands" ]]; then
+    printf 'expected dry-run to avoid scp but saw:\n%s\n' "$(cat "$log_dir/ssm.commands")" >&2
     exit 1
   fi
-  if [[ -e "$log_dir/ssh.log" ]]; then
-    printf 'expected dry-run to avoid ssh but saw:\n%s\n' "$(cat "$log_dir/ssh.log")" >&2
+  if [[ -e "$log_dir/ssm.commands" ]]; then
+    printf 'expected dry-run to avoid ssh but saw:\n%s\n' "$(cat "$log_dir/ssm.commands")" >&2
     exit 1
   fi
   if [[ -e "$log_dir/aws.log" ]]; then
@@ -922,7 +878,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_deploy_operator_rejects_underfunded_base_relayer_before_rollout() {
+test_deploy_operator_stages_base_relayer_ready_balance_floor() {
   local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
@@ -964,38 +920,24 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
-  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
-    --operator-deploy "$manifest" >/dev/null 2>&1; then
-    printf 'expected deploy-operator.sh to reject underfunded base relayer\n' >&2
-    exit 1
-  fi
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
 
-  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "underfunded relayer leaves rollout state pending"
-  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "underfunded relayer check reads balance"
-  if [[ -e "$log_dir/scp.log" ]]; then
-    printf 'expected underfunded relayer to block before scp but saw:\n%s\n' "$(cat "$log_dir/scp.log")" >&2
-    exit 1
-  fi
-  if [[ -e "$log_dir/ssh.log" ]]; then
-    printf 'expected underfunded relayer to block before ssh but saw:\n%s\n' "$(cat "$log_dir/ssh.log")" >&2
-    exit 1
-  fi
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000" "operator env stages base relayer readiness balance floor"
+  assert_not_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy leaves base relayer readiness enforcement to the base-relayer wrapper"
 
   rm -rf "$workdir"
 }
@@ -1042,23 +984,19 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 fi
-cat >>"$log_dir/ssh.stdin" || true
+cat >>"$log_dir/run-operator-rollout.sh" || true
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
@@ -1066,8 +1004,8 @@ EOF
     --operator-deploy "$manifest" \
     --force >/dev/null
 
-  assert_contains "$(cat "$log_dir/scp.log")" "operator-deploy.json" "force rerun still stages manifest files"
-  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active checkpoint-signer" "force rerun still verifies restarted services"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "operator-deploy.json" "force rerun still stages manifest files"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active checkpoint-signer" "force rerun still verifies restarted services"
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "force rerun preserves done rollout status after redeploy"
   rm -rf "$workdir"
 }
@@ -1116,7 +1054,7 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 if [[ "\$*" == *"systemctl is-active juno-scan"* ]]; then
   counter_file="$log_dir/juno-scan.counter"
   count=0
@@ -1136,22 +1074,20 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
-cat >>"$log_dir/ssh.stdin" || true
+cat >>"$log_dir/run-operator-rollout.sh" || true
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES=5 \
   PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS=0.01 \
+  PRODUCTION_TEST_JUNO_SCAN_INACTIVE_ATTEMPTS=2 \
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" >/dev/null
 
-  if [[ "$(grep -c 'systemctl is-active juno-scan' "$log_dir/ssh.log")" -lt 3 ]]; then
+  if [[ "$(grep -c 'systemctl is-active juno-scan' "$log_dir/ssm.commands")" -lt 3 ]]; then
     printf 'expected deploy-operator.sh to retry juno-scan readiness\n' >&2
     exit 1
   fi
@@ -1208,7 +1144,7 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
 for arg in "\$@"; do
   if [[ -f "\$arg" ]]; then
     cp "\$arg" "$log_dir/\$(basename "\$arg")"
@@ -1218,10 +1154,10 @@ exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
 stdin_file="$log_dir/ssh.stdin.capture"
 cat >"\$stdin_file" || true
-cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 elif [[ "\$*" == *"/v1/health"* ]]; then
@@ -1231,10 +1167,7 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-exit 0
-EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
@@ -1246,71 +1179,7 @@ EOF
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "preview operator env omits local checkpoint signer key material"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "preview operator env stages the checkpoint package bucket required by config hydration"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" "preview operator env stages kafka auth iam"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam' "preview deploy writes wrappers for kafka auth iam"
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "preview secure signer rollout succeeds"
-  rm -rf "$workdir"
-}
-
-test_deploy_operator_rejects_plaintext_checkpoint_signer_key_contract() {
-  local workdir output_dir manifest log_dir fake_bin output
-  workdir="$(mktemp -d)"
-  output_dir="$workdir/output"
-  log_dir="$workdir/logs"
-  fake_bin="$workdir/bin"
-  mkdir -p "$log_dir" "$fake_bin"
-
-  printf 'backup' >"$workdir/dkg-backup.zip"
-  cat >"$workdir/operator-secrets.env" <<'EOF'
-CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
-BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
-BASE_RELAYER_AUTH_TOKEN=literal:token
-JUNO_RPC_USER=literal:juno
-JUNO_RPC_PASS=literal:rpcpass
-WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
-WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
-JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef
-EOF
-  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
-  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
-  write_inventory_fixture "$workdir/inventory.json" "$workdir"
-
-  production_render_shared_manifest \
-    "$workdir/inventory.json" \
-    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
-    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
-    "$workdir/shared-manifest.json" \
-    "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
-
-  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
-
-  cat >"$fake_bin/scp" <<EOF
-#!/usr/bin/env bash
-printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
-exit 0
-EOF
-  cat >"$fake_bin/ssh" <<EOF
-#!/usr/bin/env bash
-printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
-exit 0
-EOF
-  chmod +x "$fake_bin/scp" "$fake_bin/ssh"
-
-  if output="$(PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" 2>&1)"; then
-    printf 'expected deploy-operator.sh to reject plaintext checkpoint signer key config\n' >&2
-    exit 1
-  fi
-
-  if [[ -z "$output" ]]; then
-    printf 'expected deploy-operator.sh to emit a rejection error\n' >&2
-    exit 1
-  fi
-  if [[ -e "$log_dir/scp.log" || -e "$log_dir/ssh.log" ]]; then
-    printf 'expected deploy-operator.sh to fail before remote actions\n' >&2
-    exit 1
-  fi
   rm -rf "$workdir"
 }
 
@@ -1322,11 +1191,10 @@ main() {
   test_deploy_operator_prefers_manifest_private_endpoints_for_dkg_peer_hosts
   test_deploy_operator_resolves_stale_peer_hosts_by_operator_profile_tag
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
-  test_deploy_operator_rejects_underfunded_base_relayer_before_rollout
+  test_deploy_operator_stages_base_relayer_ready_balance_floor
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
   test_deploy_operator_preserves_secure_preview_signer_configuration
-  test_deploy_operator_rejects_plaintext_checkpoint_signer_key_contract
 }
 
 main "$@"

@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 assert_not_contains() {
   local haystack="$1"
   local needle="$2"
@@ -484,11 +486,11 @@ EOF
   assert_eq "$(jq -r '.environment' "$manifest")" "alpha" "manifest environment"
   assert_eq "$(jq -r '.contracts.juno_network' "$manifest")" "testnet" "manifest juno network"
   assert_eq "$(jq -r '.governance.timelock.address' "$manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
-  assert_eq "$(jq -r '.dns.record_name' "$operator_dir/operator-deploy.json")" "op1.alpha.intents-testing.thejunowallet.com" "operator dns record"
+  assert_eq "$(jq -r '.dns.record_name' "$operator_dir/operator-deploy.json")" "op1.alpha.junointents.com" "operator dns record"
   assert_eq "$(jq -r '.operator_address' "$operator_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "operator signer address"
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$operator_dir/operator-deploy.json")" "aws-kms" "operator signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$operator_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "operator signer kms key id"
-  assert_eq "$(jq -r '.services.bridge_api.public_url' "$output_dir/alpha/app/app-deploy.json")" "https://bridge.alpha.intents-testing.thejunowallet.com" "app manifest bridge url"
+  assert_eq "$(jq -r '.services.bridge_api.public_url' "$output_dir/alpha/app/app-deploy.json")" "https://bridge.alpha.junointents.com" "app manifest bridge url"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.2.50/32" "app manifest wireguard source cidr"
   rm -rf "$workdir"
 }
@@ -583,6 +585,52 @@ EOF
   assert_eq "$(jq -r '.edge.public_lb_dns_name' "$output_dir/alpha/app/app-deploy.json")" "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com" "deploy coordinator renders edge from the public load balancer"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.20.0/24" "deploy coordinator prefers wireguard role source cidrs"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$output_dir/alpha/app/app-deploy.json")" "10.0.21.0/24" "deploy coordinator keeps all wireguard role source cidrs"
+  rm -rf "$workdir"
+}
+
+test_deploy_coordinator_refreshes_app_runtime_with_pinned_release_without_post_checks() {
+  local workdir output_dir fake_bin log_dir provision_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  provision_log="$log_dir/provision.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  write_fake_refresh_app_runtime_binary "$fake_bin/refresh-app-runtime.sh" "$provision_log"
+  write_fake_provision_app_edge_binary "$fake_bin/provision-app-edge.sh" "$provision_log"
+
+  PATH="$fake_bin:$PATH" \
+  PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+  PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --app-binaries-release-tag app-binaries-v1.2.3-testnet \
+      --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "deploy coordinator refreshes app runtime from the pinned app-binaries release without post-deploy checks"
+  assert_not_contains "$(cat "$provision_log")" "provision-app-edge" "deploy coordinator leaves app edge provisioning to the workflow when post-deploy checks are disabled"
+  assert_file_exists "$output_dir/alpha/app-runtime/refresh.json" "deploy coordinator stores app runtime refresh output"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/app-runtime/refresh.json")" "true" "deploy coordinator requires a passing app runtime refresh"
   rm -rf "$workdir"
 }
 
@@ -688,17 +736,18 @@ EOF
       --app-terraform-output-json "$app_tf_json" \
       --skip-terraform-apply \
       --run-post-deploy-checks \
+      --app-binaries-release-tag app-binaries-v1.2.3-testnet \
       --output-dir "$output_dir" >/dev/null
 
   assert_file_exists "$output_dir/alpha/inventory.release-resolved.json" "deploy coordinator writes resolved role runtime inventory"
   assert_eq "$(jq -r '.app_role.app_ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedapp1234567" "deploy coordinator resolves app ami id before tfvars"
   assert_eq "$(jq -r '.wireguard_role.ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedwireguard1" "deploy coordinator resolves wireguard ami id before tfvars"
   assert_contains "$(cat "$resolver_log")" "--github-repo juno-intents/intents-juno" "deploy coordinator forwards the default github repo to the release resolver"
-  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "deploy coordinator refreshes the app runtime from the rendered handoffs before post-deploy checks"
+  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "deploy coordinator refreshes the app runtime from the pinned app-binaries release before post-deploy checks"
   assert_contains "$(cat "$provision_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator provisions the app edge from the rendered handoff"
   assert_contains "$(cat "$shared_canary_log")" "--shared-manifest $output_dir/alpha/shared-manifest.json" "deploy coordinator runs the shared canary after rendering the manifest"
   assert_contains "$(cat "$app_canary_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator runs the app canary after rendering the handoff"
-  assert_line_order "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "provision-app-edge --app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator refreshes app runtime before provisioning edge"
+  assert_line_order "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "provision-app-edge --app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator refreshes app runtime before provisioning edge"
   assert_file_exists "$output_dir/alpha/canaries/shared-services.json" "deploy coordinator stores the shared canary output"
   assert_file_exists "$output_dir/alpha/canaries/app.json" "deploy coordinator stores the app canary output"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/canaries/shared-services.json")" "true" "deploy coordinator requires a passing shared canary"
@@ -890,7 +939,7 @@ EOF
   assert_contains "$(cat "$log_dir/bridge.log")" '--withdraw-image-id 0x000000000000000000000000000000000000000000000000000000000000aa02' "bridge deploy forwards withdraw image id"
   assert_contains "$(cat "$log_dir/bridge.log")" '--governance-safe 0x4444444444444444444444444444444444444444' "bridge deploy forwards governance safe"
   assert_contains "$(cat "$log_dir/bridge.log")" '--pause-guardian 0x5555555555555555555555555555555555555555' "bridge deploy forwards pause guardian"
-  assert_contains "$(cat "$log_dir/bridge.log")" '--min-deposit-admin-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards min deposit admin address"
+  assert_not_contains "$(cat "$log_dir/bridge.log")" '--min-deposit-admin-address' "bridge deploy leaves min deposit admin out of deploy-time args"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards first operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x6666666666666666666666666666666666666666' "bridge deploy forwards second operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x7777777777777777777777777777777777777777' "bridge deploy forwards third operator"
@@ -1135,8 +1184,8 @@ EOF
   rm -rf "$workdir"
 }
 
-test_deploy_coordinator_rejects_underfunded_operator_before_render() {
-  local workdir output_dir fake_bin log_dir output
+test_deploy_coordinator_defers_base_relayer_balance_check_to_runtime() {
+  local workdir output_dir fake_bin log_dir operator_dir
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   fake_bin="$workdir/bin"
@@ -1159,24 +1208,19 @@ EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1000"
 
-  if output="$(
-    PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
-      --inventory "$workdir/inventory.json" \
-      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
-      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
-      --skip-terraform-apply \
-      --output-dir "$output_dir" 2>&1
-  )"; then
-    printf 'expected deploy-coordinator.sh to reject underfunded operator relayer\n' >&2
-    exit 1
-  fi
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
 
-  assert_contains "$output" "base relayer 0x1111111111111111111111111111111111111111 balance 1000 wei is below minimum 1000000000000000 wei" "underfunded relayer error"
-  [[ ! -e "$output_dir/alpha/shared-manifest.json" ]] || {
-    printf 'expected no shared manifest when relayer funding preflight fails\n' >&2
-    exit 1
-  }
+  operator_dir="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111"
+  assert_file_exists "$operator_dir/operator-deploy.json" "operator manifest"
+  if [[ -f "$log_dir/cast.log" ]]; then
+    assert_not_contains "$(cat "$log_dir/cast.log")" "cast balance" "coordinator does not perform live balance preflight"
+  fi
   rm -rf "$workdir"
 }
 
@@ -1265,7 +1309,7 @@ EOF
 
   assert_contains "$(cat "$bridge_log")" "--governance-safe 0x4444444444444444444444444444444444444444" "bridge-deploy receives governance safe"
   assert_contains "$(cat "$bridge_log")" "--pause-guardian 0x5555555555555555555555555555555555555555" "bridge-deploy receives pause guardian"
-  assert_contains "$(cat "$bridge_log")" "--min-deposit-admin-address 0x1111111111111111111111111111111111111111" "bridge-deploy receives min deposit admin"
+  assert_not_contains "$(cat "$bridge_log")" "--min-deposit-admin-address" "bridge-deploy does not receive deploy-time min deposit admin"
   assert_not_contains "$(cat "$bridge_log")" "--deploy-only" "bridge-deploy does not receive legacy deploy-only flag"
   rm -rf "$workdir"
 }
@@ -1371,20 +1415,20 @@ EOF
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator creates the terraform state bucket"
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"
-  assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated wireguard override file"
+  assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated shared role override file"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=app-runtime/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes app runtime terraform against the bootstrapped backend"
   assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator applies app runtime terraform with the generated role override file"
   assert_contains "$combined_log" "terraform-env AWS_ENDPOINT_URL_STS=https://sts.amazonaws.com" "deploy-coordinator forces public sts when regional sts resolves private"
-  assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the wireguard override file"
+  assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the shared role override file"
   assert_file_exists "$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator writes the app runtime override file"
   assert_eq "$(jq -r '.aws_region' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "us-east-1" "deploy-coordinator writes the shared aws region into terraform vars"
   assert_eq "$(jq -r '.deployment_id' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "alpha" "deploy-coordinator writes the shared deployment id"
   assert_eq "$(jq -r '.shared_sp1_requestor_secret_arn' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor" "deploy-coordinator writes the proof requestor secret arn into shared terraform vars"
-  assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "true" "deploy-coordinator writes a wireguard-enabled override file"
-  assert_eq "$(jq -r '.shared_wireguard_public_subnet_ids[0]' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "subnet-0abc1234def567890" "deploy-coordinator forwards the wireguard public subnet into terraform"
-  assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "ops.alpha.intents-testing.thejunowallet.com" "deploy-coordinator forwards the backoffice hostname into terraform"
+  assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "false" "deploy-coordinator disables production-shared wireguard terraform"
+  assert_eq "$(jq -r '.shared_wireguard_public_subnet_ids // empty' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "" "deploy-coordinator omits live-e2e wireguard subnet vars from production-shared terraform"
+  assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname // empty' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "" "deploy-coordinator omits live-e2e backoffice hostname from production-shared terraform"
   assert_eq "$(jq -r '.deployment_id' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "alpha" "deploy-coordinator writes the app runtime deployment id"
-  assert_eq "$(jq -r '.wireguard_cidr_blocks[0]' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "10.0.2.50/32" "deploy-coordinator forwards wireguard source cidrs into the app runtime"
+  assert_eq "$(jq -r '.wireguard_cidr_blocks // empty' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "" "deploy-coordinator omits live-e2e wireguard cidrs from app runtime terraform"
   assert_eq "$(jq -r '.app_ami_id' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "ami-0123456789abcdef0" "deploy-coordinator forwards the app ami into the app runtime"
   assert_line_order "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator bootstraps backend storage before terraform init"
   assert_line_order "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=app-runtime/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator applies shared terraform before app runtime terraform"
@@ -1526,6 +1570,7 @@ EOF
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs
+  test_deploy_coordinator_refreshes_app_runtime_with_pinned_release_without_post_checks
   test_deploy_coordinator_resolves_role_runtime_inputs_and_runs_post_deploy_checks
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_supports_preview_legacy_wireguard_inventory
@@ -1533,7 +1578,7 @@ main() {
   test_deploy_coordinator_normalizes_relative_output_paths
   test_deploy_coordinator_accepts_existing_bridge_summary_at_output_path
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
-  test_deploy_coordinator_rejects_underfunded_operator_before_render
+  test_deploy_coordinator_defers_base_relayer_balance_check_to_runtime
   test_deploy_coordinator_rejects_legacy_bridge_e2e_binary
   test_deploy_coordinator_forwards_ephemeral_funder_mode
   test_deploy_coordinator_rejects_direct_deployer_outside_alpha

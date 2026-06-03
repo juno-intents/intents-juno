@@ -144,6 +144,7 @@ jobs:
             --dkg-summary "${{ inputs.dkg_summary_path }}"
             --bridge-deploy-binary .ci/bin/bridge-deploy_linux_amd64
             --shared-infra-e2e-binary .ci/bin/shared-infra-e2e_linux_amd64
+            --app-binaries-release-tag "${{ inputs.app_binaries_release_tag }}"
             --app-runtime-ami-release-tag "${{ inputs.app_runtime_ami_release_tag }}"
             --shared-proof-services-image-release-tag "${{ inputs.shared_proof_services_image_release_tag }}"
             --wireguard-role-ami-release-tag "${{ inputs.wireguard_role_ami_release_tag }}"

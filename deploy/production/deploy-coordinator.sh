@@ -32,6 +32,8 @@ Options:
                              Use a precomputed app runtime terraform output -json file
   --terraform-output-json PATH Deprecated alias for --shared-terraform-output-json
   --run-post-deploy-checks    Run role-based edge provisioning plus shared/app canaries
+  --app-binaries-release-tag TAG
+                               Pinned app-binaries release tag for app runtime refresh
   --github-repo REPO          GitHub repo used for release asset resolution (default: juno-intents/intents-juno)
   --skip-terraform-apply       Do not run terraform init/apply
   --output-dir DIR             Output root (default: ./production-output)
@@ -52,6 +54,7 @@ existing_bridge_summary=""
 shared_terraform_output_json=""
 app_terraform_output_json=""
 run_post_deploy_checks="false"
+app_binaries_release_tag=""
 github_repo="juno-intents/intents-juno"
 skip_terraform_apply="false"
 output_root="./production-output"
@@ -78,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --app-terraform-output-json) app_terraform_output_json="$2"; shift 2 ;;
     --terraform-output-json) shared_terraform_output_json="$2"; shift 2 ;;
     --run-post-deploy-checks) run_post_deploy_checks="true"; shift ;;
+    --app-binaries-release-tag) app_binaries_release_tag="$2"; shift 2 ;;
     --github-repo) github_repo="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
     --output-dir) output_root="$2"; shift 2 ;;
@@ -417,25 +421,30 @@ if [[ -n "$generated_dkg_tls_dir" ]]; then
 fi
 production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir" "$app_tf_output_json"
 
+if [[ -f "$output_dir/app/app-deploy.json" && ( -n "$app_binaries_release_tag" || "$run_post_deploy_checks" == "true" ) ]]; then
+  mkdir -p "$output_dir/app-runtime"
+  refresh_app_args=(
+    "$refresh_app_runtime_bin"
+    --shared-manifest "$shared_manifest"
+    --app-deploy "$output_dir/app/app-deploy.json"
+    --output-dir "$output_dir/app-runtime"
+  )
+  if [[ -n "$app_binaries_release_tag" ]]; then
+    refresh_app_args+=(--app-binaries-release-tag "$app_binaries_release_tag")
+  fi
+  if [[ "$dry_run" == "true" ]]; then
+    refresh_app_args+=(--dry-run)
+  fi
+  "${refresh_app_args[@]}" >"$output_dir/app-runtime/refresh.json"
+  [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-runtime/refresh.json")" == "true" ]] || \
+    die "app runtime refresh failed: $output_dir/app-runtime/refresh.json"
+fi
+
 if [[ "$run_post_deploy_checks" == "true" ]]; then
   canary_output_dir="$output_dir/canaries"
   mkdir -p "$canary_output_dir"
 
   if [[ -f "$output_dir/app/app-deploy.json" ]]; then
-    mkdir -p "$output_dir/app-runtime"
-    post_deploy_refresh_app_args=(
-      "$refresh_app_runtime_bin"
-      --shared-manifest "$shared_manifest"
-      --app-deploy "$output_dir/app/app-deploy.json"
-      --output-dir "$output_dir/app-runtime"
-    )
-    if [[ "$dry_run" == "true" ]]; then
-      post_deploy_refresh_app_args+=(--dry-run)
-    fi
-    "${post_deploy_refresh_app_args[@]}" >"$output_dir/app-runtime/refresh.json"
-    [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-runtime/refresh.json")" == "true" ]] || \
-      die "app runtime refresh failed: $output_dir/app-runtime/refresh.json"
-
     post_deploy_app_args=("$provision_app_edge_bin" --app-deploy "$output_dir/app/app-deploy.json")
     if [[ "$dry_run" == "true" ]]; then
       post_deploy_app_args+=(--dry-run)

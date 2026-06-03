@@ -8,31 +8,34 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # shellcheck source=./common_test.sh
 source "$SCRIPT_DIR/common_test.sh"
 
-test_upgrade_operator_requires_known_hosts() {
-  local tmp bin_dir
+test_upgrade_operator_is_disabled_for_release_driven_rollout() {
+  local tmp bin_dir stderr
   tmp="$(mktemp -d)"
   bin_dir="$tmp/bin"
+  stderr="$tmp/stderr"
   mkdir -p "$bin_dir"
   printf 'binary\n' >"$bin_dir/checkpoint-signer"
 
   if (
     cd "$REPO_ROOT"
-    deploy/production/upgrade-operator.sh \
+    bash deploy/production/upgrade-operator.sh \
       --operator-host operator.example \
       --binary-dir "$bin_dir" \
       --dry-run
-  ) >/dev/null 2>&1; then
-    printf 'expected upgrade-operator to require known-hosts\n' >&2
+  ) >/dev/null 2>"$stderr"; then
+    printf 'expected upgrade-operator to fail closed\n' >&2
     exit 1
   fi
 
+  assert_contains "$(cat "$stderr")" "upgrade-operator.sh is disabled" "upgrade operator helper fails closed"
+  assert_contains "$(cat "$stderr")" "run deploy/production/deploy-operator.sh" "upgrade operator helper points to release-driven rollout"
   rm -rf "$tmp"
 }
 
 test_update_deposit_scanner_requires_known_hosts() {
   if (
     cd "$REPO_ROOT"
-    deploy/production/update-deposit-scanner.sh \
+    bash deploy/production/update-deposit-scanner.sh \
       --operator-host operator.example \
       --juno-scan-url http://127.0.0.1:8080 \
       --juno-scan-wallet-id wallet-op1 \
@@ -45,7 +48,7 @@ test_update_deposit_scanner_requires_known_hosts() {
 }
 
 main() {
-  test_upgrade_operator_requires_known_hosts
+  test_upgrade_operator_is_disabled_for_release_driven_rollout
   test_update_deposit_scanner_requires_known_hosts
 }
 

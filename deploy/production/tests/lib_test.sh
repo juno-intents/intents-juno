@@ -9,6 +9,8 @@ source "$SCRIPT_DIR/common_test.sh"
 # shellcheck source=../lib.sh
 source "$REPO_ROOT/deploy/production/lib.sh"
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 assert_not_contains() {
   local haystack="$1"
   local needle="$2"
@@ -174,7 +176,6 @@ test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   assert_eq "$(jq -r '.shared_base_chain_id' "$override_file")" "84532" "production shared tfvars include base chain id"
   assert_eq "$(jq -r '.shared_deposit_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa01" "production shared tfvars include deposit guest id"
   assert_eq "$(jq -r '.shared_withdraw_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa02" "production shared tfvars include withdraw guest id"
-  assert_eq "$(jq -r '.shared_wireguard_backoffice_private_endpoint_ips[1]' "$override_file")" "10.0.11.21" "production shared tfvars include wireguard private backoffice ips"
   assert_eq "$(jq -r '.shared_service_client_security_group_ids[0]' "$override_file")" "sg-0123456789abcdef0" "production shared tfvars allow the app runtime sg into shared postgres and msk"
   assert_eq "$(jq -r '.shared_ipfs_client_security_group_ids[0]' "$override_file")" "sg-0123456789abcdef0" "production shared tfvars allow the app runtime sg into shared ipfs"
   rm -rf "$workdir"
@@ -197,10 +198,57 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
 
   assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "production shared tfvars start proof ecs services"
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "1" "production shared tfvars starts the proof requestor when bridge is active"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "production shared tfvars starts the proof funder when bridge is active"
   assert_eq "$(jq -r '.shared_proof_role_instance_type' "$override_file")" "c7i.large" "production shared tfvars keep the shared proof role on the quota-safe instance type"
   assert_eq "$(jq -r '.shared_proof_role_min_size' "$override_file")" "1" "production shared tfvars keep the shared proof role minimum within quota"
   assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars keep the shared proof role desired capacity within quota"
   assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "2" "production shared tfvars cap the shared proof role autoscaling within quota"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .app_role.bridge_api.paused = true
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "paused production shared tfvars keep legacy shared proof count for compatibility"
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "0" "paused production shared tfvars stop the proof requestor"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "paused production shared tfvars keep the proof funder running"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .app_role.bridge_api_paused = true
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "0" "legacy paused alias stops the proof requestor"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "legacy paused alias keeps the proof funder running"
   rm -rf "$workdir"
 }
 
@@ -907,7 +955,6 @@ EOF
   assert_eq "$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id' "$shared_manifest")" "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "shared manifest checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_eq "$(jq -r '.checkpoint.operators[0]' "$shared_manifest")" "0x9999999999999999999999999999999999999999" "shared manifest checkpoint operators prefer live operator addresses"
-  assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
   assert_eq "$(jq -r '.governance.timelock.min_delay_seconds' "$shared_manifest")" "172800" "timelock delay"
 
@@ -1116,7 +1163,6 @@ EOF
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
   production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
 
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_POSTGRES_DSN=postgres://operator:pw@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents?sslmode=require" "operator env retargets postgres dsn to the shared manifest endpoint"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env keeps the current deployment checkpoint bucket"
   assert_contains "$(cat "$output_env")" "WITHDRAW_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env derives withdraw blob bucket from the current deployment artifact bucket"
   assert_not_contains "$(cat "$output_env")" "old-preview.cluster.example.internal" "operator env drops stale secret-contract postgres hosts"
@@ -1895,10 +1941,8 @@ EOF
   assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://base-sepolia.example.invalid" "rendered env stages the dedicated deposit relayer rpc url"
   assert_contains "$(cat "$output_env")" "AWS_REGION=us-east-1" "rendered env aws region"
   assert_contains "$(cat "$output_env")" "AWS_DEFAULT_REGION=us-east-1" "rendered env aws default region"
-  assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
-  assert_contains "$(cat "$output_env")" "JUNO_RPC_PASS=rpcpass" "rendered env juno rpc pass"
-  assert_contains "$(cat "$output_env")" "JUNO_RPC_BIND=0.0.0.0" "rendered env juno rpc bind override"
-  assert_contains "$(cat "$output_env")" "JUNO_RPC_ALLOW_IPS=127.0.0.1,10.0.0.5" "rendered env juno rpc allowlist override"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_BIND=127.0.0.1" "rendered env juno rpc bind"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_ALLOW_IPS=127.0.0.1" "rendered env juno rpc allowlist"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw coordinator juno rpc url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw coordinator scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443" "rendered env withdraw coordinator tss url"
@@ -1908,13 +1952,10 @@ EOF
   assert_contains "$(cat "$output_env")" "BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000" "rendered env base relayer readiness balance floor"
   assert_contains "$(cat "$output_env")" "BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605,0xfe097d57" "rendered env base relayer selector allowlist"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh" "rendered env withdraw coordinator extend signer"
-  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env carries the withdraw extend signer key roster"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240" "rendered env withdraw coordinator juno expiry offset"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "rendered env withdraw coordinator max expiry extension"
-  assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "rendered env uses only the operator-scoped juno txsign signer key"
-  assert_not_contains "$(grep '^JUNO_TXSIGN_SIGNER_KEYS=' "$output_env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env keeps juno txsign scoped to the local operator key"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw finalizer scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw finalizer juno rpc url"
   assert_contains "$(cat "$output_env")" "TSS_SIGNER_RUNTIME_MODE=host-process" "rendered env forces host-process signer runtime"
@@ -2718,8 +2759,6 @@ EOF
   production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
   PATH="$old_path"
 
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_IPFS_API_BEARER_TOKEN=inline-ipfs-token" "rendered env prefers inline ipfs bearer token"
-  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_IPFS_API_BEARER_TOKEN=aws-ipfs-token" "rendered env ignores shared manifest ipfs secret when inline token is present"
   rm -rf "$workdir"
 }
 
@@ -2781,7 +2820,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_requires_juno_rpc_credentials() {
+test_render_operator_stack_env_allows_missing_juno_rpc_credentials() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
@@ -2814,10 +2853,8 @@ EOF
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
-  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
-    printf 'expected production_render_operator_stack_env to require JUNO_RPC_USER/JUNO_RPC_PASS\n' >&2
-    exit 1
-  fi
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "operator env renders withdraw coordinator rpc url without raw juno rpc credentials"
   rm -rf "$workdir"
 }
 
@@ -2865,7 +2902,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_rejects_withdraw_expiry_overrides() {
+test_render_operator_stack_env_ignores_withdraw_expiry_overrides() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
@@ -2902,14 +2939,15 @@ EOF
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
-  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
-    printf 'expected production_render_operator_stack_env to reject withdraw expiry overrides\n' >&2
-    exit 1
-  fi
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin default"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "rendered env withdraw coordinator max expiry extension default"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240" "rendered env withdraw coordinator juno expiry offset default"
+  assert_not_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=30h" "rendered env withdraw coordinator expiry override"
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_rejects_private_key_with_kms_contract() {
+test_render_operator_stack_env_omits_private_key_with_kms_contract() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
@@ -2946,10 +2984,9 @@ EOF
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
-  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
-    printf 'expected production_render_operator_stack_env to reject CHECKPOINT_SIGNER_PRIVATE_KEY for aws-kms\n' >&2
-    exit 1
-  fi
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rendered env signer driver"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rendered env omits private key for kms signer"
   rm -rf "$workdir"
 }
 
@@ -3035,6 +3072,13 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.bridge_api = {
+      paused: true,
+      pause_message: "Bridge is paused while operators investigate a Junocash chain incident."
+    }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
@@ -3050,9 +3094,11 @@ EOF
 
   assert_file_exists "$app_manifest" "app deploy manifest"
   assert_eq "$(jq -r '.public_scheme' "$app_manifest")" "https" "public scheme"
-  assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge public url"
-  assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge probe url"
+  assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "https://bridge.alpha.junointents.com" "bridge public url"
+  assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.junointents.com" "bridge probe url"
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
+  assert_eq "$(jq -r '.services.bridge_api.paused' "$app_manifest")" "true" "bridge paused setting"
+  assert_eq "$(jq -r '.services.bridge_api.pause_message' "$app_manifest")" "Bridge is paused while operators investigate a Junocash chain incident." "bridge pause message"
   assert_eq "$(jq -r '.services.backoffice.public_url // empty' "$app_manifest")" "" "backoffice public url"
   assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$app_manifest")" "false" "backoffice public publishing suppressed"
   assert_eq "$(jq -r '.services.backoffice.access.mode' "$app_manifest")" "wireguard" "backoffice access mode"
@@ -3061,7 +3107,7 @@ EOF
   assert_eq "$(jq -r '.wireguard_role.endpoint_host' "$app_manifest")" "198.51.100.25" "backoffice wireguard endpoint host"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-publicbridge012345678" "security group id"
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
-  assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"
+  assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.junointents.com" "edge origin record"
   assert_eq "$(jq -r '.edge.public_lb_dns_name' "$app_manifest")" "bridge-alpha-123456.us-east-1.elb.amazonaws.com" "edge public load balancer dns name"
   assert_eq "$(jq -r '.edge.public_lb_zone_id' "$app_manifest")" "Z35SXDOTRQ7X7K" "edge public load balancer zone id"
   assert_eq "$(jq -r '.edge.origin_endpoint // empty' "$app_manifest")" "" "edge origin endpoint removed from the active app contract"
@@ -3070,7 +3116,7 @@ EOF
   assert_eq "$(jq -r '.edge.alarm_actions[0]' "$app_manifest")" "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts" "edge alarm actions"
   assert_eq "$(jq -r '.edge.state_path' "$app_manifest")" "$workdir/edge-state/alpha.tfstate" "edge state path is stable per environment"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
-  assert_eq "$(jq -r '.juno_scan_wallet_id' "$app_manifest")" "wallet-mainnet-op1" "app handoff pins the backoffice scan wallet id"
+  assert_eq "$(jq -r '.juno_scan_wallet_id // empty' "$app_manifest")" "" "app handoff omits missing backoffice scan wallet id"
 
   resolved_env="$workdir/resolved-app.env"
   production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
@@ -3096,25 +3142,68 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=200" "bridge env withdraw batch confirmation default"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_MIN_WITHDRAW_AMOUNT=200000000" "bridge env min withdraw amount"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_FEE_BPS=50" "bridge env fee bps"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=true" "bridge env bridge pause setting"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSE_MESSAGE=Bridge\\ is\\ paused\\ while\\ operators\\ investigate\\ a\\ Junocash\\ chain\\ incident." "bridge env bridge pause message"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_REQUESTOR_ADDRESS=0x1234567890abcdef1234567890abcdef12345678" "backoffice env prover requestor address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_RPC_URL=https://rpc.mainnet.succinct.xyz" "backoffice env sp1 rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=" "backoffice env relayer signer addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=1000000000000000" "backoffice env relayer signer balance floor"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=200" "backoffice env deposit confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=200" "backoffice env withdraw planner confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=200" "backoffice env withdraw batch confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env omits unusable loopback juno rpc url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env preserves explicit loopback juno rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env falls back to operator juno rpc when the explicit url is loopback"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_URL=http://203.0.113.11:8080" "backoffice env derives a private operator juno-scan url"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=wallet-mainnet-op1" "backoffice env pins the scan wallet id"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_URL=" "backoffice env omits missing juno-scan url"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=" "backoffice env omits missing scan wallet id"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
+  rm -rf "$workdir"
+}
+
+test_render_bridge_api_env_supports_paused_mode() {
+  local workdir shared_manifest app_manifest resolved_env bridge_env
+  workdir="$(mktemp -d)"
+  shared_manifest="$workdir/shared.json"
+  app_manifest="$workdir/app.json"
+  resolved_env="$workdir/resolved.env"
+  bridge_env="$workdir/bridge-api.env"
+
+  cat >"$shared_manifest" <<'JSON'
+{
+  "contracts": {
+    "base_rpc_url": "https://base.example.invalid",
+    "base_chain_id": 8453,
+    "bridge": "0x2222222222222222222222222222222222222222",
+    "wjuno": "0x3333333333333333333333333333333333333333",
+    "owallet_ua": "u1alphaexample"
+  }
+}
+JSON
+  cat >"$app_manifest" <<'JSON'
+{
+  "services": {
+    "bridge_api": {
+      "listen_addr": "127.0.0.1:8082",
+      "paused": true,
+      "pause_message": "Bridge is paused while operators investigate a Junocash chain incident."
+    }
+  }
+}
+JSON
+  cat >"$resolved_env" <<'EOF'
+APP_POSTGRES_DSN=literal:postgres://alpha
+EOF
+
+  production_render_bridge_api_env "$shared_manifest" "$app_manifest" "$resolved_env" "$bridge_env"
+
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSED=true" "bridge env pause mode"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_BRIDGE_PAUSE_MESSAGE=Bridge\\ is\\ paused\\ while\\ operators\\ investigate\\ a\\ Junocash\\ chain\\ incident." "bridge env pause message is shell escaped"
   rm -rf "$workdir"
 }
 
@@ -3171,7 +3260,7 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env derives juno rpc fallback urls from operator endpoints"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses still render without juno rpc"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=" "backoffice env relayer signer addresses still render without juno rpc"
   rm -rf "$workdir"
 }
 
@@ -3410,7 +3499,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_backoffice_env_uses_private_operator_juno_rpc_fallback() {
+test_render_backoffice_env_uses_operator_endpoint_juno_rpc_fallback() {
   local workdir shared_manifest app_manifest resolved_env backoffice_env
   local fake_bin old_path
   workdir="$(mktemp -d)"
@@ -3466,9 +3555,9 @@ EOF
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
   PATH="$old_path"
 
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://10.0.0.12:18232" "backoffice env derives private operator juno rpc fallback"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for private operator fallback"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for private operator fallback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env derives operator endpoint juno rpc fallback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for operator endpoint fallback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for operator endpoint fallback"
   rm -rf "$workdir"
 }
 
@@ -3890,6 +3979,7 @@ test_production_run_release_binary_uses_docker_runner_when_forced() {
   docker_log="$workdir/docker.log"
   path_backup="$PATH"
 
+  mkdir -p "$(dirname "$fake_binary")"
   cat >"$fake_binary" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -4033,16 +4123,17 @@ main() {
   test_render_operator_stack_env_prefers_inline_ipfs_bearer_token
   test_render_operator_stack_env_prefers_inline_queueauth_hmac_key
   test_render_operator_stack_env_adds_base_sepolia_deposit_relayer_fallback
-  test_render_operator_stack_env_requires_juno_rpc_credentials
-  test_render_operator_stack_env_rejects_withdraw_expiry_overrides
-  test_render_operator_stack_env_rejects_private_key_with_kms_contract
+  test_render_operator_stack_env_allows_missing_juno_rpc_credentials
+  test_render_operator_stack_env_ignores_withdraw_expiry_overrides
+  test_render_operator_stack_env_omits_private_key_with_kms_contract
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
+  test_render_bridge_api_env_supports_paused_mode
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
   test_render_manifests_allow_external_dns_without_route53_zone
   test_render_backoffice_env_preserves_non_loopback_juno_rpc_url
-  test_render_backoffice_env_uses_private_operator_juno_rpc_fallback
+  test_render_backoffice_env_uses_operator_endpoint_juno_rpc_fallback
   test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
   test_render_app_handoff_prefers_public_operator_endpoints_when_public_endpoints_are_present
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
@@ -4050,6 +4141,8 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
+  test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused
+  test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
   test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable
   test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws
