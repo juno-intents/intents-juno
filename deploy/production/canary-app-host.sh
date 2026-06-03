@@ -88,6 +88,8 @@ http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
 http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
 infra_retry_max_attempts="${PRODUCTION_CANARY_INFRA_MAX_ATTEMPTS:-24}"
 infra_retry_sleep_seconds="${PRODUCTION_CANARY_INFRA_RETRY_SLEEP_SECONDS:-10}"
+ssm_poll_attempts="${PRODUCTION_CANARY_SSM_POLL_ATTEMPTS:-30}"
+ssm_poll_interval_seconds="${PRODUCTION_CANARY_SSM_POLL_INTERVAL_SECONDS:-2}"
 deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 
 bridge_probe_url="${bridge_probe_url%/}"
@@ -216,7 +218,7 @@ ssm_http_get_with_retry() {
     : >"$error_file"
     printf -v remote_cmd 'curl -fsS %q' "$url"
     set +e
-    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" >"$response_file" 2>"$error_file"
+    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" "$ssm_poll_attempts" "$ssm_poll_interval_seconds" >"$response_file" 2>"$error_file"
     ssm_status=$?
     set -e
     if (( ssm_status == 0 )); then
@@ -249,7 +251,35 @@ set +a
 curl -fsS -H "Authorization: Bearer \${BACKOFFICE_AUTH_SECRET}" "http://127.0.0.1:8090${path}"
 EOF
 )"
-  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd"
+  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" "$ssm_poll_attempts" "$ssm_poll_interval_seconds"
+}
+
+frontend_has_pause_markers() {
+  local html="$1"
+  local asset_path asset_url asset_body
+
+  if [[ "$html" == *"Deposit instructions paused"* && "$html" == *"Withdrawals paused"* ]]; then
+    return 0
+  fi
+
+  while IFS= read -r asset_path; do
+    [[ -n "$asset_path" ]] || continue
+    case "$asset_path" in
+      http://*|https://*) asset_url="$asset_path" ;;
+      /*) asset_url="${bridge_probe_url}${asset_path}" ;;
+      *) asset_url="${bridge_probe_url}/${asset_path}" ;;
+    esac
+    asset_body="$(http_get_with_retry "$asset_url" "bridge frontend asset" || true)"
+    if [[ "$asset_body" == *"Deposit instructions paused"* && "$asset_body" == *"Withdrawals paused"* ]]; then
+      return 0
+    fi
+  done < <(
+    grep -Eo '(src|href)="[^"]+\.js[^"]*"' <<<"$html" \
+      | sed -E 's/^[^"]+"([^"]+)"/\1/' \
+      | sort -u
+  )
+
+  return 1
 }
 
 check_asg_capacity_once() {
@@ -382,7 +412,7 @@ else
     systemd_services+=(cloudflared-backoffice)
   fi
   for svc in "${systemd_services[@]}"; do
-    svc_status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
+    svc_status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc" "$ssm_poll_attempts" "$ssm_poll_interval_seconds" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
     if [[ "$svc_status" != "active" ]]; then
       systemd_status="failed"
       systemd_detail="service inactive: $svc"
@@ -451,6 +481,9 @@ else
   if [[ "$bridge_html" != *"<html"* && "$bridge_html" != *"<!doctype html"* ]]; then
     bridge_frontend_status="failed"
     bridge_frontend_detail="bridge frontend did not return HTML"
+  elif [[ "$bridge_paused_expected" == "true" ]] && ! frontend_has_pause_markers "$bridge_html"; then
+    bridge_frontend_status="failed"
+    bridge_frontend_detail="bridge frontend bundle does not include paused deposit and withdrawal states"
   fi
 
   if [[ "$backoffice_probe_transport" == "ssm-local" ]]; then
@@ -498,13 +531,20 @@ else
     fi
 
     backoffice_funds_json="$(ssm_backoffice_authenticated_get "$instance_id" "/api/funds" 2>/dev/null || true)"
-    if [[ -z "$backoffice_funds_json" ]] \
+    if [[ -n "$backoffice_funds_json" ]] \
+      && jq -e '((.prover.error // "") | length > 0) or ((.mpcWallet.error // "") | length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
+      backoffice_funds_status="failed"
+      backoffice_funds_detail="backoffice funds API reports runtime error"
+    elif [[ -z "$backoffice_funds_json" ]] \
       || ! jq -e '.operators | select(type == "array" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.mpcWallet.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.prover.network | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
       || ! jq -e '.prover.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
       backoffice_funds_status="failed"
       backoffice_funds_detail="backoffice funds API missing prover or MPC wallet fields"
+    else
+      backoffice_funds_status="passed"
+      backoffice_funds_detail="backoffice funds API passed"
     fi
   fi
 

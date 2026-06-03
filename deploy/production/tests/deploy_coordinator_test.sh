@@ -588,6 +588,52 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_refreshes_app_runtime_with_pinned_release_without_post_checks() {
+  local workdir output_dir fake_bin log_dir provision_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  provision_log="$log_dir/provision.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  write_fake_refresh_app_runtime_binary "$fake_bin/refresh-app-runtime.sh" "$provision_log"
+  write_fake_provision_app_edge_binary "$fake_bin/provision-app-edge.sh" "$provision_log"
+
+  PATH="$fake_bin:$PATH" \
+  PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+  PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --app-binaries-release-tag app-binaries-v1.2.3-testnet \
+      --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime --app-binaries-release-tag app-binaries-v1.2.3-testnet" "deploy coordinator refreshes app runtime from the pinned app-binaries release without post-deploy checks"
+  assert_not_contains "$(cat "$provision_log")" "provision-app-edge" "deploy coordinator leaves app edge provisioning to the workflow when post-deploy checks are disabled"
+  assert_file_exists "$output_dir/alpha/app-runtime/refresh.json" "deploy coordinator stores app runtime refresh output"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/app-runtime/refresh.json")" "true" "deploy coordinator requires a passing app runtime refresh"
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_resolves_role_runtime_inputs_and_runs_post_deploy_checks() {
   local workdir output_dir fake_bin log_dir shared_tf_json app_tf_json resolver_log provision_log shared_canary_log app_canary_log
   workdir="$(mktemp -d)"
@@ -1524,6 +1570,7 @@ EOF
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs
+  test_deploy_coordinator_refreshes_app_runtime_with_pinned_release_without_post_checks
   test_deploy_coordinator_resolves_role_runtime_inputs_and_runs_post_deploy_checks
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_supports_preview_legacy_wireguard_inventory

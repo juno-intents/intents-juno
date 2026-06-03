@@ -421,28 +421,30 @@ if [[ -n "$generated_dkg_tls_dir" ]]; then
 fi
 production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir" "$app_tf_output_json"
 
+if [[ -f "$output_dir/app/app-deploy.json" && ( -n "$app_binaries_release_tag" || "$run_post_deploy_checks" == "true" ) ]]; then
+  mkdir -p "$output_dir/app-runtime"
+  refresh_app_args=(
+    "$refresh_app_runtime_bin"
+    --shared-manifest "$shared_manifest"
+    --app-deploy "$output_dir/app/app-deploy.json"
+    --output-dir "$output_dir/app-runtime"
+  )
+  if [[ -n "$app_binaries_release_tag" ]]; then
+    refresh_app_args+=(--app-binaries-release-tag "$app_binaries_release_tag")
+  fi
+  if [[ "$dry_run" == "true" ]]; then
+    refresh_app_args+=(--dry-run)
+  fi
+  "${refresh_app_args[@]}" >"$output_dir/app-runtime/refresh.json"
+  [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-runtime/refresh.json")" == "true" ]] || \
+    die "app runtime refresh failed: $output_dir/app-runtime/refresh.json"
+fi
+
 if [[ "$run_post_deploy_checks" == "true" ]]; then
   canary_output_dir="$output_dir/canaries"
   mkdir -p "$canary_output_dir"
 
   if [[ -f "$output_dir/app/app-deploy.json" ]]; then
-    mkdir -p "$output_dir/app-runtime"
-    post_deploy_refresh_app_args=(
-      "$refresh_app_runtime_bin"
-      --shared-manifest "$shared_manifest"
-      --app-deploy "$output_dir/app/app-deploy.json"
-      --output-dir "$output_dir/app-runtime"
-    )
-    if [[ -n "$app_binaries_release_tag" ]]; then
-      post_deploy_refresh_app_args+=(--app-binaries-release-tag "$app_binaries_release_tag")
-    fi
-    if [[ "$dry_run" == "true" ]]; then
-      post_deploy_refresh_app_args+=(--dry-run)
-    fi
-    "${post_deploy_refresh_app_args[@]}" >"$output_dir/app-runtime/refresh.json"
-    [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-runtime/refresh.json")" == "true" ]] || \
-      die "app runtime refresh failed: $output_dir/app-runtime/refresh.json"
-
     post_deploy_app_args=("$provision_app_edge_bin" --app-deploy "$output_dir/app/app-deploy.json")
     if [[ "$dry_run" == "true" ]]; then
       post_deploy_app_args+=(--dry-run)
