@@ -184,6 +184,28 @@ variable "shared_ecs_desired_count" {
   }
 }
 
+variable "shared_proof_requestor_desired_count" {
+  description = "Optional desired task count for proof-requestor. Defaults to shared_ecs_desired_count."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_requestor_desired_count == null || var.shared_proof_requestor_desired_count >= 0
+    error_message = "shared_proof_requestor_desired_count must be >= 0 when set."
+  }
+}
+
+variable "shared_proof_funder_desired_count" {
+  description = "Optional desired task count for proof-funder. Defaults to shared_ecs_desired_count."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_funder_desired_count == null || var.shared_proof_funder_desired_count >= 0
+    error_message = "shared_proof_funder_desired_count must be >= 0 when set."
+  }
+}
+
 variable "shared_ecs_task_cpu" {
   description = "Fargate CPU units for each proof-service task."
   type        = number
@@ -225,25 +247,25 @@ variable "shared_sp1_funder_secret_arn" {
 }
 
 variable "shared_sp1_requestor_address" {
-  description = "EVM address for the shared SP1 requestor key. Required when shared_ecs_desired_count > 0."
+  description = "EVM address for the shared SP1 requestor key. Required when any shared proof service desired count is > 0."
   type        = string
   default     = ""
 }
 
 variable "shared_base_chain_id" {
-  description = "Base/EVM chain id used by shared proof-requestor request IDs. Required when shared_ecs_desired_count > 0."
+  description = "Base/EVM chain id used by shared proof-requestor request IDs. Required when any shared proof service desired count is > 0."
   type        = number
   default     = 0
 }
 
 variable "shared_deposit_image_id" {
-  description = "Deposit guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when shared_ecs_desired_count > 0."
+  description = "Deposit guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when any shared proof service desired count is > 0."
   type        = string
   default     = ""
 }
 
 variable "shared_withdraw_image_id" {
-  description = "Withdraw guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when shared_ecs_desired_count > 0."
+  description = "Withdraw guest image id (bytes32 hex) / program vkey used by the shared proof runtime. Required when any shared proof service desired count is > 0."
   type        = string
   default     = ""
 }

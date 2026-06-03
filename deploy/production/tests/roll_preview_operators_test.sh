@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 write_roll_inventory_fixture() {
   local target="$1"
   local workdir="$2"

@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+export PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true
+
 write_rebuild_inventory_fixture() {
   local target="$1"
   cat >"$target" <<'JSON'
@@ -338,15 +340,21 @@ ensure_rebuild_fixture_files() {
   local fixture_dir="$1"
   mkdir -p "$fixture_dir"
   : >"$fixture_dir/known_hosts"
+  export TEST_REBUILD_APP_POSTGRES_DSN="postgres://preview"
+  export TEST_REBUILD_BACKOFFICE_AUTH_SECRET="backoffice-token"
+  export TEST_REBUILD_JUNO_RPC_USER="juno"
+  export TEST_REBUILD_JUNO_RPC_PASS="rpcpass"
+  export TEST_REBUILD_MIN_DEPOSIT_ADMIN_PRIVATE_KEY="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  export TEST_REBUILD_BASE_RELAYER_PRIVATE_KEYS="0x1111111111111111111111111111111111111111111111111111111111111111"
   cat >"$fixture_dir/app-secrets.env" <<'EOF'
-APP_POSTGRES_DSN=literal:postgres://preview
-BACKOFFICE_AUTH_SECRET=literal:backoffice-token
-JUNO_RPC_USER=literal:juno
-JUNO_RPC_PASS=literal:rpcpass
-MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+APP_POSTGRES_DSN=env:TEST_REBUILD_APP_POSTGRES_DSN
+BACKOFFICE_AUTH_SECRET=env:TEST_REBUILD_BACKOFFICE_AUTH_SECRET
+JUNO_RPC_USER=env:TEST_REBUILD_JUNO_RPC_USER
+JUNO_RPC_PASS=env:TEST_REBUILD_JUNO_RPC_PASS
+MIN_DEPOSIT_ADMIN_PRIVATE_KEY=env:TEST_REBUILD_MIN_DEPOSIT_ADMIN_PRIVATE_KEY
 EOF
   cat >"$fixture_dir/operator-secrets.env" <<'EOF'
-BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_PRIVATE_KEYS=env:TEST_REBUILD_BASE_RELAYER_PRIVATE_KEYS
 EOF
 }
 

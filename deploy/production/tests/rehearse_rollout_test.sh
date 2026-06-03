@@ -144,6 +144,46 @@ write_fake_tools() {
   local log_file="$2"
   mkdir -p "$bin_dir"
 
+  cat >"$bin_dir/deploy-coordinator.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'deploy-coordinator %s\n' "\$*" >>"$log_file"
+inventory=""
+output_dir=""
+run_label=""
+bridge_summary=""
+terraform_output=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --inventory) inventory="\$2"; shift 2 ;;
+    --output-dir) output_dir="\$2"; shift 2 ;;
+    --run-label) run_label="\$2"; shift 2 ;;
+    --existing-bridge-summary) bridge_summary="\$2"; shift 2 ;;
+    --terraform-output-json) terraform_output="\$2"; shift 2 ;;
+    --dkg-summary|--bridge-deploy-binary|--deployer-key-file|--funder-key-file|--ephemeral-funding-amount-wei|--sweep-recipient) shift 2 ;;
+    --skip-terraform-apply|--dry-run) shift ;;
+    *) shift ;;
+  esac
+done
+[[ -n "\$inventory" && -n "\$output_dir" && -n "\$run_label" ]] || exit 1
+env_slug="\$(jq -r '.environment' "\$inventory")"
+run_dir="\$output_dir/\$env_slug/\$run_label"
+mkdir -p "\$run_dir/operators" "\$run_dir/canaries"
+[[ -n "\$bridge_summary" ]] && cp "\$bridge_summary" "\$run_dir/bridge-summary.json"
+[[ -n "\$terraform_output" ]] && cp "\$terraform_output" "\$run_dir/shared-terraform-output.json"
+jq -n --arg environment "\$env_slug" '{environment: \$environment}' >"\$run_dir/shared-manifest.json"
+jq '{current_operator_id: null, operators: [.operators[] | {operator_id, status: "pending", note: ""}]}' "\$inventory" >"\$run_dir/rollout-state.json"
+jq -r '.operators[].operator_id' "\$inventory" | while IFS= read -r operator_id; do
+  operator_dir="\$run_dir/operators/\$operator_id"
+  mkdir -p "\$operator_dir"
+  jq -n \
+    --arg operator_id "\$operator_id" \
+    --arg rollout_state_file "\$run_dir/rollout-state.json" \
+    '{operator_id: \$operator_id, rollout_state_file: \$rollout_state_file}' \
+    >"\$operator_dir/operator-deploy.json"
+done
+EOF
+
   cat >"$bin_dir/deploy-operator.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -223,8 +263,17 @@ printf 'unexpected cast invocation: %s\n' "\$*" >&2
 exit 1
 EOF
 
+  cat >"$bin_dir/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'SP1_DEPOSIT_OWALLET_IVK_HEX=%s\n' "0x$(printf 'a%.0s' $(seq 1 128))"
+printf 'SP1_WITHDRAW_OWALLET_OVK_HEX=%s\n' "0x$(printf 'b%.0s' $(seq 1 64))"
+EOF
+
   chmod 0755 \
     "$bin_dir/cast" \
+    "$bin_dir/cargo" \
+    "$bin_dir/deploy-coordinator.sh" \
     "$bin_dir/deploy-operator.sh" \
     "$bin_dir/canary-shared-services.sh" \
     "$bin_dir/canary-operator-boot.sh" \
@@ -248,6 +297,8 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
   (
     cd "$REPO_ROOT"
     PATH="$fake_bin:$PATH" \
+    PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true \
+    PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
     PRODUCTION_DEPLOY_OPERATOR_BIN="$fake_bin/deploy-operator.sh" \
     PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
     PRODUCTION_CANARY_OPERATOR_BIN="$fake_bin/canary-operator-boot.sh" \
@@ -277,6 +328,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
   (
     cd "$REPO_ROOT"
     PATH="$fake_bin:$PATH" \
+    PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS=true \
     PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator-should-not-run.sh" \
     PRODUCTION_DEPLOY_OPERATOR_BIN="$fake_bin/deploy-operator.sh" \
     PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \

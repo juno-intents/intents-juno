@@ -198,10 +198,57 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
 
   assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "production shared tfvars start proof ecs services"
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "1" "production shared tfvars starts the proof requestor when bridge is active"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "production shared tfvars starts the proof funder when bridge is active"
   assert_eq "$(jq -r '.shared_proof_role_instance_type' "$override_file")" "c7i.large" "production shared tfvars keep the shared proof role on the quota-safe instance type"
   assert_eq "$(jq -r '.shared_proof_role_min_size' "$override_file")" "1" "production shared tfvars keep the shared proof role minimum within quota"
   assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars keep the shared proof role desired capacity within quota"
   assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "2" "production shared tfvars cap the shared proof role autoscaling within quota"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .app_role.bridge_api.paused = true
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "paused production shared tfvars keep legacy shared proof count for compatibility"
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "0" "paused production shared tfvars stop the proof requestor"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "paused production shared tfvars keep the proof funder running"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .app_role.bridge_api_paused = true
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_proof_requestor_desired_count' "$override_file")" "0" "legacy paused alias stops the proof requestor"
+  assert_eq "$(jq -r '.shared_proof_funder_desired_count' "$override_file")" "1" "legacy paused alias keeps the proof funder running"
   rm -rf "$workdir"
 }
 
@@ -4094,6 +4141,8 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
+  test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused
+  test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
   test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable
   test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws

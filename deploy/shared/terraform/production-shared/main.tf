@@ -72,7 +72,9 @@ locals {
   shared_proof_service_image_requires_ecr_pull = local.shared_proof_service_image_uses_ecr
   shared_proof_service_ecr_repository_arn      = local.shared_proof_service_image_override == "" ? aws_ecr_repository.proof_services.arn : trimspace(var.shared_proof_service_image_ecr_repository_arn)
   shared_sp1_requestor_address                 = trimspace(var.shared_sp1_requestor_address)
-  shared_proof_runtime_enabled                 = var.shared_ecs_desired_count > 0
+  shared_proof_requestor_desired_count         = coalesce(var.shared_proof_requestor_desired_count, var.shared_ecs_desired_count)
+  shared_proof_funder_desired_count            = coalesce(var.shared_proof_funder_desired_count, var.shared_ecs_desired_count)
+  shared_proof_runtime_enabled                 = local.shared_proof_requestor_desired_count > 0 || local.shared_proof_funder_desired_count > 0
   shared_proof_guest_release_tag               = trimspace(var.shared_bridge_guest_release_tag)
   shared_deposit_image_id                      = lower(trimspace(var.shared_deposit_image_id))
   shared_withdraw_image_id                     = lower(trimspace(var.shared_withdraw_image_id))
@@ -1145,19 +1147,19 @@ resource "aws_ecs_task_definition" "proof_requestor" {
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""
-      error_message = "shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0."
+      error_message = "shared_sp1_requestor_address must be set when a shared proof service desired count is > 0."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || var.shared_base_chain_id > 0
-      error_message = "shared_base_chain_id must be > 0 when shared_ecs_desired_count > 0."
+      error_message = "shared_base_chain_id must be > 0 when a shared proof service desired count is > 0."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
-      error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+      error_message = "shared_deposit_image_id must be a 32-byte hex value when a shared proof service desired count is > 0."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id))
-      error_message = "shared_withdraw_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+      error_message = "shared_withdraw_image_id must be a 32-byte hex value when a shared proof service desired count is > 0."
     }
   }
 
@@ -1212,15 +1214,15 @@ resource "aws_ecs_task_definition" "proof_funder" {
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""
-      error_message = "shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0."
+      error_message = "shared_sp1_requestor_address must be set when a shared proof service desired count is > 0."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
-      error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+      error_message = "shared_deposit_image_id must be a 32-byte hex value when a shared proof service desired count is > 0."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id))
-      error_message = "shared_withdraw_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+      error_message = "shared_withdraw_image_id must be a 32-byte hex value when a shared proof service desired count is > 0."
     }
   }
 
@@ -1231,7 +1233,7 @@ resource "aws_ecs_service" "proof_requestor" {
   name            = "${local.resource_name}-proof-requestor"
   cluster         = aws_ecs_cluster.shared.id
   task_definition = aws_ecs_task_definition.proof_requestor.arn
-  desired_count   = var.shared_ecs_desired_count
+  desired_count   = local.shared_proof_requestor_desired_count
   launch_type     = "FARGATE"
 
   deployment_minimum_healthy_percent = 100
@@ -1256,7 +1258,7 @@ resource "aws_ecs_service" "proof_funder" {
   name            = "${local.resource_name}-proof-funder"
   cluster         = aws_ecs_cluster.shared.id
   task_definition = aws_ecs_task_definition.proof_funder.arn
-  desired_count   = var.shared_ecs_desired_count
+  desired_count   = local.shared_proof_funder_desired_count
   launch_type     = "FARGATE"
 
   deployment_minimum_healthy_percent = 100

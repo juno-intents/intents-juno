@@ -679,6 +679,7 @@ production_write_shared_terraform_override_tfvars() {
   fi
 
   local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id bridge_guest_release_tag
+  local bridge_paused shared_proof_requestor_desired_count shared_proof_funder_desired_count
   local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
@@ -698,6 +699,14 @@ production_write_shared_terraform_override_tfvars() {
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   proof_role_json="$(production_json_optional "$inventory" '.shared_roles.proof // {}')"
   live_e2e_json="$(production_json_optional "$inventory" '.shared_services.live_e2e // {}')"
+  bridge_paused="$(jq -r '.bridge_api.paused // .bridge_api_paused // .bridge_paused // false' <<<"$app_role_json")"
+  if [[ "$bridge_paused" == "true" ]]; then
+    shared_proof_requestor_desired_count="0"
+    shared_proof_funder_desired_count="1"
+  else
+    shared_proof_requestor_desired_count="1"
+    shared_proof_funder_desired_count="1"
+  fi
   vpc_id="$(jq -r '.vpc_id // empty' <<<"$app_role_json")"
   private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
   shared_postgres_password="$(production_json_optional "$inventory" '.shared_postgres_password')"
@@ -919,6 +928,8 @@ production_write_shared_terraform_override_tfvars() {
     --argjson alarm_actions "$alarm_actions_json" \
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
+    --argjson shared_proof_requestor_desired_count "$shared_proof_requestor_desired_count" \
+    --argjson shared_proof_funder_desired_count "$shared_proof_funder_desired_count" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
     --argjson shared_service_client_cidr_blocks "$shared_service_client_cidr_blocks_json" \
     '{
@@ -939,6 +950,8 @@ production_write_shared_terraform_override_tfvars() {
       shared_proof_service_image: $shared_proof_service_image,
       shared_proof_service_image_ecr_repository_arn: $shared_proof_service_image_ecr_repository_arn,
       shared_ecs_desired_count: 1,
+      shared_proof_requestor_desired_count: $shared_proof_requestor_desired_count,
+      shared_proof_funder_desired_count: $shared_proof_funder_desired_count,
       shared_proof_role_instance_type: "c7i.large",
       shared_proof_role_min_size: 1,
       shared_proof_role_desired_capacity: 1,
@@ -3525,14 +3538,18 @@ production_render_operator_handoffs() {
         known_hosts_src="$(production_abs_path "$inventory_dir" "$known_hosts_src")"
         [[ -f "$known_hosts_src" ]] || die "known_hosts file not found: $known_hosts_src"
         known_hosts_dst="$handoff_dir/known_hosts"
-        cp "$known_hosts_src" "$known_hosts_dst"
+        if [[ "$known_hosts_src" != "$known_hosts_dst" ]]; then
+          cp "$known_hosts_src" "$known_hosts_dst"
+        fi
       fi
 
       if [[ -n "$secrets_src" ]]; then
         secrets_src="$(production_abs_path "$inventory_dir" "$secrets_src")"
         [[ -f "$secrets_src" ]] || die "secret contract file not found: $secrets_src"
         secrets_dst="$handoff_dir/operator-secrets.env"
-        cp "$secrets_src" "$secrets_dst"
+        if [[ "$secrets_src" != "$secrets_dst" ]]; then
+          cp "$secrets_src" "$secrets_dst"
+        fi
 	        production_refresh_operator_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$operator_json" "$secrets_dst"
 	        if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst" || ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
 	          local -a derived_owallet_keys
