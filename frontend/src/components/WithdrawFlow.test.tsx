@@ -111,4 +111,32 @@ describe('WithdrawFlow', () => {
     expect(decodeRecipient).not.toHaveBeenCalled()
     expect(writeContract).not.toHaveBeenCalled()
   })
+
+  it('fails closed when withdrawal pause refresh fails from a stale tab', async () => {
+    const user = userEvent.setup()
+    const writeContract = vi.fn()
+    vi.mocked(useAccount).mockReturnValue({
+      address: '0x1234567890123456789012345678901234567890',
+    } as unknown as ReturnType<typeof useAccount>)
+    vi.mocked(useReadContract).mockReturnValue({ data: 3_00000000n } as unknown as ReturnType<typeof useReadContract>)
+    vi.mocked(useWriteContract).mockReturnValue({
+      writeContract,
+      reset: vi.fn(),
+    } as unknown as ReturnType<typeof useWriteContract>)
+    vi.mocked(useWaitForTransactionReceipt).mockReturnValue({ isSuccess: false } as unknown as ReturnType<typeof useWaitForTransactionReceipt>)
+    vi.mocked(decodeRecipient).mockResolvedValue('00'.repeat(43))
+    vi.mocked(getConfig)
+      .mockResolvedValueOnce(activeConfig)
+      .mockRejectedValueOnce(new Error('network unavailable'))
+
+    renderWithdrawFlow()
+
+    await user.type(await screen.findByPlaceholderText('0.00'), '2')
+    await user.type(screen.getByPlaceholderText('Junocash address (j1...)'), 'j1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq')
+    await user.click(screen.getByRole('button', { name: 'Request Withdrawal' }))
+
+    expect(await screen.findByText('Bridge status could not be refreshed. Try again shortly.')).toBeInTheDocument()
+    expect(decodeRecipient).not.toHaveBeenCalled()
+    expect(writeContract).not.toHaveBeenCalled()
+  })
 })

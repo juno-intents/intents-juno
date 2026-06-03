@@ -117,11 +117,12 @@ export default function WithdrawFlow() {
   }, [recentRecipients])
 
   const refreshPauseState = async () => {
-    const freshCfg = (await refetchConfig()).data
-    const paused = freshCfg?.bridgePaused === true
+    const result = await refetchConfig()
+    const freshCfg = result.data
+    const paused = result.isError || !freshCfg || freshCfg.bridgePaused === true
     if (paused) {
       setStep('input')
-      setDecodeError(null)
+      setDecodeError(freshCfg?.bridgePauseMessage || 'Bridge status could not be refreshed. Try again shortly.')
     }
     return paused
   }
