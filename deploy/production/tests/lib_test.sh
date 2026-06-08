@@ -384,6 +384,22 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_operator_registry_cast() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "call" && "\$5" == "isOperator(address)(bool)" ]]; then
+  printf 'true\n'
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 write_fake_checkpoint_signer_kms_provisioner() {
   local target="$1"
   local log_file="$2"
@@ -3049,6 +3065,37 @@ EOF
   rm -rf "$workdir"
 }
 
+test_production_require_registered_operator_uses_rpc_override() {
+  local workdir fake_bin old_path shared_manifest operator_deploy
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  jq -n '{
+    contracts: {
+      base_rpc_url: "https://broken-base-rpc.example.invalid",
+      operator_registry: "0x4444444444444444444444444444444444444444"
+    }
+  }' >"$shared_manifest"
+  operator_deploy="$workdir/operator-deploy.json"
+  jq -n '{
+    operator_id: "0x1111111111111111111111111111111111111111",
+    operator_address: "0x9999999999999999999999999999999999999999"
+  }' >"$operator_deploy"
+
+  write_fake_operator_registry_cast "$fake_bin/cast" "$workdir/cast.log"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH" \
+    PRODUCTION_OPERATOR_REGISTRY_RPC_URL="https://healthy-base-rpc.example.invalid" \
+    production_require_registered_operator "$shared_manifest" "$operator_deploy"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$workdir/cast.log")" "call --rpc-url https://healthy-base-rpc.example.invalid 0x4444444444444444444444444444444444444444 isOperator(address)(bool) 0x9999999999999999999999999999999999999999" "operator registry preflight uses rpc override"
+  assert_not_contains "$(cat "$workdir/cast.log")" "https://broken-base-rpc.example.invalid" "operator registry preflight does not use manifest rpc when override is set"
+  rm -rf "$workdir"
+}
+
 test_render_app_handoff_and_envs() {
   local workdir shared_manifest app_manifest resolved_env bridge_env backoffice_env
   local fake_bin old_path
@@ -4128,6 +4175,7 @@ main() {
   test_render_operator_stack_env_omits_private_key_with_kms_contract
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
+  test_production_require_registered_operator_uses_rpc_override
   test_render_app_handoff_and_envs
   test_render_bridge_api_env_supports_paused_mode
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url

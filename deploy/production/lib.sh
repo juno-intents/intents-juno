@@ -2547,7 +2547,10 @@ production_require_registered_operator() {
 
   have_cmd cast || die "required command not found: cast"
 
-  base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+  base_rpc_url="${PRODUCTION_OPERATOR_REGISTRY_RPC_URL:-}"
+  if [[ -z "$base_rpc_url" ]]; then
+    base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+  fi
   operator_registry="$(production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and test("^0x[0-9a-fA-F]{40}$"))')"
   operator_address="$(production_effective_operator_address "$operator_deploy")"
   [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "operator deploy manifest is missing a valid operator address"
