@@ -732,7 +732,7 @@ scan_find_action_index() {
   local -A seen_cursors=()
 
   auth_header="$(scan_auth_header "$bearer")"
-  base_url="${scan_url%/}/v1/wallets/${wallet_id}/notes?limit=1000"
+  base_url="${scan_url%/}/v1/wallets/${wallet_id}/notes?limit=1000&direction=incoming"
   txid="$(trim_txid "$txid")"
 
   while true; do

@@ -95,7 +95,7 @@ func (c *Client) ListWalletNotes(ctx context.Context, walletID string) ([]witnes
 	seen := map[string]struct{}{}
 	out := make([]witnessextract.WalletNote, 0, 1024)
 	for {
-		path := c.baseURL + "/v1/wallets/" + url.PathEscape(wallet) + "/notes?limit=1000"
+		path := c.baseURL + "/v1/wallets/" + url.PathEscape(wallet) + "/notes?limit=1000&direction=incoming"
 		if cursor != "" {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
@@ -115,6 +115,7 @@ func (c *Client) ListWalletNotes(ctx context.Context, walletID string) ([]witnes
 				ValueZat    uint64 `json:"value_zat"`
 				MemoHex     string `json:"memo_hex,omitempty"`
 				Height      int64  `json:"height"`
+				Direction   string `json:"direction,omitempty"`
 			} `json:"notes"`
 			NextCursor string `json:"next_cursor"`
 		}
@@ -122,6 +123,9 @@ func (c *Client) ListWalletNotes(ctx context.Context, walletID string) ([]witnes
 			return nil, fmt.Errorf("decode juno-scan list notes: %w", err)
 		}
 		for _, n := range resp.Notes {
+			if direction := strings.TrimSpace(n.Direction); direction != "" && !strings.EqualFold(direction, "incoming") {
+				continue
+			}
 			out = append(out, witnessextract.WalletNote{
 				TxID:        n.TxID,
 				ActionIndex: n.ActionIndex,

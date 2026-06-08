@@ -182,6 +182,12 @@ test_dkg_binary_source_build_can_be_disabled() {
   assert_contains "$common_text" 'die "release asset missing for $tool $version and source-build fallback is disabled"' "common fails closed when release-only mode cannot find a dkg asset"
 }
 
+test_hardfork_tool_defaults_are_current() {
+  assert_eq "$JUNO_DKG_VERSION_DEFAULT" "v0.1.1" "default dkg release"
+  assert_eq "$JUNO_TXSIGN_VERSION_DEFAULT" "v1.6" "default juno-txsign release"
+  assert_eq "$JUNO_TXBUILD_VERSION_DEFAULT" "v1.6.2" "default juno-txbuild release"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -194,6 +200,7 @@ main() {
   test_aws_dependency_install_fallback_exists
   test_checksum_downloads_fail_closed
   test_dkg_binary_source_build_can_be_disabled
+  test_hardfork_tool_defaults_are_current
 }
 
 main "$@"

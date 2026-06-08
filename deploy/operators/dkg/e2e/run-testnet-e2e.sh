@@ -1228,7 +1228,7 @@ witness_scan_find_wallet_for_txid() {
       curl -fsS \
         --max-time 20 \
         "${headers[@]}" \
-        "${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=1000" 2>/dev/null || true
+        "${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=1000&direction=incoming" 2>/dev/null || true
     )"
     [[ -n "$notes_response" ]] || continue
 

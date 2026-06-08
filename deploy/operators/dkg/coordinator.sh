@@ -24,13 +24,13 @@ Commands:
     --threshold <n>                  required threshold
     --max-signers <n>                required participant count
     --ceremony-id <uuid>             optional (auto-generated if omitted)
-    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.0)
+    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.1)
     --registration-file <path>       repeat for each operator registration JSON
     --prompt-endpoints               prompt to override endpoint per registration
 
   preflight/run/resume:
     --workdir <path>                 required
-    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.0)
+    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.1)
     --connect-timeout-ms <ms>        default 10000
     --rpc-timeout-ms <ms>            default 30000
     --max-retries <n>                default 3
@@ -41,7 +41,7 @@ Commands:
 
   export:
     --workdir <path>                 required
-    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.0)
+    --release-tag <tag>              dkg-ceremony release tag (default: v0.1.1)
     --kms-key-id <arn>               required primary KMS export backend
     --s3-bucket <name>               required
     --s3-key-prefix <prefix>         required

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/withdraw"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/withdraw"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 	"github.com/juno-intents/intents-juno/internal/witnessitem"
@@ -186,7 +189,7 @@ func TestWithdrawWitnessExtractor_ExtractPersistsScanBackfillCursor(t *testing.T
 		witness: witnessextract.WitnessResponse{
 			AnchorHeight: 321,
 			Root:         "0x" + strings.Repeat("cd", 32),
-			Paths: []witnessextract.WitnessPath{{Position: 7, AuthPath: testAuthPathHex()}},
+			Paths:        []witnessextract.WitnessPath{{Position: 7, AuthPath: testAuthPathHex()}},
 		},
 	}
 	rpc := &stubWitnessRPCClient{action: testRPCAction()}
@@ -611,6 +614,59 @@ type stubWitnessRPCClient struct {
 	action         junorpc.OrchardAction
 	gotTxID        string
 	gotActionIndex uint32
+}
+
+func TestScanHTTPClientListWalletNotesRequestsIncomingDirectionAndFiltersResponse(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/wallets/wallet-a/notes" {
+			t.Fatalf("path: got %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("limit"); got != "1000" {
+			t.Fatalf("limit: got %q want 1000", got)
+		}
+		if got := r.URL.Query().Get("direction"); got != "incoming" {
+			t.Fatalf("direction: got %q want incoming", got)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"notes": []map[string]any{
+				{
+					"direction":    "outgoing",
+					"txid":         "bad",
+					"action_index": 0,
+					"value_zat":    1,
+				},
+				{
+					"direction":    "incoming",
+					"txid":         "good",
+					"action_index": 1,
+					"value_zat":    2,
+					"position":     42,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := &scanHTTPClient{
+		baseURL: srv.URL,
+		hc:      &http.Client{Timeout: time.Second},
+	}
+	notes, err := client.ListWalletNotes(context.Background(), "wallet-a")
+	if err != nil {
+		t.Fatalf("ListWalletNotes: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("notes len: got %d want 1: %#v", len(notes), notes)
+	}
+	if notes[0].TxID != "good" || notes[0].ActionIndex != 1 || notes[0].ValueZat != 2 {
+		t.Fatalf("note: got %#v", notes[0])
+	}
+	if notes[0].Position == nil || *notes[0].Position != 42 {
+		t.Fatalf("position: got %#v want 42", notes[0].Position)
+	}
 }
 
 func (s *stubWitnessRPCClient) GetOrchardAction(_ context.Context, txid string, actionIndex uint32) (junorpc.OrchardAction, error) {

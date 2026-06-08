@@ -22,7 +22,7 @@ Commands:
   run options:
     --bundle <path>         required bundle directory or .tar.gz created by coordinator.sh init
     --workdir <path>        runtime directory (default: ~/.juno-dkg/operator-runtime)
-    --release-tag <tag>     dkg-admin release tag (default: v0.1.0)
+    --release-tag <tag>     dkg-admin release tag (default: v0.1.1)
     --daemon                run in background and return
 
   status options:

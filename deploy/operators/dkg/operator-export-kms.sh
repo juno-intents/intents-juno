@@ -19,7 +19,7 @@ Usage:
 Commands:
   export:
     --workdir <path>                operator runtime dir (default: ~/.juno-dkg/operator-runtime)
-    --release-tag <tag>             dkg-admin release tag (default: v0.1.0)
+    --release-tag <tag>             dkg-admin release tag (default: v0.1.1)
     --kms-key-id <arn>              required
     --s3-bucket <name>              required
     --s3-sse-kms-key-id <arn>       required
@@ -38,13 +38,13 @@ Commands:
 
   backup-age:
     --workdir <path>                operator runtime dir (default: ~/.juno-dkg/operator-runtime)
-    --release-tag <tag>             dkg-admin release tag (default: v0.1.0)
+    --release-tag <tag>             dkg-admin release tag (default: v0.1.1)
     --age-recipient <age1..>        required, repeatable
     --out <path>                    required output path for encrypted age backup
     --force                         allow overwriting --out when it exists
 
   rewrap-age-to-kms:
-    --release-tag <tag>             dkg-admin release tag (default: v0.1.0)
+    --release-tag <tag>             dkg-admin release tag (default: v0.1.1)
     --age-backup-file <path>        required age backup file created by backup-age/export
     --age-identity-file <path>      required age private identity file used to decrypt backup
     --admin-config <path>           required admin-config.json backup from operator bundle

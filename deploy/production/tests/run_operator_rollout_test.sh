@@ -44,7 +44,7 @@ test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release() {
   assert_contains "$script_text" 'ensure_runtime_dkg_admin_binary() {' "run-operator-rollout defines a runtime dkg-admin repair helper"
   assert_contains "$script_text" 'if sudo test -x "$runtime_dir/bin/dkg-admin"; then' "run-operator-rollout only repairs dkg-admin when runtime restore missed it"
   assert_contains "$script_text" 'export JUNO_DKG_DISABLE_SOURCE_BUILD="true"' "run-operator-rollout disables dkg source-build fallback during live repair"
-  assert_contains "$script_text" 'ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}" "$dkg_stage_dir"' "run-operator-rollout repairs dkg-admin from the published release path only"
+  assert_contains "$script_text" 'ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.1}" "$dkg_stage_dir"' "run-operator-rollout repairs dkg-admin from the published release path only"
   assert_contains "$script_text" 'sudo install -d -m 0755 "$runtime_dir/bin"' "run-operator-rollout creates the runtime bin dir before repairing dkg-admin"
   assert_contains "$script_text" 'sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"' "run-operator-rollout installs the repaired dkg-admin into the runtime dir"
 }
@@ -57,6 +57,7 @@ test_run_operator_rollout_repairs_juno_txsign_from_published_release() {
   assert_contains "$script_text" 'download_github_release_asset_with_checksum() {' "run-operator-rollout defines a shared GitHub release downloader"
   assert_contains "$script_text" 'ensure_runtime_juno_txsign_binary() {' "run-operator-rollout defines a juno-txsign repair helper"
   assert_contains "$script_text" "requested_tag=\"\$(jq -r '.juno_txsign_release_tag // empty' \"\$operator_deploy\")\"" "run-operator-rollout reads an optional pinned juno-txsign release tag from the operator manifest"
+  assert_contains "$script_text" 'requested_tag="${requested_tag:-v1.6}"' "run-operator-rollout defaults juno-txsign repair to the hard-fork release"
   assert_contains "$script_text" "sudo /usr/local/bin/juno-txsign sign-digest --help 2>&1 | grep -q -- '--operator-endpoint'" "run-operator-rollout verifies operator-endpoint support before skipping repair"
   assert_contains "$script_text" 'sudo /usr/local/bin/juno-txsign serve --help >/dev/null 2>&1' "run-operator-rollout verifies the signer API server mode before skipping repair"
   assert_contains "$script_text" 'download_github_release_asset_with_checksum "junocash-tools/juno-txsign" "$requested_tag" "$asset_name" "$archive"' "run-operator-rollout repairs juno-txsign from the published upstream release"

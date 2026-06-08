@@ -250,6 +250,6 @@ Each operator should back up these artifacts outside the machine:
 - Scripts auto-attempt execution remediation on startup:
   - macOS: recursively removes `com.apple.quarantine` in the DKG script folder.
   - Linux/macOS: repairs executable permission bits on downloaded/packaged binaries.
-- Tools default to release `v0.1.0` and auto-download by OS/arch. You can override with:
+- Tools default to release `v0.1.1` and auto-download by OS/arch. You can override with:
   - `JUNO_DKG_ADMIN_BIN=/path/to/dkg-admin`
   - `JUNO_DKG_CEREMONY_BIN=/path/to/dkg-ceremony`

@@ -15,7 +15,7 @@ Usage:
 
 Options:
   --workdir <path>          required ceremony workspace path
-  --release-tag <tag>       dkg-ceremony release tag (default: v0.1.0)
+  --release-tag <tag>       dkg-ceremony release tag (default: v0.1.1)
   --skip-resume             do not run coordinator.sh resume before validation
   --output <path>           output summary json (default: <workdir>/reports/test-completiton.json)
 

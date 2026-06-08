@@ -23,10 +23,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
-	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	internaleth "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
@@ -773,7 +773,7 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 	seen := map[string]struct{}{}
 	out := make([]witnessextract.WalletNote, 0, 1024)
 	for {
-		path := c.baseURL + "/v1/wallets/" + url.PathEscape(wallet) + "/notes?limit=1000"
+		path := c.baseURL + "/v1/wallets/" + url.PathEscape(wallet) + "/notes?limit=1000&direction=incoming"
 		if cursor != "" {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
@@ -791,6 +791,7 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 				ActionIndex int32  `json:"action_index"`
 				Position    *int64 `json:"position,omitempty"`
 				ValueZat    uint64 `json:"value_zat,omitempty"`
+				Direction   string `json:"direction,omitempty"`
 			} `json:"notes"`
 			NextCursor string `json:"next_cursor"`
 		}
@@ -798,6 +799,9 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 			return nil, fmt.Errorf("decode juno-scan list notes: %w", err)
 		}
 		for _, n := range resp.Notes {
+			if direction := strings.TrimSpace(n.Direction); direction != "" && !strings.EqualFold(direction, "incoming") {
+				continue
+			}
 			out = append(out, witnessextract.WalletNote{
 				TxID:        n.TxID,
 				ActionIndex: n.ActionIndex,

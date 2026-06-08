@@ -238,7 +238,7 @@ ensure_runtime_dkg_admin_binary() {
 
   dkg_stage_dir="$(mktemp -d)"
   export JUNO_DKG_DISABLE_SOURCE_BUILD="true"
-  dkg_admin_downloaded="$(ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}" "$dkg_stage_dir")"
+  dkg_admin_downloaded="$(ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.1}" "$dkg_stage_dir")"
   sudo install -d -m 0755 "$runtime_dir/bin"
   sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"
   sudo chown intents-juno:intents-juno "$runtime_dir/bin/dkg-admin"
@@ -279,6 +279,7 @@ ensure_runtime_juno_txsign_binary() {
   local requested_tag current_supports_endpoints current_supports_serve arch asset_name archive extract_dir release_tag_marker
 
   requested_tag="$(jq -r '.juno_txsign_release_tag // empty' "$operator_deploy")"
+  requested_tag="${requested_tag:-v1.6}"
   current_supports_endpoints="false"
   current_supports_serve="false"
 
@@ -297,25 +298,13 @@ ensure_runtime_juno_txsign_binary() {
     && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
     return 0
   fi
-  if [[ -z "$requested_tag" && "$current_supports_endpoints" == "true" && "$current_supports_serve" == "true" ]]; then
-    return 0
-  fi
-
   case "$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;
     aarch64|arm64) arch="arm64" ;;
     *) die "unsupported architecture for juno-txsign install: $(uname -m)" ;;
   esac
 
-  asset_name="juno-txsign_${requested_tag:-v0.0.0}_linux_${arch}.tar.gz"
-  if [[ -z "$requested_tag" ]]; then
-    local latest_release_json latest_release_tag
-    latest_release_json="$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
-    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
-    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest juno-txsign release tag"
-    requested_tag="$latest_release_tag"
-    asset_name="juno-txsign_${requested_tag}_linux_${arch}.tar.gz"
-  fi
+  asset_name="juno-txsign_${requested_tag}_linux_${arch}.tar.gz"
 
   archive="$(mktemp)"
   download_github_release_asset_with_checksum "junocash-tools/juno-txsign" "$requested_tag" "$asset_name" "$archive"

@@ -80,7 +80,7 @@ run options:
   --shared-ecs-assign-public-ip <true|false>
                                         assign public IPv4 addresses on shared ECS tasks (default: false)
   --dkg-s3-key-prefix <prefix>         S3 prefix for KMS-exported key packages (default: dkg/keypackages)
-  --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
+  --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.1)
   --bridge-guest-release-tag <tag>     release tag used to derive SP1 guest program URLs when
                                        --sp1-deposit-program-url / --sp1-withdraw-program-url are omitted
                                        (default: bridge-guests-latest)
@@ -1496,7 +1496,8 @@ fi
 git submodule update --init --recursive
 
 if ! command -v juno-txsign >/dev/null 2>&1; then
-  juno_txsign_release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+  juno_txsign_release_tag="\${JUNO_TXSIGN_VERSION_DEFAULT:-v1.6}"
+  juno_txsign_release_json="\$(curl -fsSL "https://api.github.com/repos/junocash-tools/juno-txsign/releases/tags/\${juno_txsign_release_tag}")"
   juno_txsign_release_tag="\$(jq -r '.tag_name // empty' <<<"\$juno_txsign_release_json")"
   case "\$(uname -m)" in
     x86_64|amd64) juno_txsign_arch="amd64" ;;
@@ -1507,7 +1508,7 @@ if ! command -v juno-txsign >/dev/null 2>&1; then
       ;;
   esac
   [[ -n "\$juno_txsign_release_tag" ]] || {
-    echo "failed to resolve juno-txsign latest release tag" >&2
+    echo "failed to resolve juno-txsign release tag" >&2
     exit 1
   }
   juno_txsign_asset="juno-txsign_\${juno_txsign_release_tag}_linux_\${juno_txsign_arch}.tar.gz"
@@ -2529,7 +2530,7 @@ command_run() {
   local operator_associate_public_ip_address="true"
   local shared_ecs_assign_public_ip="false"
   local dkg_s3_key_prefix="dkg/keypackages"
-  local dkg_release_tag="${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}"
+  local dkg_release_tag="${JUNO_DKG_VERSION_DEFAULT:-v0.1.1}"
   local bridge_guest_release_tag="$DEFAULT_BRIDGE_GUEST_RELEASE_TAG"
   local operator_count_explicit="false"
   local operator_base_port_explicit="false"

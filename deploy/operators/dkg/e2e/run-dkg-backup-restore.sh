@@ -20,7 +20,7 @@ Options:
   --threshold <n>             quorum threshold (default: 3)
   --network <name>            DKG network value (default: testnet)
   --base-port <port>          first operator grpc port (default: 18443)
-  --release-tag <tag>         DKG tool release tag (default: v0.1.0)
+  --release-tag <tag>         DKG tool release tag (default: v0.1.1)
   --output <path>             summary json output (default: <workdir>/reports/dkg-summary.json)
   --inventory <path>          optional deployment inventory used to render handoff bundles
   --handoff-output-dir <path> optional handoff output root (default: <workdir>/handoff when --inventory is set)

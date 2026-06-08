@@ -73,6 +73,27 @@ assert_standard_hardening() {
   assert_contains "$unit_text" "CPUQuota=" "$unit_name sets CPUQuota"
 }
 
+test_build_operator_stack_ami_pins_hardfork_juno_toolchain() {
+  local script_text
+  script_text="$(cat "$RUNBOOK_PATH")"
+
+  assert_contains "$script_text" 'JUNOCASHD_RELEASE_TAG:-v0.9.12' "operator AMI pins junocashd hard-fork release by default"
+  assert_contains "$script_text" 'JUNO_SCAN_RELEASE_TAG:-v1.4.6' "operator AMI pins juno-scan hard-fork release by default"
+  assert_contains "$script_text" 'JUNO_TXSIGN_RELEASE_TAG:-v1.6' "operator AMI pins juno-txsign hard-fork release by default"
+  assert_contains "$script_text" 'JUNO_TXBUILD_RELEASE_TAG:-v1.6.2' "operator AMI pins juno-txbuild hard-fork release by default"
+  assert_contains "$script_text" 'releases/tags/\${release_tag}' "operator AMI resolves pinned release metadata"
+  assert_contains "$script_text" 'echo "\$release_tag" > "\$HOME/.juno-txsign-release-tag"' "operator AMI records installed juno-txsign release tag"
+  assert_contains "$script_text" 'echo "\$release_tag" > "\$HOME/.juno-txbuild-release-tag"' "operator AMI records installed juno-txbuild release tag"
+  assert_contains "$script_text" 'juno_txsign_release_tag="$(jq -r' "operator AMI validates juno-txsign metadata"
+  assert_contains "$script_text" 'juno_txbuild_release_tag="$(jq -r' "operator AMI validates juno-txbuild metadata"
+  assert_contains "$script_text" 'juno_txsign: {' "operator AMI manifest includes juno-txsign metadata"
+  assert_contains "$script_text" 'juno_txbuild: {' "operator AMI manifest includes juno-txbuild metadata"
+  assert_not_contains "$script_text" 'repos/juno-cash/junocash/releases/latest' "operator AMI must not use latest for junocashd"
+  assert_not_contains "$script_text" 'repos/junocash-tools/juno-scan/releases/latest' "operator AMI must not use latest for juno-scan"
+  assert_not_contains "$script_text" 'repos/junocash-tools/juno-txsign/releases/latest' "operator AMI must not use latest for juno-txsign"
+  assert_not_contains "$script_text" 'repos/junocash-tools/juno-txbuild/releases/latest' "operator AMI must not use latest for juno-txbuild"
+}
+
 unit_marker_start() {
   case "$1" in
     junocashd.service) printf "%s" "cat > /tmp/junocashd.service <<'EOF_JUNOD'" ;;
@@ -1206,6 +1227,7 @@ EOF
 
 main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
+  test_build_operator_stack_ami_pins_hardfork_juno_toolchain
   test_build_operator_stack_ami_repairs_dpkg_before_apt
   test_build_operator_stack_ami_bootstraps_ssm_agent
   test_build_operator_stack_ami_uses_checksum_and_env_wiring

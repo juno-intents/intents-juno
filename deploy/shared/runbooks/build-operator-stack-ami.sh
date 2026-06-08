@@ -322,7 +322,8 @@ download_release_asset_with_checksum() {
 
 install_junocash() {
   local release_json release_tag asset_name archive root_dir
-  release_json="\$(curl -fsSL https://api.github.com/repos/juno-cash/junocash/releases/latest)"
+  release_tag="\${JUNOCASHD_RELEASE_TAG:-v0.9.12}"
+  release_json="\$(curl -fsSL "https://api.github.com/repos/juno-cash/junocash/releases/tags/\${release_tag}")"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   asset_name="\$(jq -r '.assets[] | select((.name | endswith("linux64.tar.gz")) and (.name | contains("debug") | not)) | .name' <<<"\$release_json" | head -n 1)"
   [[ -n "\$release_tag" ]] || { echo "failed to resolve junocash release tag" >&2; return 1; }
@@ -344,7 +345,8 @@ install_junocash() {
 
 install_juno_scan() {
   local release_json release_tag asset_name archive
-  release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-scan/releases/latest)"
+  release_tag="\${JUNO_SCAN_RELEASE_TAG:-v1.4.6}"
+  release_json="\$(curl -fsSL "https://api.github.com/repos/junocash-tools/juno-scan/releases/tags/\${release_tag}")"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   asset_name="\$(jq -r '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .name' <<<"\$release_json" | head -n 1)"
   [[ -n "\$release_tag" ]] || { echo "failed to resolve juno-scan release tag" >&2; return 1; }
@@ -363,7 +365,8 @@ install_juno_scan() {
 
 install_juno_txsign() {
   local release_json release_tag archive arch asset_name
-  release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+  release_tag="\${JUNO_TXSIGN_RELEASE_TAG:-v1.6}"
+  release_json="\$(curl -fsSL "https://api.github.com/repos/junocash-tools/juno-txsign/releases/tags/\${release_tag}")"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   case "\$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;
@@ -383,11 +386,13 @@ install_juno_txsign() {
 
   [[ -x /tmp/juno-txsign ]] || { echo "juno-txsign archive extraction failed" >&2; return 1; }
   sudo install -m 0755 /tmp/juno-txsign /usr/local/bin/juno-txsign
+  echo "\$release_tag" > "\$HOME/.juno-txsign-release-tag"
 }
 
 install_juno_txbuild() {
   local release_json release_tag archive arch asset_name
-  release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txbuild/releases/latest)"
+  release_tag="\${JUNO_TXBUILD_RELEASE_TAG:-v1.6.2}"
+  release_json="\$(curl -fsSL "https://api.github.com/repos/junocash-tools/juno-txbuild/releases/tags/\${release_tag}")"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   case "\$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;
@@ -407,6 +412,7 @@ install_juno_txbuild() {
 
   [[ -x /tmp/juno-txbuild ]] || { echo "juno-txbuild archive extraction failed" >&2; return 1; }
   sudo install -m 0755 /tmp/juno-txbuild /usr/local/bin/juno-txbuild
+  echo "\$release_tag" > "\$HOME/.juno-txbuild-release-tag"
 }
 
 install_intents_binaries() {
@@ -3128,9 +3134,12 @@ wait_for_juno_scan_catchup() {
 }
 
 write_bootstrap_metadata() {
-  local juno_release_tag juno_scan_release_tag block_height block_hash operator_address
+  local juno_release_tag juno_scan_release_tag juno_txsign_release_tag juno_txbuild_release_tag
+  local block_height block_hash operator_address
   juno_release_tag="\$(cat "\$HOME/.junocash-release-tag")"
   juno_scan_release_tag="\$(cat "\$HOME/.juno-scan-release-tag")"
+  juno_txsign_release_tag="\$(cat "\$HOME/.juno-txsign-release-tag")"
+  juno_txbuild_release_tag="\$(cat "\$HOME/.juno-txbuild-release-tag")"
   block_height="\$(sed -n '1p' "\$HOME/.junocash-blockstamp")"
   block_hash="\$(sed -n '2p' "\$HOME/.junocash-blockstamp")"
   operator_address="\$(awk -F= '/^OPERATOR_ADDRESS=/{print substr(\$0, index(\$0, "=") + 1); exit}' /etc/intents-juno/operator-stack.env 2>/dev/null || true)"
@@ -3142,6 +3151,8 @@ write_bootstrap_metadata() {
     --arg tss_signer_runtime_mode "__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__" \
     --arg junocash_release_tag "\$juno_release_tag" \
     --arg juno_scan_release_tag "\$juno_scan_release_tag" \
+    --arg juno_txsign_release_tag "\$juno_txsign_release_tag" \
+    --arg juno_txbuild_release_tag "\$juno_txbuild_release_tag" \
     --argjson synced_block_height "\$block_height" \
     --arg synced_block_hash "\$block_hash" \
     --arg operator_address "\$operator_address" \
@@ -3158,6 +3169,12 @@ write_bootstrap_metadata() {
       },
       juno_scan: {
         release_tag: \$juno_scan_release_tag
+      },
+      juno_txsign: {
+        release_tag: \$juno_txsign_release_tag
+      },
+      juno_txbuild: {
+        release_tag: \$juno_txbuild_release_tag
       },
       operator: {
         operator_id: \$operator_address
@@ -3568,14 +3585,19 @@ command_create() {
     "sudo rm -f /home/$builder_user/.ssh/authorized_keys /home/$builder_user/bootstrap-operator-stack.sh"
 
   local synced_block_height synced_block_hash junocash_release_tag juno_scan_release_tag
+  local juno_txsign_release_tag juno_txbuild_release_tag
   synced_block_height="$(jq -r '.junocashd.synced_block_height // empty' "$metadata_out")"
   synced_block_hash="$(jq -r '.junocashd.synced_block_hash // empty' "$metadata_out")"
   junocash_release_tag="$(jq -r '.junocashd.release_tag // empty' "$metadata_out")"
   juno_scan_release_tag="$(jq -r '.juno_scan.release_tag // empty' "$metadata_out")"
+  juno_txsign_release_tag="$(jq -r '.juno_txsign.release_tag // empty' "$metadata_out")"
+  juno_txbuild_release_tag="$(jq -r '.juno_txbuild.release_tag // empty' "$metadata_out")"
   [[ "$synced_block_height" =~ ^[0-9]+$ ]] || die "invalid synced block height in metadata: $synced_block_height"
   [[ "$synced_block_hash" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "invalid synced block hash in metadata: $synced_block_hash"
   [[ -n "$junocash_release_tag" ]] || die "missing junocash release tag in metadata"
   [[ -n "$juno_scan_release_tag" ]] || die "missing juno-scan release tag in metadata"
+  [[ -n "$juno_txsign_release_tag" ]] || die "missing juno-txsign release tag in metadata"
+  [[ -n "$juno_txbuild_release_tag" ]] || die "missing juno-txbuild release tag in metadata"
 
   if [[ -z "$image_name" ]]; then
     image_name="${name_prefix}-h${synced_block_height}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -3613,6 +3635,8 @@ command_create() {
     --arg builder_instance_id "$cleanup_instance_id" \
     --arg junocash_release_tag "$junocash_release_tag" \
     --arg juno_scan_release_tag "$juno_scan_release_tag" \
+    --arg juno_txsign_release_tag "$juno_txsign_release_tag" \
+    --arg juno_txbuild_release_tag "$juno_txbuild_release_tag" \
     --argjson synced_block_height "$synced_block_height" \
     --arg synced_block_hash "$synced_block_hash" \
     --arg juno_network "$juno_network" \
@@ -3638,6 +3662,12 @@ command_create() {
       },
       juno_scan: {
         release_tag: $juno_scan_release_tag
+      },
+      juno_txsign: {
+        release_tag: $juno_txsign_release_tag
+      },
+      juno_txbuild: {
+        release_tag: $juno_txbuild_release_tag
       },
       stack: {
         juno_network: $juno_network,

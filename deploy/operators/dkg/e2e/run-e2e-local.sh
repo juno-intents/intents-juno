@@ -43,7 +43,7 @@ OPERATOR_INSTANCE_TYPE="c7i.large"
 BRIDGE_VERIFIER_ADDRESS="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
 BRIDGE_GUEST_RELEASE_TAG="bridge-guests-latest"
 PROOF_SERVICES_RELEASE_TAG="shared-proof-services-image-latest"
-DKG_RELEASE_TAG="v0.1.0"
+DKG_RELEASE_TAG="v0.1.1"
 BASE_RPC_URL="https://sepolia.base.org"
 BASE_CHAIN_ID="84532"
 KEEP_INFRA=false
@@ -655,7 +655,8 @@ fi
 
 # Install juno-txsign if not present
 if ! command -v juno-txsign >/dev/null 2>&1; then
-  _rel_json="$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+  _rel_tag="${JUNO_TXSIGN_VERSION_DEFAULT:-v1.6}"
+  _rel_json="$(curl -fsSL "https://api.github.com/repos/junocash-tools/juno-txsign/releases/tags/${_rel_tag}")"
   _rel_tag="$(echo "$_rel_json" | jq -r '.tag_name // empty')"
   _asset="juno-txsign_${_rel_tag}_linux_amd64.tar.gz"
   _url="$(echo "$_rel_json" | jq -r --arg n "$_asset" '.assets[] | select(.name == $n) | .browser_download_url' | head -n 1)"

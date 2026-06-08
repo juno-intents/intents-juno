@@ -191,6 +191,10 @@ test_scan_note_lookup_uses_paginated_notes_api() {
     printf 'expected generate-juno-witness-metadata.sh to query paginated juno-scan notes endpoint\n' >&2
     exit 1
   fi
+  if [[ "$script_text" != *"/notes?limit=1000&direction=incoming"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to request incoming juno-scan notes only\n' >&2
+    exit 1
+  fi
   if [[ "$script_text" == *"spent=true&limit=1000"* ]]; then
     printf 'expected generate-juno-witness-metadata.sh not to force spent=true filter on notes endpoint\n' >&2
     exit 1
