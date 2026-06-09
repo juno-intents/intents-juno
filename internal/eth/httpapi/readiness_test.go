@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -12,9 +13,11 @@ import (
 type stubBalanceReader struct {
 	balances map[common.Address]*big.Int
 	err      error
+	calls    int
 }
 
 func (s *stubBalanceReader) BalanceAt(_ context.Context, account common.Address, _ *big.Int) (*big.Int, error) {
+	s.calls++
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -64,6 +67,41 @@ func TestMinSignerBalanceReadinessCheck_PropagatesBalanceErrors(t *testing.T) {
 	}
 	if !contains(err.Error(), "rpc down") {
 		t.Fatalf("error %q missing backend failure", err.Error())
+	}
+}
+
+func TestMinSignerBalanceReadinessCheckWithTTL_CachesSuccessfulReads(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	reader := &stubBalanceReader{
+		balances: map[common.Address]*big.Int{
+			addr: big.NewInt(5),
+		},
+	}
+	now := time.Unix(1000, 0)
+	check := MinSignerBalanceReadinessCheckWithTTL(reader, []common.Address{addr}, big.NewInt(2), 10*time.Second, func() time.Time {
+		return now
+	})
+	if check == nil {
+		t.Fatalf("expected readiness check")
+	}
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("first check: %v", err)
+	}
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("cached check: %v", err)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("balance calls before ttl: got=%d want=1", reader.calls)
+	}
+
+	now = now.Add(11 * time.Second)
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("expired check: %v", err)
+	}
+	if reader.calls != 2 {
+		t.Fatalf("balance calls after ttl: got=%d want=2", reader.calls)
 	}
 }
 

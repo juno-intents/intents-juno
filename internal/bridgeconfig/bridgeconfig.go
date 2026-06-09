@@ -19,6 +19,8 @@ var (
 	ErrNotReady      = errors.New("bridgeconfig: bridge settings not loaded")
 )
 
+const MinRefreshInterval = time.Minute
+
 type Caller interface {
 	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 }
@@ -106,6 +108,9 @@ func NewCache(loader Loader, interval time.Duration, log *slog.Logger) (*Cache, 
 	}
 	if interval <= 0 {
 		return nil, fmt.Errorf("%w: poll interval must be > 0", ErrInvalidConfig)
+	}
+	if interval < MinRefreshInterval {
+		interval = MinRefreshInterval
 	}
 	if log == nil {
 		log = slog.Default()

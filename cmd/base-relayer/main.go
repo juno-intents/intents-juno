@@ -20,6 +20,8 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 )
 
+const signerBalanceReadinessTTL = 10 * time.Second
+
 type config struct {
 	RPCURL                     string
 	ChainID                    uint64
@@ -128,7 +130,7 @@ func main() {
 	}
 
 	handler := httpapi.NewHandler(relayer, httpapi.Config{
-		ReadinessCheck:             httpapi.MinSignerBalanceReadinessCheck(client, signerAddrs, new(big.Int).SetUint64(cfg.MinReadyBalanceWei)),
+		ReadinessCheck:             httpapi.MinSignerBalanceReadinessCheckWithTTL(client, signerAddrs, new(big.Int).SetUint64(cfg.MinReadyBalanceWei), signerBalanceReadinessTTL, time.Now),
 		AuthToken:                  authToken,
 		AllowedContracts:           cfg.AllowedContracts,
 		AllowedSelectors:           cfg.AllowedSelectors,

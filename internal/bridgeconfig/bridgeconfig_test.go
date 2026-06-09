@@ -97,6 +97,18 @@ func TestCacheKeepsLastKnownSnapshotOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestNewCacheClampsAggressiveRefreshIntervals(t *testing.T) {
+	t.Parallel()
+
+	cache, err := NewCache(&stubBridgeLoader{}, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	if cache.interval < MinRefreshInterval {
+		t.Fatalf("interval: got=%s want at least %s", cache.interval, MinRefreshInterval)
+	}
+}
+
 type stubBridgeLoader struct {
 	snapshot Snapshot
 	err      error

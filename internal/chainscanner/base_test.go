@@ -22,6 +22,7 @@ type mockEthClient struct {
 	filterLogsErr  error
 	filterCalls    []ethereum.FilterQuery
 	headers        map[uint64]*types.Header
+	headerCalls    []*big.Int
 	headerErr      error
 	tagHeaders     map[int64]*types.Header
 	tagHeaderErrs  map[int64]error
@@ -37,6 +38,9 @@ func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([
 }
 
 func (m *mockEthClient) HeaderByNumber(_ context.Context, number *big.Int) (*types.Header, error) {
+	if number != nil {
+		m.headerCalls = append(m.headerCalls, new(big.Int).Set(number))
+	}
 	if m.headerErr != nil {
 		return nil, m.headerErr
 	}
@@ -488,6 +492,54 @@ func TestBaseScanner_PollChunking(t *testing.T) {
 	}
 }
 
+func TestBaseScanner_PollCatchupUsesBoundedHeaderLookups(t *testing.T) {
+	t.Parallel()
+
+	stateStore := NewMemoryStateStore()
+	ctx := context.Background()
+
+	client := &mockEthClient{
+		blockNumber: 1000,
+		headers: map[uint64]*types.Header{
+			1000: {Number: new(big.Int).SetUint64(1000)},
+		},
+		tagHeaders: map[int64]*types.Header{
+			int64(rpc.SafeBlockNumber): {
+				Number: new(big.Int).SetUint64(1000),
+			},
+		},
+	}
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:           client,
+		BridgeAddr:       common.HexToAddress("0x1234"),
+		StateStore:       stateStore,
+		ServiceName:      "test-scanner",
+		MaxBlocksPerPoll: 1000,
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	if err := scanner.poll(ctx, 1, func(_ context.Context, _ WithdrawRequestedEvent) error { return nil }); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	var numberedCalls int
+	for _, call := range client.headerCalls {
+		if call.Sign() >= 0 {
+			numberedCalls++
+		}
+	}
+	if numberedCalls > 1 {
+		t.Fatalf("numbered header calls: got=%d want <=1", numberedCalls)
+	}
+	if ref, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 1000); err != nil {
+		t.Fatalf("GetBlockRef(1000): %v", err)
+	} else if !ok || ref.Height != 1000 {
+		t.Fatalf("expected terminal block ref at height 1000")
+	}
+}
+
 func TestBaseScanner_PublishErrorStopsProcessing(t *testing.T) {
 	t.Parallel()
 
@@ -815,10 +867,10 @@ func TestBaseScanner_RewindsOnStoredHashMismatch(t *testing.T) {
 		t.Fatalf("last height: got=%d want=12", got)
 	}
 
-	if ref, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 11); err != nil {
+	if _, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 11); err != nil {
 		t.Fatalf("GetBlockRef(11): %v", err)
-	} else if !ok || ref.Hash != new11.Hash() {
-		t.Fatalf("block 11 not rewound to replacement hash")
+	} else if ok {
+		t.Fatalf("block 11 ref should be cleared after rewind")
 	}
 	if ref, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 12); err != nil {
 		t.Fatalf("GetBlockRef(12): %v", err)

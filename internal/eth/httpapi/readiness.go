@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -13,14 +15,32 @@ type BalanceReader interface {
 }
 
 func MinSignerBalanceReadinessCheck(reader BalanceReader, signers []common.Address, minBalance *big.Int) func(context.Context) error {
+	return MinSignerBalanceReadinessCheckWithTTL(reader, signers, minBalance, 0, time.Now)
+}
+
+func MinSignerBalanceReadinessCheckWithTTL(reader BalanceReader, signers []common.Address, minBalance *big.Int, ttl time.Duration, now func() time.Time) func(context.Context) error {
 	if reader == nil || len(signers) == 0 || minBalance == nil || minBalance.Sign() <= 0 {
 		return nil
+	}
+	if now == nil {
+		now = time.Now
 	}
 
 	required := new(big.Int).Set(minBalance)
 	signerSet := append([]common.Address(nil), signers...)
+	var mu sync.Mutex
+	var cachedUntil time.Time
 
 	return func(ctx context.Context) error {
+		if ttl > 0 {
+			mu.Lock()
+			if now().Before(cachedUntil) {
+				mu.Unlock()
+				return nil
+			}
+			mu.Unlock()
+		}
+
 		for _, signer := range signerSet {
 			balance, err := reader.BalanceAt(ctx, signer, nil)
 			if err != nil {
@@ -32,6 +52,11 @@ func MinSignerBalanceReadinessCheck(reader BalanceReader, signers []common.Addre
 			if balance.Cmp(required) < 0 {
 				return fmt.Errorf("signer %s balance %s below minimum %s", signer.Hex(), balance.String(), required.String())
 			}
+		}
+		if ttl > 0 {
+			mu.Lock()
+			cachedUntil = now().Add(ttl)
+			mu.Unlock()
 		}
 		return nil
 	}
