@@ -616,7 +616,7 @@ type stubWitnessRPCClient struct {
 	gotActionIndex uint32
 }
 
-func TestScanHTTPClientListWalletNotesRequestsIncomingDirectionAndFiltersResponse(t *testing.T) {
+func TestScanHTTPClientListWalletNotesRequestsOutgoingDirectionAndFiltersResponse(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -626,20 +626,20 @@ func TestScanHTTPClientListWalletNotesRequestsIncomingDirectionAndFiltersRespons
 		if got := r.URL.Query().Get("limit"); got != "1000" {
 			t.Fatalf("limit: got %q want 1000", got)
 		}
-		if got := r.URL.Query().Get("direction"); got != "incoming" {
-			t.Fatalf("direction: got %q want incoming", got)
+		if got := r.URL.Query().Get("direction"); got != "outgoing" {
+			t.Fatalf("direction: got %q want outgoing", got)
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"notes": []map[string]any{
 				{
-					"direction":    "outgoing",
+					"direction":    "incoming",
 					"txid":         "bad",
 					"action_index": 0,
 					"value_zat":    1,
 				},
 				{
-					"direction":    "incoming",
+					"direction":    "outgoing",
 					"txid":         "good",
 					"action_index": 1,
 					"value_zat":    2,
