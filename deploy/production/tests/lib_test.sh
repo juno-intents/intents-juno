@@ -207,6 +207,43 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_writes_right_sizing_controls() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .shared_services.ipfs_instance_type = "t3.medium"
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+    | .shared_roles.proof.requestor_task_cpu = 1024
+    | .shared_roles.proof.requestor_task_memory = 2048
+    | .shared_roles.proof.funder_task_cpu = 256
+    | .shared_roles.proof.funder_task_memory = 512
+    | .shared_roles.proof.role_instance_type = "t3.medium"
+    | .shared_roles.proof.role_min_size = 1
+    | .shared_roles.proof.role_desired_capacity = 1
+    | .shared_roles.proof.role_max_size = 1
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_proof_requestor_task_cpu' "$override_file")" "1024" "production shared tfvars include proof-requestor cpu right-sizing"
+  assert_eq "$(jq -r '.shared_proof_requestor_task_memory' "$override_file")" "2048" "production shared tfvars include proof-requestor memory right-sizing"
+  assert_eq "$(jq -r '.shared_proof_funder_task_cpu' "$override_file")" "256" "production shared tfvars include proof-funder cpu right-sizing"
+  assert_eq "$(jq -r '.shared_proof_funder_task_memory' "$override_file")" "512" "production shared tfvars include proof-funder memory right-sizing"
+  assert_eq "$(jq -r '.shared_proof_role_instance_type' "$override_file")" "t3.medium" "production shared tfvars include proof-role instance right-sizing"
+  assert_eq "$(jq -r '.shared_proof_role_min_size' "$override_file")" "1" "production shared tfvars include proof-role min capacity override"
+  assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars include proof-role desired capacity override"
+  assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "1" "production shared tfvars include proof-role max capacity override"
+  assert_eq "$(jq -r '.shared_ipfs_instance_type' "$override_file")" "t3.medium" "production shared tfvars include ipfs instance right-sizing"
+  rm -rf "$workdir"
+}
+
 test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused() {
   local workdir override_file
   workdir="$(mktemp -d)"
@@ -4189,6 +4226,7 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
+  test_write_shared_terraform_override_tfvars_writes_right_sizing_controls
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs

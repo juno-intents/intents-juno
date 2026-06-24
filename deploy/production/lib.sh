@@ -680,7 +680,7 @@ production_write_shared_terraform_override_tfvars() {
 
   local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id bridge_guest_release_tag
   local bridge_paused shared_proof_requestor_desired_count shared_proof_funder_desired_count
-  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
+  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_services_json shared_terraform_dir
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
@@ -698,6 +698,7 @@ production_write_shared_terraform_override_tfvars() {
   app_role_json="$(production_inventory_app_role_json "$inventory")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   proof_role_json="$(production_json_optional "$inventory" '.shared_roles.proof // {}')"
+  shared_services_json="$(production_json_optional "$inventory" '.shared_services // {}')"
   live_e2e_json="$(production_json_optional "$inventory" '.shared_services.live_e2e // {}')"
   bridge_paused="$(jq -r '.bridge_api.paused // .bridge_api_paused // .bridge_paused // false' <<<"$app_role_json")"
   if [[ "$bridge_paused" == "true" ]]; then
@@ -932,6 +933,8 @@ production_write_shared_terraform_override_tfvars() {
     --argjson shared_proof_funder_desired_count "$shared_proof_funder_desired_count" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
     --argjson shared_service_client_cidr_blocks "$shared_service_client_cidr_blocks_json" \
+    --argjson proof_role "$proof_role_json" \
+    --argjson shared_services "$shared_services_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -952,11 +955,26 @@ production_write_shared_terraform_override_tfvars() {
       shared_ecs_desired_count: 1,
       shared_proof_requestor_desired_count: $shared_proof_requestor_desired_count,
       shared_proof_funder_desired_count: $shared_proof_funder_desired_count,
-      shared_proof_role_instance_type: "c7i.large",
-      shared_proof_role_min_size: 1,
-      shared_proof_role_desired_capacity: 1,
-      shared_proof_role_max_size: 2
+      shared_proof_role_instance_type: (($proof_role.role_instance_type // "c7i.large") | tostring),
+      shared_proof_role_min_size: ($proof_role.role_min_size // 1),
+      shared_proof_role_desired_capacity: ($proof_role.role_desired_capacity // 1),
+      shared_proof_role_max_size: ($proof_role.role_max_size // 2)
     }
+    + (if ($proof_role.requestor_task_cpu? | type) == "number" then {
+      shared_proof_requestor_task_cpu: $proof_role.requestor_task_cpu
+    } else {} end)
+    + (if ($proof_role.requestor_task_memory? | type) == "number" then {
+      shared_proof_requestor_task_memory: $proof_role.requestor_task_memory
+    } else {} end)
+    + (if ($proof_role.funder_task_cpu? | type) == "number" then {
+      shared_proof_funder_task_cpu: $proof_role.funder_task_cpu
+    } else {} end)
+    + (if ($proof_role.funder_task_memory? | type) == "number" then {
+      shared_proof_funder_task_memory: $proof_role.funder_task_memory
+    } else {} end)
+    + (if ($shared_services.ipfs_instance_type? | type) == "string" and ($shared_services.ipfs_instance_type | length) > 0 then {
+      shared_ipfs_instance_type: $shared_services.ipfs_instance_type
+    } else {} end)
     + (if $shared_bridge_guest_release_tag == "" then {} else {
       shared_bridge_guest_release_tag: $shared_bridge_guest_release_tag
     } end)
