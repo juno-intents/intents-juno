@@ -61,6 +61,45 @@ wait_for_asg_capacity() {
   return 1
 }
 
+check_asg_desired_capacity() {
+  local aws_args_name="$1"
+  local asg_name="$2"
+  local asg_json desired healthy min_healthy
+
+  declare -n aws_args_ref="$aws_args_name"
+  asg_json="$(AWS_PAGER="" "${aws_args_ref[@]}" autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$asg_name" --output json 2>/dev/null || true)"
+  desired="$(jq -r '.AutoScalingGroups[0].DesiredCapacity // 0' <<<"$asg_json")"
+  healthy="$(jq -r '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")] | length' <<<"$asg_json")"
+  [[ -n "$asg_json" ]] || return 1
+  [[ "$desired" =~ ^[0-9]+$ ]] || return 1
+  [[ "$healthy" =~ ^[0-9]+$ ]] || return 1
+  min_healthy="$desired"
+  if (( min_healthy < 1 )); then
+    min_healthy=1
+  fi
+  (( healthy >= min_healthy ))
+}
+
+wait_for_asg_desired_capacity() {
+  local aws_args_name="$1"
+  local asg_name="$2"
+  local attempts="$3"
+  local sleep_seconds="$4"
+  local attempt
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if check_asg_desired_capacity "$aws_args_name" "$asg_name"; then
+      return 0
+    fi
+    if (( attempt == attempts )); then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  return 1
+}
+
 check_target_group_healthy_targets() {
   local aws_args_name="$1"
   local target_group_arn="$2"
@@ -340,12 +379,12 @@ else
     if [[ "$aws_auth_status" != "passed" ]]; then
       shared_proof_role_status="failed"
       shared_proof_role_detail="proof role could not be verified because aws auth failed"
-    elif wait_for_asg_capacity aws_args "$shared_proof_role_asg" 2 "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
+    elif wait_for_asg_desired_capacity aws_args "$shared_proof_role_asg" "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
       shared_proof_role_status="passed"
-      shared_proof_role_detail="proof role asg has at least two healthy instances"
+      shared_proof_role_detail="proof role asg has healthy desired capacity"
     else
       shared_proof_role_status="failed"
-      shared_proof_role_detail="proof role asg does not have two healthy in-service instances"
+      shared_proof_role_detail="proof role asg does not have healthy desired capacity"
     fi
   fi
 

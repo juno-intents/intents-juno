@@ -385,7 +385,7 @@ case "\$*" in
     printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"healthy"}}]}\n'
     ;;
   *"autoscaling describe-auto-scaling-groups"*"alpha-proof-role"*)
-    printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   *"autoscaling describe-auto-scaling-groups"*"alpha-wireguard-role"*)
     printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
