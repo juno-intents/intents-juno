@@ -218,6 +218,50 @@ variable "shared_ecs_task_memory" {
   default     = 8192
 }
 
+variable "shared_proof_requestor_task_cpu" {
+  description = "Optional Fargate CPU units for the proof-requestor task. Defaults to shared_ecs_task_cpu."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_requestor_task_cpu == null || var.shared_proof_requestor_task_cpu > 0
+    error_message = "shared_proof_requestor_task_cpu must be > 0 when set."
+  }
+}
+
+variable "shared_proof_requestor_task_memory" {
+  description = "Optional Fargate memory in MiB for the proof-requestor task. Defaults to shared_ecs_task_memory."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_requestor_task_memory == null || var.shared_proof_requestor_task_memory > 0
+    error_message = "shared_proof_requestor_task_memory must be > 0 when set."
+  }
+}
+
+variable "shared_proof_funder_task_cpu" {
+  description = "Optional Fargate CPU units for the proof-funder task. Defaults to shared_ecs_task_cpu."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_funder_task_cpu == null || var.shared_proof_funder_task_cpu > 0
+    error_message = "shared_proof_funder_task_cpu must be > 0 when set."
+  }
+}
+
+variable "shared_proof_funder_task_memory" {
+  description = "Optional Fargate memory in MiB for the proof-funder task. Defaults to shared_ecs_task_memory."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.shared_proof_funder_task_memory == null || var.shared_proof_funder_task_memory > 0
+    error_message = "shared_proof_funder_task_memory must be > 0 when set."
+  }
+}
+
 variable "shared_ecs_assign_public_ip" {
   description = "Whether proof-service tasks receive public IPs."
   type        = bool

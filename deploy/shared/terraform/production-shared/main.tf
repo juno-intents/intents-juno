@@ -74,6 +74,10 @@ locals {
   shared_sp1_requestor_address                 = trimspace(var.shared_sp1_requestor_address)
   shared_proof_requestor_desired_count         = coalesce(var.shared_proof_requestor_desired_count, var.shared_ecs_desired_count)
   shared_proof_funder_desired_count            = coalesce(var.shared_proof_funder_desired_count, var.shared_ecs_desired_count)
+  shared_proof_requestor_task_cpu              = coalesce(var.shared_proof_requestor_task_cpu, var.shared_ecs_task_cpu)
+  shared_proof_requestor_task_memory           = coalesce(var.shared_proof_requestor_task_memory, var.shared_ecs_task_memory)
+  shared_proof_funder_task_cpu                 = coalesce(var.shared_proof_funder_task_cpu, var.shared_ecs_task_cpu)
+  shared_proof_funder_task_memory              = coalesce(var.shared_proof_funder_task_memory, var.shared_ecs_task_memory)
   shared_proof_runtime_enabled                 = local.shared_proof_requestor_desired_count > 0 || local.shared_proof_funder_desired_count > 0
   shared_proof_guest_release_tag               = trimspace(var.shared_bridge_guest_release_tag)
   shared_deposit_image_id                      = lower(trimspace(var.shared_deposit_image_id))
@@ -1107,8 +1111,8 @@ resource "aws_ecs_task_definition" "proof_requestor" {
   family                   = "${local.resource_name}-proof-requestor"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(var.shared_ecs_task_cpu)
-  memory                   = tostring(var.shared_ecs_task_memory)
+  cpu                      = tostring(local.shared_proof_requestor_task_cpu)
+  memory                   = tostring(local.shared_proof_requestor_task_memory)
   execution_role_arn       = aws_iam_role.proof_requestor_execution.arn
   task_role_arn            = aws_iam_role.proof_requestor_task.arn
 
@@ -1170,8 +1174,8 @@ resource "aws_ecs_task_definition" "proof_funder" {
   family                   = "${local.resource_name}-proof-funder"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(var.shared_ecs_task_cpu)
-  memory                   = tostring(var.shared_ecs_task_memory)
+  cpu                      = tostring(local.shared_proof_funder_task_cpu)
+  memory                   = tostring(local.shared_proof_funder_task_memory)
   execution_role_arn       = aws_iam_role.proof_funder_execution.arn
   task_role_arn            = aws_iam_role.proof_funder_task.arn
 
