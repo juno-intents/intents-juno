@@ -216,8 +216,10 @@ test_write_shared_terraform_override_tfvars_writes_right_sizing_controls() {
     | .shared_postgres_password = "mainnet-postgres-password"
     | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
     | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .shared_services.ipfs_ami_id = "ami-0ipfscafefeed0000"
     | .shared_services.ipfs_instance_type = "t3.medium"
     | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+    | .shared_roles.proof.ami_id = "ami-0proofcafefeed000"
     | .shared_roles.proof.requestor_task_cpu = 1024
     | .shared_roles.proof.requestor_task_memory = 2048
     | .shared_roles.proof.funder_task_cpu = 256
@@ -240,6 +242,8 @@ test_write_shared_terraform_override_tfvars_writes_right_sizing_controls() {
   assert_eq "$(jq -r '.shared_proof_role_min_size' "$override_file")" "1" "production shared tfvars include proof-role min capacity override"
   assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars include proof-role desired capacity override"
   assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "1" "production shared tfvars include proof-role max capacity override"
+  assert_eq "$(jq -r '.shared_proof_role_ami_id' "$override_file")" "ami-0proofcafefeed000" "production shared tfvars include proof-role ami pin"
+  assert_eq "$(jq -r '.shared_ipfs_ami_id' "$override_file")" "ami-0ipfscafefeed0000" "production shared tfvars include ipfs ami pin"
   assert_eq "$(jq -r '.shared_ipfs_instance_type' "$override_file")" "t3.medium" "production shared tfvars include ipfs instance right-sizing"
   rm -rf "$workdir"
 }

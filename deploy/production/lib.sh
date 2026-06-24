@@ -972,6 +972,12 @@ production_write_shared_terraform_override_tfvars() {
     + (if ($proof_role.funder_task_memory? | type) == "number" then {
       shared_proof_funder_task_memory: $proof_role.funder_task_memory
     } else {} end)
+    + (if ($proof_role.ami_id? | type) == "string" and ($proof_role.ami_id | length) > 0 then {
+      shared_proof_role_ami_id: $proof_role.ami_id
+    } else {} end)
+    + (if ($shared_services.ipfs_ami_id? | type) == "string" and ($shared_services.ipfs_ami_id | length) > 0 then {
+      shared_ipfs_ami_id: $shared_services.ipfs_ami_id
+    } else {} end)
     + (if ($shared_services.ipfs_instance_type? | type) == "string" and ($shared_services.ipfs_instance_type | length) > 0 then {
       shared_ipfs_instance_type: $shared_services.ipfs_instance_type
     } else {} end)
