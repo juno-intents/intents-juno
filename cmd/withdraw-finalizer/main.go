@@ -109,6 +109,10 @@ func main() {
 
 		queueDriver                    = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers                   = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		proofQueueDriver               = flag.String("proof-queue-driver", "", "proof request/result queue driver override: kafka|postgres|stdio (defaults to --queue-driver)")
+		proofQueueBrokers              = flag.String("proof-queue-brokers", "", "comma-separated proof request/result queue brokers (defaults to --queue-brokers)")
+		proofQueuePostgresDSN          = flag.String("proof-queue-postgres-dsn", "", "Postgres DSN for proof request/result postgres queue (defaults to --postgres-dsn)")
+		proofQueuePostgresDSNEnv       = flag.String("proof-queue-postgres-dsn-env", "", "env var containing Postgres DSN for proof request/result postgres queue")
 		proofShadowQueueDriver         = flag.String("proof-shadow-queue-driver", "", "optional proof request shadow queue driver: kafka|postgres|stdio")
 		proofShadowQueueBrokers        = flag.String("proof-shadow-queue-brokers", "", "comma-separated proof request shadow queue brokers")
 		proofShadowQueuePostgresDSN    = flag.String("proof-shadow-queue-postgres-dsn", "", "Postgres DSN for proof request postgres shadow queue (defaults to --postgres-dsn)")
@@ -315,8 +319,10 @@ func main() {
 
 	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
 		driver:               *proofDriver,
-		queueDriver:          *queueDriver,
-		queueBrokers:         queue.SplitCommaList(*queueBrokers),
+		queueDriver:          proofQueueDriverOrDefault(*proofQueueDriver, *queueDriver),
+		queueBrokers:         proofQueueBrokersOrDefault(queue.SplitCommaList(*proofQueueBrokers), queue.SplitCommaList(*queueBrokers)),
+		queuePostgresDSN:     *proofQueuePostgresDSN,
+		queuePostgresDSNEnv:  *proofQueuePostgresDSNEnv,
 		storePostgresDSN:     *postgresDSN,
 		shadowDriver:         *proofShadowQueueDriver,
 		shadowBrokers:        queue.SplitCommaList(*proofShadowQueueBrokers),
@@ -932,6 +938,8 @@ type initProofClientConfig struct {
 	driver               string
 	queueDriver          string
 	queueBrokers         []string
+	queuePostgresDSN     string
+	queuePostgresDSNEnv  string
 	storePostgresDSN     string
 	shadowDriver         string
 	shadowBrokers        []string
@@ -962,7 +970,7 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 		return &proofclient.StaticClient{Result: proofclient.Result{Seal: seal}}, func() {}, nil
 	case "queue":
 		if strings.EqualFold(strings.TrimSpace(cfg.queueDriver), queue.DriverStdio) {
-			return nil, func() {}, fmt.Errorf("proof-driver=queue is incompatible with queue-driver=stdio; use --proof-driver=mock for local stdio mode")
+			return nil, func() {}, fmt.Errorf("proof-driver=queue is incompatible with proof queue driver=stdio; use --proof-driver=mock for local stdio mode")
 		}
 		group := strings.TrimSpace(cfg.proofGroup)
 		if group == "" {
@@ -977,6 +985,8 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 		producer, err := proofQueueProducer(ctx, proofQueueProducerOptions{
 			Driver:               cfg.queueDriver,
 			Brokers:              cfg.queueBrokers,
+			PostgresDSN:          cfg.queuePostgresDSN,
+			PostgresDSNEnv:       cfg.queuePostgresDSNEnv,
 			StorePostgresDSN:     cfg.storePostgresDSN,
 			ShadowDriver:         cfg.shadowDriver,
 			ShadowBrokers:        cfg.shadowBrokers,
@@ -989,14 +999,22 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 		if err != nil {
 			return nil, func() {}, err
 		}
-		consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
-			Driver:        cfg.queueDriver,
-			Brokers:       cfg.queueBrokers,
-			Group:         group,
-			Topics:        []string{cfg.proofResultTopic, cfg.proofFailureTopic},
-			KafkaMaxBytes: cfg.queueMaxBytes,
-			MaxLineBytes:  cfg.maxLineBytes,
+		consumerCfg, err := proofQueueConsumerConfig(proofQueueConsumerOptions{
+			Driver:           cfg.queueDriver,
+			Brokers:          cfg.queueBrokers,
+			PostgresDSN:      cfg.queuePostgresDSN,
+			PostgresDSNEnv:   cfg.queuePostgresDSNEnv,
+			StorePostgresDSN: cfg.storePostgresDSN,
+			Group:            group,
+			Topics:           []string{cfg.proofResultTopic, cfg.proofFailureTopic},
+			QueueMaxBytes:    cfg.queueMaxBytes,
+			MaxLineBytes:     cfg.maxLineBytes,
 		})
+		if err != nil {
+			_ = producer.Close()
+			return nil, func() {}, err
+		}
+		consumer, err := queue.NewConsumer(ctx, consumerCfg)
 		if err != nil {
 			_ = producer.Close()
 			return nil, func() {}, err
@@ -1041,6 +1059,18 @@ type proofQueueProducerOptions struct {
 	ShadowRequired       bool
 	ShadowTimeout        time.Duration
 	Log                  *slog.Logger
+}
+
+type proofQueueConsumerOptions struct {
+	Driver           string
+	Brokers          []string
+	PostgresDSN      string
+	PostgresDSNEnv   string
+	StorePostgresDSN string
+	Group            string
+	Topics           []string
+	QueueMaxBytes    int
+	MaxLineBytes     int
 }
 
 type proofQueueProducerInitResult struct {
@@ -1116,6 +1146,47 @@ func proofQueueProducer(ctx context.Context, opts proofQueueProducerOptions, fac
 		return nil, err
 	}
 	return producer, nil
+}
+
+func proofQueueDriverOrDefault(proofQueueDriver, defaultQueueDriver string) string {
+	if strings.TrimSpace(proofQueueDriver) != "" {
+		return proofQueueDriver
+	}
+	return defaultQueueDriver
+}
+
+func proofQueueBrokersOrDefault(proofQueueBrokers, defaultQueueBrokers []string) []string {
+	if len(proofQueueBrokers) > 0 {
+		return append([]string(nil), proofQueueBrokers...)
+	}
+	return append([]string(nil), defaultQueueBrokers...)
+}
+
+func proofQueueConsumerConfig(opts proofQueueConsumerOptions) (queue.ConsumerConfig, error) {
+	cfg := queue.ConsumerConfig{
+		Driver:        strings.TrimSpace(opts.Driver),
+		Group:         opts.Group,
+		Topics:        opts.Topics,
+		KafkaMaxBytes: opts.QueueMaxBytes,
+		MaxLineBytes:  opts.MaxLineBytes,
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = opts.Brokers
+	case queue.DriverPostgres:
+		dsn, err := proofQueuePostgresDSN(opts.PostgresDSN, opts.PostgresDSNEnv, opts.StorePostgresDSN)
+		if err != nil {
+			return queue.ConsumerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ConsumerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
 }
 
 func (opts proofQueueProducerOptions) warnProofShadowQueue(stage string, topic string, err error) {

@@ -198,6 +198,75 @@ func TestDepositProofQueueProducerConfiguresPostgresShadow(t *testing.T) {
 	}
 }
 
+func TestDepositProofQueueTransportDefaultsToMainQueue(t *testing.T) {
+	if got, want := proofQueueDriverOrDefault("", queue.DriverKafka), queue.DriverKafka; got != want {
+		t.Fatalf("proofQueueDriverOrDefault empty = %q, want %q", got, want)
+	}
+	if got, want := proofQueueDriverOrDefault(queue.DriverPostgres, queue.DriverKafka), queue.DriverPostgres; got != want {
+		t.Fatalf("proofQueueDriverOrDefault override = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(proofQueueBrokersOrDefault(nil, []string{"main-1:9098"}), ","), "main-1:9098"; got != want {
+		t.Fatalf("proofQueueBrokersOrDefault empty = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(proofQueueBrokersOrDefault([]string{"proof-1:9098"}, []string{"main-1:9098"}), ","), "proof-1:9098"; got != want {
+		t.Fatalf("proofQueueBrokersOrDefault override = %q, want %q", got, want)
+	}
+}
+
+func TestDepositProofQueueConsumerConfiguresPostgres(t *testing.T) {
+	cfg, err := proofQueueConsumerConfig(proofQueueConsumerOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "deposit-proof-group",
+		Topics:           []string{"proof.fulfillments.v1", "proof.failures.v1"},
+		QueueMaxBytes:    123,
+		MaxLineBytes:     456,
+	})
+	if err != nil {
+		t.Fatalf("proofQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := cfg.Group, "deposit-proof-group"; got != want {
+		t.Fatalf("Group = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Topics, ","), "proof.fulfillments.v1,proof.failures.v1"; got != want {
+		t.Fatalf("Topics = %q, want %q", got, want)
+	}
+}
+
+func TestDepositProofQueueProducerConfiguresPostgresPrimary(t *testing.T) {
+	var configs []queue.ProducerConfig
+	factory := func(ctx context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		return &recordingDepositProofProducer{name: cfg.Driver}, nil
+	}
+
+	producer, err := proofQueueProducer(context.Background(), proofQueueProducerOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+	}, factory)
+	if err != nil {
+		t.Fatalf("proofQueueProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("config count = %d, want 1", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := configs[0].PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("primary PostgresDSN = %q, want %q", got, want)
+	}
+}
+
 func TestDepositProofQueueProducerToleratesOptionalShadowInitFailure(t *testing.T) {
 	shadowErr := errors.New("shadow init down")
 	var calls []string
