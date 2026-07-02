@@ -992,6 +992,32 @@ test_proof_request_relayers_can_shadow_to_postgres_queue() {
   fi
 }
 
+test_proof_request_relayers_can_cut_over_to_postgres_queue() {
+  local script_text
+  local proof_queue_arg_refs
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--proof-queue-driver <driver>' "run-testnet-e2e exposes proof request/result queue driver flag"
+  assert_contains "$script_text" 'local proof_queue_driver=""' "run-testnet-e2e tracks proof request/result queue driver"
+  assert_contains "$script_text" '--proof-queue-driver)' "run-testnet-e2e parses proof request/result queue driver"
+  assert_contains "$script_text" '[[ "$proof_queue_driver" == "postgres" ]] || die "--proof-queue-driver supports only postgres during Phase 5 cutover"' "run-testnet-e2e rejects unsupported proof queue drivers"
+  assert_contains "$script_text" '[[ -z "$proof_shadow_queue_driver" ]] || die "--proof-shadow-queue-driver must be empty when --proof-queue-driver postgres is enabled"' "run-testnet-e2e prevents duplicate postgres proof queue writes during cutover"
+  assert_contains "$script_text" 'local -a proof_queue_args=()' "run-testnet-e2e builds reusable proof queue args"
+  assert_contains "$script_text" 'local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "shared proof services default to kafka queue args"
+  assert_contains "$script_text" 'proof_queue_args+=(--proof-queue-driver postgres)' "proof request relayers use postgres as the primary proof queue when enabled"
+  assert_contains "$script_text" 'proof_service_queue_args=(--queue-driver postgres)' "shared proof services use postgres as the primary proof queue when enabled"
+  proof_queue_arg_refs="$(grep -F -c '"${proof_queue_args[@]}" \' <<<"$script_text" | tr -d ' ')"
+  if (( proof_queue_arg_refs != 4 )); then
+    printf 'assert_count failed: proof queue args must be passed to distributed and runner relayers (references=%s)\n' "$proof_queue_arg_refs" >&2
+    exit 1
+  fi
+  proof_service_queue_arg_refs="$(grep -F -c '"${proof_service_queue_args[@]}"' <<<"$script_text" | tr -d ' ')"
+  if (( proof_service_queue_arg_refs != 2 )); then
+    printf 'assert_count failed: proof service queue args must be passed to proof-requestor and proof-funder (references=%s)\n' "$proof_service_queue_arg_refs" >&2
+    exit 1
+  fi
+}
+
 test_shared_proof_services_restart_after_topic_ensure() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1266,6 +1292,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_shared_infra_validation_precreates_bridge_and_proof_topics
   test_base_event_scanner_can_shadow_to_postgres_queue
   test_proof_request_relayers_can_shadow_to_postgres_queue
+  test_proof_request_relayers_can_cut_over_to_postgres_queue
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait

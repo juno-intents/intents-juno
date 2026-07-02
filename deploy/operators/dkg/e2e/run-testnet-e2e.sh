@@ -114,6 +114,7 @@ Options:
                                    optional base-event-scanner shadow queue driver during Phase 5 (postgres)
   --proof-shadow-queue-driver <driver>
                                    optional deposit-relayer/withdraw-finalizer proof request shadow queue driver during Phase 5 (postgres)
+  --proof-queue-driver <driver>    optional deposit-relayer/withdraw-finalizer proof request/result primary queue driver during Phase 5 cutover (postgres)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
@@ -3434,6 +3435,7 @@ command_run() {
   local shared_output=""
   local base_event_shadow_queue_driver=""
   local proof_shadow_queue_driver=""
+  local proof_queue_driver=""
   local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
   local relayer_runtime_operator_ssh_user=""
@@ -3845,6 +3847,11 @@ command_run() {
         proof_shadow_queue_driver="$2"
         shift 2
         ;;
+      --proof-queue-driver)
+        [[ $# -ge 2 ]] || die "missing value for --proof-queue-driver"
+        proof_queue_driver="$2"
+        shift 2
+        ;;
       --relayer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
         relayer_runtime_mode="$(lower "$2")"
@@ -4098,6 +4105,16 @@ command_run() {
   fi
   if [[ -n "$proof_shadow_queue_driver" ]]; then
     [[ "$proof_shadow_queue_driver" == "postgres" ]] || die "--proof-shadow-queue-driver supports only postgres during Phase 5 shadowing"
+  fi
+  if [[ -n "$proof_queue_driver" ]]; then
+    [[ "$proof_queue_driver" == "postgres" ]] || die "--proof-queue-driver supports only postgres during Phase 5 cutover"
+    [[ -z "$proof_shadow_queue_driver" ]] || die "--proof-shadow-queue-driver must be empty when --proof-queue-driver postgres is enabled"
+  fi
+  local -a proof_queue_args=()
+  local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
+  if [[ "$proof_queue_driver" == "postgres" ]]; then
+    proof_queue_args+=(--proof-queue-driver postgres)
+    proof_service_queue_args=(--queue-driver postgres)
   fi
   local -a proof_shadow_queue_args=()
   if [[ "$proof_shadow_queue_driver" == "postgres" ]]; then
@@ -5865,8 +5882,7 @@ command_run() {
       "--failure-topic" "$proof_failure_topic"
       "--max-inflight-requests" "32"
       "--request-timeout" "$sp1_request_timeout"
-      "--queue-driver" "kafka"
-      "--queue-brokers" "$shared_kafka_brokers"
+      "${proof_service_queue_args[@]}"
       "--queue-group" "$proof_requestor_group"
       "--sp1-bin" "/usr/local/bin/sp1-prover-adapter"
     )
@@ -5878,8 +5894,7 @@ command_run() {
       "--sp1-requestor-address" "$sp1_requestor_address"
       "--min-balance-wei" "$sp1_required_credit_buffer_wei"
       "--critical-balance-wei" "$sp1_critical_credit_threshold_wei"
-      "--queue-driver" "kafka"
-      "--queue-brokers" "$shared_kafka_brokers"
+      "${proof_service_queue_args[@]}"
       "--sp1-bin" "/usr/local/bin/sp1-prover-adapter"
     )
     local proof_requestor_ecs_command_json
@@ -6788,6 +6803,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$deposit_relayer_proof_group" \
+          "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
@@ -6896,6 +6912,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$withdraw_finalizer_proof_group" \
+          "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
@@ -6930,6 +6947,7 @@ command_run() {
             --proof-result-topic "$proof_result_topic" \
             --proof-failure-topic "$proof_failure_topic" \
             --proof-response-group "$deposit_relayer_proof_group" \
+            "${proof_queue_args[@]}" \
             "${proof_shadow_queue_args[@]}" \
             --submit-timeout "$relayer_submit_timeout" \
             --queue-driver kafka \
@@ -7012,6 +7030,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$withdraw_finalizer_proof_group" \
+          "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
