@@ -951,6 +951,9 @@ EOF
     | .shared_proof_funder_service_name = {
       value: "alpha-proof-funder"
     }
+    | .shared_queue_driver = {
+      value: "postgres"
+    }
     | .shared_proof_role = {
         value: {
           asg: "alpha-proof-role",
@@ -999,6 +1002,7 @@ EOF
   assert_eq "$(jq -r '.shared_roles.wireguard.backoffice_private_endpoint' "$shared_manifest")" "10.0.10.21" "shared roles wireguard backoffice endpoint"
   assert_eq "$(jq -r '.wireguard_role.publish_public_dns' "$shared_manifest")" "false" "wireguard role suppresses public dns"
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
+  assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "postgres" "shared queue driver"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "ecs proof requestor service name"

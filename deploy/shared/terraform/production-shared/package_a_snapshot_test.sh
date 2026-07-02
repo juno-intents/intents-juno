@@ -162,6 +162,7 @@ main() {
   assert_contains "$outputs_tf" 'output "shared_ipfs_nlb_dns"' "production-shared keeps the legacy shared IPFS dns output name stable"
   assert_contains "$outputs_tf" 'output "shared_ipfs_api_url"' "production-shared exports the shared IPFS api url"
   assert_contains "$outputs_tf" 'output "shared_ipfs_api_auth_secret_arn"' "production-shared exports the shared IPFS bearer token secret ARN"
+  assert_contains "$outputs_tf" 'output "shared_queue_driver"' "production-shared exports the selected shared queue transport"
   assert_contains "$outputs_tf" 'output "shared_kafka_critical_hmac_secret_arn"' "production-shared exports the Kafka critical-topic HMAC secret ARN"
   assert_contains "$outputs_tf" 'output "shared_proof_role_asg_name"' "production-shared exports the proof-role autoscaling group name"
   assert_contains "$outputs_tf" 'output "shared_proof_role_launch_template_id"' "production-shared exports the proof-role launch template id"

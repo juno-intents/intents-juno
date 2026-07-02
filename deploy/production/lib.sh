@@ -2654,7 +2654,7 @@ production_render_shared_manifest() {
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
-  local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
+  local postgres_endpoint postgres_port queue_driver kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
   local shared_ecs_cluster_arn shared_proof_requestor_service_name shared_proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
@@ -2700,6 +2700,10 @@ production_render_shared_manifest() {
   postgres_endpoint="$(production_tf_output_value "$tf_json" "shared_postgres_endpoint" true)"
   postgres_cluster_arn="$(production_tf_output_value "$tf_json" "shared_postgres_cluster_arn" false)"
   postgres_port="$(production_tf_output_value "$tf_json" "shared_postgres_port" true)"
+  queue_driver="$(production_tf_output_value "$tf_json" "shared_queue_driver" false)"
+  if [[ -z "$queue_driver" ]]; then
+    queue_driver="kafka"
+  fi
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
   shared_ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
@@ -2879,6 +2883,7 @@ production_render_shared_manifest() {
     --arg postgres_endpoint "$postgres_endpoint" \
     --arg postgres_cluster_arn "$postgres_cluster_arn" \
     --arg postgres_port "$postgres_port" \
+    --arg queue_driver "$queue_driver" \
     --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
     --arg shared_ecs_cluster_arn "$shared_ecs_cluster_arn" \
@@ -2942,6 +2947,9 @@ production_render_shared_manifest() {
           endpoint: $postgres_endpoint,
           cluster_arn: (if $postgres_cluster_arn == "" then null else $postgres_cluster_arn end),
           port: ($postgres_port | tonumber)
+        },
+        queue: {
+          driver: $queue_driver
         },
         kafka: {
           cluster_arn: (if $kafka_cluster_arn == "" then null else $kafka_cluster_arn end),

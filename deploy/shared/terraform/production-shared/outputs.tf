@@ -38,6 +38,11 @@ output "shared_kafka_bootstrap_brokers_tls" {
   value       = aws_msk_cluster.shared.bootstrap_brokers_tls
 }
 
+output "shared_queue_driver" {
+  description = "Selected queue transport for shared proof services."
+  value       = local.shared_queue_driver
+}
+
 output "shared_sp1_requestor_address" {
   description = "Shared SP1 requestor address used by proof services."
   value       = var.shared_sp1_requestor_address
