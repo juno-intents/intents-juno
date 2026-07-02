@@ -4193,7 +4193,6 @@ command_run() {
   fi
 
   [[ -n "$shared_postgres_dsn" ]] || die "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)"
-  [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (runner-side shared-infra checkpoint package pin/fetch verification)"
   if [[ -n "$base_event_shadow_queue_driver" ]]; then
     base_event_shadow_queue_driver="$(lower "$base_event_shadow_queue_driver")"
@@ -4223,6 +4222,15 @@ command_run() {
     [[ -z "$proof_shadow_queue_driver" ]] || die "--proof-shadow-queue-driver must be empty when --proof-queue-driver postgres is enabled"
   fi
   local effective_checkpoint_queue_driver="${checkpoint_queue_driver:-kafka}"
+  local effective_operator_queue_driver="${operator_queue_driver:-kafka}"
+  local effective_proof_queue_driver="${proof_queue_driver:-kafka}"
+  local effective_shared_validation_queue_driver="kafka"
+  if [[ "$effective_checkpoint_queue_driver" == "postgres" && "$effective_operator_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then
+    effective_shared_validation_queue_driver="postgres"
+  fi
+  if [[ "$effective_shared_validation_queue_driver" == "kafka" ]]; then
+    [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required when any active queue path uses kafka"
+  fi
   local -a proof_queue_args=()
   local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
   if [[ "$proof_queue_driver" == "postgres" ]]; then
@@ -4237,7 +4245,7 @@ command_run() {
   if [[ "$effective_checkpoint_queue_driver" == "postgres" ]]; then
     checkpoint_queue_args=(--queue-driver postgres)
   fi
-  if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then
+  if [[ -z "$proof_queue_driver" && ( "$effective_operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then
     proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")
   fi
   local -a proof_shadow_queue_args=()
@@ -6272,17 +6280,23 @@ command_run() {
     shared_validation_ipfs_retry_performed="false"
     local shared_validation_log
     shared_validation_log="$(mktemp)"
+    local -a shared_validation_queue_args=(--queue-driver kafka --kafka-brokers "$shared_kafka_brokers")
+    if [[ "$effective_shared_validation_queue_driver" == "postgres" ]]; then
+      shared_validation_queue_args=(--queue-driver postgres --queue-postgres-dsn "$shared_postgres_dsn")
+    fi
+    if [[ "$effective_shared_validation_queue_driver" == "kafka" ]]; then
+      shared_validation_queue_args+=(--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}")
+    fi
     run_shared_infra_validation_attempt() {
       local checkpoint_min_persisted_at="$1"
       local shared_validation_output_path="${2:-$shared_summary}"
       local -a shared_validation_args=(
         --postgres-dsn "$shared_postgres_dsn"
-        --kafka-brokers "$shared_kafka_brokers"
+        "${shared_validation_queue_args[@]}"
         --checkpoint-ipfs-api-url "$shared_ipfs_api_url"
         --checkpoint-operators "$checkpoint_operators_csv"
         --checkpoint-threshold "$threshold"
         --checkpoint-min-persisted-at "$checkpoint_min_persisted_at"
-        --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"
         --topic-prefix "$shared_topic_prefix"
         --timeout "$shared_timeout"
       )

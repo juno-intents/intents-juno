@@ -960,7 +960,19 @@ test_shared_infra_validation_precreates_bridge_and_proof_topics() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" 'local effective_operator_queue_driver="${operator_queue_driver:-kafka}"' "run-testnet-e2e derives effective operator queue driver"
+  assert_contains "$script_text" 'local effective_proof_queue_driver="${proof_queue_driver:-kafka}"' "run-testnet-e2e derives effective proof queue driver"
+  assert_contains "$script_text" 'local effective_shared_validation_queue_driver="kafka"' "shared infra validation defaults to kafka when any active queue stays on kafka"
+  assert_contains "$script_text" 'if [[ "$effective_checkpoint_queue_driver" == "postgres" && "$effective_operator_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then' "shared infra validation switches to postgres only when every active queue is postgres"
+  assert_contains "$script_text" 'effective_shared_validation_queue_driver="postgres"' "all-postgres queue cutover allows postgres shared validation"
+  assert_contains "$script_text" 'local -a shared_validation_queue_args=(--queue-driver kafka --kafka-brokers "$shared_kafka_brokers")' "shared infra validation defaults to kafka queue validation args"
+  assert_contains "$script_text" 'shared_validation_queue_args=(--queue-driver postgres --queue-postgres-dsn "$shared_postgres_dsn")' "shared infra validation can cut over to postgres queue validation"
+  assert_contains "$script_text" 'if [[ "$effective_shared_validation_queue_driver" == "kafka" ]]; then' "shared infra validation only requires kafka brokers when validating kafka"
+  assert_contains "$script_text" '--shared-kafka-brokers is required when any active queue path uses kafka' "mixed queue mode still requires kafka brokers"
   assert_contains "$script_text" '--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"' "shared infra validation pre-creates proof/deposit/withdraw topics before bridge-api and relayer traffic"
+  assert_contains "$script_text" 'shared_validation_queue_args+=(--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}")' "shared infra validation limits required kafka topics to kafka mode"
+  assert_contains "$script_text" '"${shared_validation_queue_args[@]}"' "shared infra validation forwards selected queue validation args"
+  assert_not_contains "$script_text" '[[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"' "postgres queue validation does not require shared kafka brokers unconditionally"
 }
 
 test_base_event_scanner_can_shadow_to_postgres_queue() {
@@ -1029,7 +1041,7 @@ test_operator_main_event_queues_can_cut_over_to_postgres_queue() {
   assert_contains "$script_text" '[[ "$operator_queue_driver" == "postgres" ]] || die "--operator-queue-driver supports only postgres during Phase 5 cutover"' "run-testnet-e2e rejects unsupported operator queue drivers"
   assert_contains "$script_text" 'local -a operator_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "operator main event queues default to kafka queue args"
   assert_contains "$script_text" 'operator_queue_args=(--queue-driver postgres)' "operator main event queues can cut over to postgres queue"
-  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "postgres queue cutovers keep proof queue transport explicit when proof stays on kafka"
+  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$effective_operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "postgres queue cutovers keep proof queue transport explicit when proof stays on kafka"
   assert_contains "$script_text" 'proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")' "operator queue cutover passes explicit kafka proof queue args"
   operator_queue_arg_refs="$(grep -F -c '"${operator_queue_args[@]}"' <<<"$script_text" | tr -d ' ')"
   if (( operator_queue_arg_refs != 3 )); then
@@ -1050,7 +1062,7 @@ test_operator_checkpoint_queues_can_cut_over_to_postgres_queue() {
   assert_contains "$script_text" 'local effective_checkpoint_queue_driver="${checkpoint_queue_driver:-kafka}"' "checkpoint queue driver defaults to kafka unless explicitly cut over"
   assert_contains "$script_text" 'local -a checkpoint_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "checkpoint package queues default to kafka queue args"
   assert_contains "$script_text" 'checkpoint_queue_args=(--queue-driver postgres)' "checkpoint package queues can cut over to postgres queue"
-  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "checkpoint queue cutover shares the explicit proof queue fallback"
+  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$effective_operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "checkpoint queue cutover shares the explicit proof queue fallback"
   assert_contains "$script_text" 'configure_remote_operator_checkpoint_services_for_bridge \' "checkpoint bridge updater is called through the reusable function"
   assert_contains "$script_text" '"$effective_checkpoint_queue_driver" || \' "checkpoint bridge updater receives the effective queue driver"
   assert_contains "$script_text" 'local checkpoint_queue_driver="${12:-kafka}"' "checkpoint bridge updater accepts checkpoint queue driver as explicit input"
