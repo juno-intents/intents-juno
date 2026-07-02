@@ -1279,6 +1279,17 @@ test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run() {
   assert_contains "$script_text" '--coordinator-client-key "$coordinator_workdir/tls/coordinator-client.key" \' "aws wrapper backup packages include shared coordinator client key"
 }
 
+test_aws_wrapper_defaults_operator_hosts_to_aggressive_cost_shape() {
+  local aws_script script_text
+  aws_script="$SCRIPT_DIR/../e2e/run-testnet-e2e-aws.sh"
+  script_text="$(cat "$aws_script")"
+
+  assert_contains "$script_text" '--operator-instance-type <type>      operator instance type (default: t3.medium)' "aws wrapper documents t3.medium as the operator default"
+  assert_contains "$script_text" '--operator-root-volume-gb <n>        operator root volume size (default: 40)' "aws wrapper documents 40 GiB as the operator root default"
+  assert_contains "$script_text" 'local operator_instance_type="t3.medium"' "aws wrapper defaults replacement operators to t3.medium"
+  assert_contains "$script_text" 'local operator_root_volume_gb="40"' "aws wrapper defaults replacement operator roots to 40 GiB"
+}
+
 test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers() {
   local aws_script script_text
   aws_script="$SCRIPT_DIR/../e2e/run-testnet-e2e-aws.sh"
@@ -1401,6 +1412,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_auto_detection_polls_bridge_api_deposits_listing
   test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run
+  test_aws_wrapper_defaults_operator_hosts_to_aggressive_cost_shape
   test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers
   test_deploy_production_canaries_excludes_legacy_aws_e2e_paths
 }

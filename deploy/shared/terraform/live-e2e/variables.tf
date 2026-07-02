@@ -46,7 +46,7 @@ variable "operator_instance_count" {
 variable "operator_instance_type" {
   description = "EC2 instance type for each dedicated operator host."
   type        = string
-  default     = "c7i.large"
+  default     = "t3.medium"
 }
 
 variable "operator_ami_id" {

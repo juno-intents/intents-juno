@@ -201,6 +201,8 @@ main() {
   assert_contains "$main_tf" 'selected_subnet_id = var.subnet_id != "" ? var.subnet_id : local.public_one_per_az[0]' "live-e2e defaults runner/operator hosts onto a deterministic public subnet"
   assert_not_contains "$main_tf" 'selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.selected_vpc.ids[0]' "live-e2e no longer chooses runner/operator subnets from an unordered vpc subnet list"
   assert_contains "$main_tf" 'private_ip             = local.runner_private_ip' "live-e2e assigns the runner a stable private ip"
+  assert_contains "$variables_tf" $'variable "operator_instance_type" {\n  description = "EC2 instance type for each dedicated operator host."\n  type        = string\n  default     = "t3.medium"' "live-e2e defaults dedicated operators to the aggressive cost shape"
+  assert_contains "$variables_tf" $'variable "operator_root_volume_size_gb" {\n  description = "Root EBS size in GiB for each dedicated operator host."\n  type        = number\n  default     = 40' "live-e2e defaults dedicated operator roots to the aggressive cost shape"
   assert_contains "$main_tf" 'resource "aws_launch_template" "operator"' "live-e2e provisions operator launch templates"
   assert_contains "$operator_launch_template_block" 'user_data = base64encode(<<-EOF' "live-e2e base64-encodes operator launch template user data for EC2"
   assert_not_contains "$operator_launch_template_block" 'user_data = <<-EOF' "live-e2e does not leave operator launch template user data unencoded"

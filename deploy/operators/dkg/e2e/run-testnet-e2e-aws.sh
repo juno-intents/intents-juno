@@ -68,9 +68,9 @@ run options:
   --runner-ami-id <ami-id>             optional custom AMI for runner host
   --aws-root-volume-gb <n>             root volume size (default: 200)
   --operator-instance-count <n>        operator host count (default: 5)
-  --operator-instance-type <type>      operator instance type (default: c7i.large)
+  --operator-instance-type <type>      operator instance type (default: t3.medium)
   --operator-ami-id <ami-id>           optional custom AMI for operator hosts
-  --operator-root-volume-gb <n>        operator root volume size (default: 100)
+  --operator-root-volume-gb <n>        operator root volume size (default: 40)
   --shared-ami-id <ami-id>             optional custom AMI for shared IPFS pinning ASG instances
   --operator-base-port <port>          first operator grpc port (default: 18443)
   --runner-associate-public-ip-address <true|false>
@@ -2568,9 +2568,9 @@ command_run() {
   local runner_ami_id=""
   local aws_root_volume_gb="200"
   local operator_instance_count="5"
-  local operator_instance_type="c7i.large"
+  local operator_instance_type="t3.medium"
   local operator_ami_id=""
-  local operator_root_volume_gb="100"
+  local operator_root_volume_gb="40"
   local shared_ami_id=""
   local operator_base_port="18443"
   local runner_associate_public_ip_address="true"
