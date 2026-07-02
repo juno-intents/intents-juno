@@ -72,8 +72,15 @@ func runMain(args []string, stdout io.Writer) error {
 
 	healthPort := fs.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
-	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated Kafka broker addresses")
+	queuePostgresDSN := fs.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
+	queuePostgresDSNEnv := fs.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+	shadowQueueDriver := fs.String("shadow-queue-driver", "", "optional shadow queue driver: kafka|postgres|stdio")
+	shadowQueueBrokers := fs.String("shadow-queue-brokers", "", "comma-separated shadow queue brokers")
+	shadowQueuePostgresDSN := fs.String("shadow-queue-postgres-dsn", "", "Postgres DSN for postgres shadow queue driver (defaults to --postgres-dsn)")
+	shadowQueuePostgresDSNEnv := fs.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres shadow queue driver")
+	shadowQueueRequired := fs.Bool("shadow-queue-required", false, "fail publish when the shadow queue publish fails")
 	withdrawEventTopic := fs.String("withdraw-event-topic", "withdrawals.requested.v2", "Kafka topic for withdraw events")
 
 	if err := fs.Parse(args); err != nil {
@@ -131,11 +138,18 @@ func runMain(args []string, stdout io.Writer) error {
 	defer client.Close()
 
 	// Create queue producer.
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  *queueDriver,
-		Brokers: queue.SplitCommaList(*queueBrokers),
-		Writer:  stdout,
-	})
+	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:               *queueDriver,
+		Brokers:              *queueBrokers,
+		PostgresDSN:          *queuePostgresDSN,
+		PostgresDSNEnv:       *queuePostgresDSNEnv,
+		StorePostgresDSN:     *postgresDSN,
+		ShadowDriver:         *shadowQueueDriver,
+		ShadowBrokers:        *shadowQueueBrokers,
+		ShadowPostgresDSN:    *shadowQueuePostgresDSN,
+		ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
+		ShadowRequired:       *shadowQueueRequired,
+	}, stdout, queue.NewProducer)
 	if err != nil {
 		return fmt.Errorf("create queue producer: %w", err)
 	}
@@ -236,4 +250,108 @@ func ensureScannerQueueTopics(ctx context.Context, driver, brokers, topics strin
 		return nil
 	}
 	return ensureBaseEventScannerKafkaTopics(ctx, queue.SplitCommaList(brokers), queue.SplitCommaList(topics))
+}
+
+type baseEventScannerQueueProducerFactory func(queue.ProducerConfig) (queue.Producer, error)
+
+type baseEventScannerQueueOptions struct {
+	Driver               string
+	Brokers              string
+	PostgresDSN          string
+	PostgresDSNEnv       string
+	StorePostgresDSN     string
+	ShadowDriver         string
+	ShadowBrokers        string
+	ShadowPostgresDSN    string
+	ShadowPostgresDSNEnv string
+	ShadowRequired       bool
+}
+
+func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.Writer, factory baseEventScannerQueueProducerFactory) (queue.Producer, error) {
+	if factory == nil {
+		factory = queue.NewProducer
+	}
+	primaryCfg, err := baseEventScannerProducerConfig(opts.Driver, opts.Brokers, opts.PostgresDSN, opts.PostgresDSNEnv, opts.StorePostgresDSN, stdout)
+	if err != nil {
+		return nil, err
+	}
+	primary, err := factory(primaryCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(opts.ShadowDriver) == "" {
+		if opts.ShadowRequired {
+			_ = primary.Close()
+			return nil, errors.New("--shadow-queue-required requires --shadow-queue-driver")
+		}
+		return primary, nil
+	}
+	if !baseEventScannerQueueDriverSupported(opts.ShadowDriver) {
+		_ = primary.Close()
+		return nil, fmt.Errorf("unsupported shadow queue driver %q", opts.ShadowDriver)
+	}
+	shadowCfg, err := baseEventScannerProducerConfig(opts.ShadowDriver, opts.ShadowBrokers, opts.ShadowPostgresDSN, opts.ShadowPostgresDSNEnv, opts.StorePostgresDSN, stdout)
+	if err != nil {
+		if !opts.ShadowRequired {
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("configure shadow queue producer: %w", err)
+	}
+	shadow, err := factory(shadowCfg)
+	if err != nil {
+		if !opts.ShadowRequired {
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("init shadow queue producer: %w", err)
+	}
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{RequireShadow: opts.ShadowRequired})
+	if err != nil {
+		_ = primary.Close()
+		_ = shadow.Close()
+		return nil, err
+	}
+	return producer, nil
+}
+
+func baseEventScannerQueueDriverSupported(driver string) bool {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case queue.DriverKafka, queue.DriverPostgres, queue.DriverStdio:
+		return true
+	default:
+		return false
+	}
+}
+
+func baseEventScannerProducerConfig(driver, brokers, postgresDSN, postgresDSNEnv, storePostgresDSN string, stdout io.Writer) (queue.ProducerConfig, error) {
+	cfg := queue.ProducerConfig{
+		Driver: strings.TrimSpace(driver),
+		Writer: stdout,
+	}
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = queue.SplitCommaList(brokers)
+	case queue.DriverPostgres:
+		dsn, err := baseEventScannerQueuePostgresDSN(postgresDSN, postgresDSNEnv, storePostgresDSN)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", driver)
+	}
+	return cfg, nil
+}
+
+func baseEventScannerQueuePostgresDSN(postgresDSN, postgresDSNEnv, storePostgresDSN string) (string, error) {
+	if strings.TrimSpace(postgresDSN) != "" || strings.TrimSpace(postgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(postgresDSN, postgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(storePostgresDSN, "")
 }

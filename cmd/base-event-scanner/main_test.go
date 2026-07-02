@@ -5,10 +5,32 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
+
+type recordingScannerProducer struct {
+	name       string
+	calls      *[]string
+	publishErr error
+	closed     bool
+}
+
+func (p *recordingScannerProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return p.publishErr
+}
+
+func (p *recordingScannerProducer) Close() error {
+	p.closed = true
+	return nil
+}
 
 // TestEventPayload_CoordinatorCompat verifies that eventPayload marshals to JSON
 // that is compatible with the withdraw coordinator's withdrawRequestedV1 struct.
@@ -213,5 +235,133 @@ func TestEnsureScannerQueueTopics(t *testing.T) {
 				t.Fatalf("topics = %#v want %#v", gotTopics, tc.wantTopics)
 			}
 		})
+	}
+}
+
+func TestBaseEventScannerQueueProducerConfiguresPostgresShadow(t *testing.T) {
+	var configs []queue.ProducerConfig
+	var calls []string
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		name := cfg.Driver
+		if len(configs) == 2 {
+			name = "shadow-" + cfg.Driver
+		}
+		return &recordingScannerProducer{name: name, calls: &calls}, nil
+	}
+
+	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:           queue.DriverKafka,
+		Brokers:          "b-1.example:9098,b-2.example:9098",
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("baseEventScannerQueueProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "withdrawals.requested.v2", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("config count = %d, want 2", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverKafka; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(configs[0].Brokers, ","), "b-1.example:9098,b-2.example:9098"; got != want {
+		t.Fatalf("primary brokers = %q, want %q", got, want)
+	}
+	if got, want := configs[1].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("shadow driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("shadow PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:withdrawals.requested.v2:payload,shadow-postgres:withdrawals.requested.v2:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestBaseEventScannerQueueProducerToleratesOptionalShadowInitFailure(t *testing.T) {
+	shadowErr := errors.New("shadow init down")
+	var calls []string
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		if cfg.Driver == queue.DriverPostgres {
+			return nil, shadowErr
+		}
+		return &recordingScannerProducer{name: cfg.Driver, calls: &calls}, nil
+	}
+
+	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:           queue.DriverKafka,
+		Brokers:          "b-1.example:9098",
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("baseEventScannerQueueProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "withdrawals.requested.v2", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:withdrawals.requested.v2:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestBaseEventScannerQueueProducerRejectsUnsupportedShadowDriver(t *testing.T) {
+	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:       queue.DriverKafka,
+		Brokers:      "b-1.example:9098",
+		ShadowDriver: "typo",
+	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		return &recordingScannerProducer{name: cfg.Driver}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported shadow queue driver") {
+		t.Fatalf("error = %v, want unsupported shadow queue driver", err)
+	}
+}
+
+func TestBaseEventScannerQueueProducerRequiredShadowRequiresDriver(t *testing.T) {
+	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:         queue.DriverKafka,
+		Brokers:        "b-1.example:9098",
+		ShadowRequired: true,
+	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		return &recordingScannerProducer{name: cfg.Driver}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "--shadow-queue-required requires --shadow-queue-driver") {
+		t.Fatalf("error = %v, want required shadow driver error", err)
+	}
+}
+
+func TestBaseEventScannerQueueProducerCanRequireShadow(t *testing.T) {
+	shadowErr := errors.New("shadow down")
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		producer := &recordingScannerProducer{name: cfg.Driver}
+		if cfg.Driver == queue.DriverPostgres {
+			producer.publishErr = shadowErr
+		}
+		return producer, nil
+	}
+
+	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:           queue.DriverKafka,
+		Brokers:          "b-1.example:9098",
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+		ShadowRequired:   true,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("baseEventScannerQueueProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "withdrawals.requested.v2", []byte("payload")); !errors.Is(err, shadowErr) {
+		t.Fatalf("Publish error = %v, want shadow error", err)
 	}
 }
