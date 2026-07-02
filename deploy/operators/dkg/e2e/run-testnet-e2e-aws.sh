@@ -108,8 +108,10 @@ run options:
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
                                        requires forwarded shared args after '--':
                                          --shared-postgres-dsn
-                                         --shared-kafka-brokers
                                          --shared-ipfs-api-url
+                                         --shared-kafka-brokers unless operator,
+                                           checkpoint, and proof queue drivers
+                                           are all postgres
   --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
   --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
@@ -382,6 +384,29 @@ forwarded_arg_value() {
   done
 
   return 1
+}
+
+forwarded_queue_driver_or_default() {
+  local flag="$1"
+  local default_driver="$2"
+  shift 2
+  local driver="$default_driver"
+
+  if driver="$(forwarded_arg_value "$flag" "$@" 2>/dev/null)"; then
+    driver="$(lower "$driver")"
+    [[ -n "$driver" ]] || die "forwarded $flag must not be empty"
+  else
+    driver="$(lower "$default_driver")"
+  fi
+
+  case "$driver" in
+    kafka|postgres)
+      printf '%s' "$driver"
+      ;;
+    *)
+      die "forwarded $flag must be kafka or postgres"
+      ;;
+  esac
 }
 
 normalize_bool_arg() {
@@ -1007,6 +1032,7 @@ wait_for_shared_connectivity_from_runner() {
   local shared_postgres_port="$5"
   local shared_kafka_brokers="$6"
   local shared_ipfs_api_url="$7"
+  local shared_queue_requires_kafka="${8:-true}"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -1023,7 +1049,8 @@ wait_for_shared_connectivity_from_runner() {
       "$shared_postgres_host" \
       "$shared_postgres_port" \
       "$shared_kafka_brokers" \
-      "$shared_ipfs_api_url"
+      "$shared_ipfs_api_url" \
+      "$shared_queue_requires_kafka"
   )"
 
   local attempt
@@ -1613,37 +1640,45 @@ build_runner_shared_probe_script() {
   local shared_postgres_port="$2"
   local shared_kafka_brokers="$3"
   local shared_ipfs_api_url="$4"
+  local shared_queue_requires_kafka="${5:-true}"
 
   cat <<EOF
 set -euo pipefail
-IFS=',' read -r -a broker_list <<<'${shared_kafka_brokers}'
-if [[ \${#broker_list[@]} -eq 0 ]]; then
+if [[ '${shared_queue_requires_kafka}' == 'true' ]]; then
+  IFS=',' read -r -a broker_list <<<'${shared_kafka_brokers}'
+else
+  broker_list=()
+fi
+if [[ '${shared_queue_requires_kafka}' == 'true' && \${#broker_list[@]} -eq 0 ]]; then
   echo "no kafka brokers provided by terraform output" >&2
   exit 1
 fi
 
   for attempt in \$(seq 1 120); do
     postgres_ready="false"
-    kafka_ready="true"
+    kafka_ready="skipped"
     ipfs_ready="true"
     if timeout 2 bash -lc '</dev/tcp/${shared_postgres_host}/${shared_postgres_port}' >/dev/null 2>&1; then
       postgres_ready="true"
     fi
 
-  for broker in "\${broker_list[@]}"; do
-    broker="\${broker//[[:space:]]/}"
-    [[ -n "\$broker" ]] || continue
-    broker_host="\${broker%%:*}"
-    broker_port="\${broker##*:}"
-    if [[ -z "\$broker_host" || -z "\$broker_port" || "\$broker_host" == "\$broker_port" ]]; then
-      kafka_ready="false"
-      break
-    fi
-    if ! timeout 2 bash -lc "</dev/tcp/\${broker_host}/\${broker_port}" >/dev/null 2>&1; then
-      kafka_ready="false"
-      break
-    fi
+  if [[ '${shared_queue_requires_kafka}' == 'true' ]]; then
+    kafka_ready="true"
+    for broker in "\${broker_list[@]}"; do
+      broker="\${broker//[[:space:]]/}"
+      [[ -n "\$broker" ]] || continue
+      broker_host="\${broker%%:*}"
+      broker_port="\${broker##*:}"
+      if [[ -z "\$broker_host" || -z "\$broker_port" || "\$broker_host" == "\$broker_port" ]]; then
+        kafka_ready="false"
+        break
+      fi
+      if ! timeout 2 bash -lc "</dev/tcp/\${broker_host}/\${broker_port}" >/dev/null 2>&1; then
+        kafka_ready="false"
+        break
+      fi
     done
+  fi
 
   if [[ -n "${shared_ipfs_api_url}" ]]; then
     if ! curl -fsS --max-time 3 -X POST "${shared_ipfs_api_url%/}/api/v0/version" >/dev/null 2>&1; then
@@ -1651,7 +1686,7 @@ fi
     fi
   fi
 
-  if [[ "\$postgres_ready" == "true" && "\$kafka_ready" == "true" && "\$ipfs_ready" == "true" ]]; then
+  if [[ "\$postgres_ready" == "true" && "\$ipfs_ready" == "true" ]] && { [[ '${shared_queue_requires_kafka}' != 'true' ]] || [[ "\$kafka_ready" == "true" ]]; }; then
     echo "shared services reachable from runner"
     exit 0
   fi
@@ -1814,6 +1849,12 @@ run_distributed_dkg_backup_restore() {
   local shared_ipfs_api_url="${21:-}"
   local checkpoint_blob_bucket="${22:-}"
   local checkpoint_blob_prefix="${23:-}"
+  local checkpoint_queue_driver="${24:-kafka}"
+  checkpoint_queue_driver="$(lower "$checkpoint_queue_driver")"
+  case "$checkpoint_queue_driver" in
+    kafka|postgres) ;;
+    *) die "checkpoint queue driver must be kafka or postgres: $checkpoint_queue_driver" ;;
+  esac
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -2164,7 +2205,9 @@ EOF
   done
 
   [[ -n "$shared_postgres_dsn" ]] || die "shared checkpoint service config missing postgres dsn"
-  [[ -n "$shared_kafka_brokers" ]] || die "shared checkpoint service config missing kafka brokers"
+  if [[ "$checkpoint_queue_driver" == "kafka" ]]; then
+    [[ -n "$shared_kafka_brokers" ]] || die "shared checkpoint service config missing kafka brokers"
+  fi
   [[ -n "$shared_ipfs_api_url" ]] || die "shared checkpoint service config missing ipfs api url"
   [[ -n "$checkpoint_blob_bucket" ]] || die "shared checkpoint service config missing blob bucket"
   [[ -n "$checkpoint_blob_prefix" ]] || die "shared checkpoint service config missing blob prefix"
@@ -2285,6 +2328,7 @@ if [[ "\$tss_signer_runtime_mode" == "nitro-enclave" ]]; then
     --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
     --arg checkpoint_operators "$checkpoint_operators_csv" \
     --arg checkpoint_threshold "$threshold" \
+    --arg checkpoint_queue_driver "$checkpoint_queue_driver" \
     --arg tss_nitro_expected_pcr0 "\$tss_nitro_expected_pcr0" \
     --arg tss_nitro_expected_pcr1 "\$tss_nitro_expected_pcr1" \
     --arg tss_nitro_expected_pcr2 "\$tss_nitro_expected_pcr2" \
@@ -2296,6 +2340,7 @@ if [[ "\$tss_signer_runtime_mode" == "nitro-enclave" ]]; then
       CHECKPOINT_BLOB_PREFIX: \$checkpoint_blob_prefix,
       CHECKPOINT_OPERATORS: \$checkpoint_operators,
       CHECKPOINT_THRESHOLD: \$checkpoint_threshold,
+      CHECKPOINT_QUEUE_DRIVER: \$checkpoint_queue_driver,
       CHECKPOINT_SIGNATURE_TOPIC: "checkpoints.signatures.v1",
       CHECKPOINT_PACKAGE_TOPIC: "checkpoints.packages.v1",
       JUNO_QUEUE_KAFKA_TLS: "true",
@@ -2312,6 +2357,7 @@ else
     --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
     --arg checkpoint_operators "$checkpoint_operators_csv" \
     --arg checkpoint_threshold "$threshold" \
+    --arg checkpoint_queue_driver "$checkpoint_queue_driver" \
     '{
       CHECKPOINT_POSTGRES_DSN: \$checkpoint_postgres_dsn,
       CHECKPOINT_KAFKA_BROKERS: \$checkpoint_kafka_brokers,
@@ -2320,6 +2366,7 @@ else
       CHECKPOINT_BLOB_PREFIX: \$checkpoint_blob_prefix,
       CHECKPOINT_OPERATORS: \$checkpoint_operators,
       CHECKPOINT_THRESHOLD: \$checkpoint_threshold,
+      CHECKPOINT_QUEUE_DRIVER: \$checkpoint_queue_driver,
       CHECKPOINT_SIGNATURE_TOPIC: "checkpoints.signatures.v1",
       CHECKPOINT_PACKAGE_TOPIC: "checkpoints.packages.v1",
       JUNO_QUEUE_KAFKA_TLS: "true"
@@ -2988,9 +3035,20 @@ command_run() {
   if forwarded_shared_ipfs_api_url="$(forwarded_arg_value "--shared-ipfs-api-url" "${e2e_args[@]}" 2>/dev/null)"; then
     [[ -n "$forwarded_shared_ipfs_api_url" ]] || die "forwarded --shared-ipfs-api-url must not be empty"
   fi
+  local effective_operator_queue_driver effective_checkpoint_queue_driver effective_proof_queue_driver
+  effective_operator_queue_driver="$(forwarded_queue_driver_or_default "--operator-queue-driver" "kafka" "${e2e_args[@]}")"
+  effective_checkpoint_queue_driver="$(forwarded_queue_driver_or_default "--checkpoint-queue-driver" "kafka" "${e2e_args[@]}")"
+  effective_proof_queue_driver="$(forwarded_queue_driver_or_default "--proof-queue-driver" "kafka" "${e2e_args[@]}")"
+  local shared_queue_requires_kafka="true"
+  if [[ "$effective_operator_queue_driver" == "postgres" && "$effective_checkpoint_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then
+    shared_queue_requires_kafka="false"
+  fi
   if [[ "$with_shared_services" != "true" ]]; then
-    if [[ -z "$forwarded_shared_postgres_dsn" || -z "$forwarded_shared_kafka_brokers" || -z "$forwarded_shared_ipfs_api_url" ]]; then
-      die "--without-shared-services requires forwarded --shared-postgres-dsn, --shared-kafka-brokers, and --shared-ipfs-api-url after '--'"
+    if [[ -z "$forwarded_shared_postgres_dsn" || -z "$forwarded_shared_ipfs_api_url" ]]; then
+      die "--without-shared-services requires forwarded --shared-postgres-dsn and --shared-ipfs-api-url after '--'"
+    fi
+    if [[ "$shared_queue_requires_kafka" == "true" && -z "$forwarded_shared_kafka_brokers" ]]; then
+      die "--without-shared-services requires forwarded --shared-kafka-brokers unless operator, checkpoint, and proof queues are all postgres"
     fi
   fi
   if [[ "$distributed_relayer_runtime_explicit" == "true" && "$relayer_runtime_mode" != "distributed" ]]; then
@@ -3477,14 +3535,16 @@ command_run() {
     )"
     [[ -n "$shared_postgres_endpoint" && "$shared_postgres_endpoint" != "null" ]] || die "shared services were requested but terraform output shared_postgres_endpoint is empty"
 
-    shared_kafka_bootstrap_brokers="$(
-      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-        -chdir="$terraform_dir" \
-        output \
-        -state="$state_file" \
-        -raw shared_kafka_bootstrap_brokers
-    )"
-    [[ -n "$shared_kafka_bootstrap_brokers" && "$shared_kafka_bootstrap_brokers" != "null" ]] || die "shared services were requested but terraform output shared_kafka_bootstrap_brokers is empty"
+    if [[ "$shared_queue_requires_kafka" == "true" ]]; then
+      shared_kafka_bootstrap_brokers="$(
+        env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+          -chdir="$terraform_dir" \
+          output \
+          -state="$state_file" \
+          -raw shared_kafka_bootstrap_brokers
+      )"
+      [[ -n "$shared_kafka_bootstrap_brokers" && "$shared_kafka_bootstrap_brokers" != "null" ]] || die "shared services were requested but terraform output shared_kafka_bootstrap_brokers is empty"
+    fi
 
     shared_ipfs_api_url="$(
       env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
@@ -3534,16 +3594,18 @@ command_run() {
       shared_postgres_port="$shared_postgres_port_out"
     fi
 
-    local shared_kafka_port_out
-    shared_kafka_port_out="$(
-      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-        -chdir="$terraform_dir" \
-        output \
-        -state="$state_file" \
-        -raw shared_kafka_port
-    )"
-    if [[ -n "$shared_kafka_port_out" && "$shared_kafka_port_out" != "null" ]]; then
-      shared_kafka_port="$shared_kafka_port_out"
+    if [[ "$shared_queue_requires_kafka" == "true" ]]; then
+      local shared_kafka_port_out
+      shared_kafka_port_out="$(
+        env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+          -chdir="$terraform_dir" \
+          output \
+          -state="$state_file" \
+          -raw shared_kafka_port
+      )"
+      if [[ -n "$shared_kafka_port_out" && "$shared_kafka_port_out" != "null" ]]; then
+        shared_kafka_port="$shared_kafka_port_out"
+      fi
     fi
   fi
 
@@ -3648,13 +3710,13 @@ command_run() {
   fi
   if [[ -n "$shared_postgres_dsn_for_operator" || -n "$shared_kafka_brokers_for_operator" || -n "$shared_ipfs_api_url_for_operator" ]]; then
     [[ -n "$shared_postgres_dsn_for_operator" ]] || die "operator stack hydration requires shared postgres dsn (set --shared-postgres-dsn)"
-    [[ -n "$shared_kafka_brokers_for_operator" ]] || die "operator stack hydration requires shared kafka brokers (set --shared-kafka-brokers)"
+    [[ -n "$shared_kafka_brokers_for_operator" || "$shared_queue_requires_kafka" != "true" ]] || die "operator stack hydration requires shared kafka brokers (set --shared-kafka-brokers)"
     [[ -n "$shared_ipfs_api_url_for_operator" ]] || die "operator stack hydration requires shared ipfs api url (set --shared-ipfs-api-url)"
     checkpoint_blob_bucket_for_operator="$dkg_s3_bucket"
     checkpoint_blob_prefix_for_operator="${dkg_s3_key_prefix_out%/}/checkpoint-packages"
   fi
   [[ -n "$shared_postgres_dsn_for_operator" ]] || die "operator stack hydration requires shared postgres dsn"
-  [[ -n "$shared_kafka_brokers_for_operator" ]] || die "operator stack hydration requires shared kafka brokers"
+  [[ -n "$shared_kafka_brokers_for_operator" || "$shared_queue_requires_kafka" != "true" ]] || die "operator stack hydration requires shared kafka brokers"
   [[ -n "$shared_ipfs_api_url_for_operator" ]] || die "operator stack hydration requires shared ipfs api url"
   [[ -n "$checkpoint_blob_bucket_for_operator" ]] || die "operator stack hydration requires checkpoint blob bucket"
   [[ -n "$checkpoint_blob_prefix_for_operator" ]] || die "operator stack hydration requires checkpoint blob prefix"
@@ -3728,7 +3790,8 @@ command_run() {
       "$shared_kafka_brokers_for_operator" \
       "$shared_ipfs_api_url_for_operator" \
       "$checkpoint_blob_bucket_for_operator" \
-      "$checkpoint_blob_prefix_for_operator"
+      "$checkpoint_blob_prefix_for_operator" \
+      "$effective_checkpoint_queue_driver"
   fi
 
   local -a runner_secret_bundle_entries=(
@@ -3910,7 +3973,8 @@ command_run() {
       "$shared_postgres_endpoint" \
       "$shared_postgres_port" \
       "$shared_kafka_bootstrap_brokers" \
-      "$shared_ipfs_api_url_runner"; then
+      "$shared_ipfs_api_url_runner" \
+      "$shared_queue_requires_kafka"; then
       if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url_runner" ]]; then
         log "shared services connectivity via shared IPFS NLB failed; retrying runner probe with direct IPFS endpoint=$shared_ipfs_api_direct_url"
         wait_for_shared_connectivity_from_runner \
@@ -3920,7 +3984,8 @@ command_run() {
           "$shared_postgres_endpoint" \
           "$shared_postgres_port" \
           "$shared_kafka_bootstrap_brokers" \
-          "$shared_ipfs_api_direct_url" || \
+          "$shared_ipfs_api_direct_url" \
+          "$shared_queue_requires_kafka" || \
           die "shared services unreachable from runner after direct IPFS fallback (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs_runner_primary=${shared_ipfs_api_url_runner}, ipfs_direct=${shared_ipfs_api_direct_url})"
         shared_ipfs_api_url_runner="$shared_ipfs_api_direct_url"
       else
@@ -3934,7 +3999,11 @@ command_run() {
     shared_kafka_brokers="$shared_kafka_bootstrap_brokers"
     remote_args+=(
       "--shared-postgres-dsn" "$shared_postgres_dsn"
-      "--shared-kafka-brokers" "$shared_kafka_brokers"
+    )
+    if [[ "$shared_queue_requires_kafka" == "true" ]]; then
+      remote_args+=("--shared-kafka-brokers" "$shared_kafka_brokers")
+    fi
+    remote_args+=(
       "--shared-ipfs-api-url" "$shared_ipfs_api_url_runner"
       "--operator-checkpoint-ipfs-api-url" "$shared_ipfs_api_url_for_operator"
       "--shared-ecs-cluster-arn" "$shared_ecs_cluster_arn"

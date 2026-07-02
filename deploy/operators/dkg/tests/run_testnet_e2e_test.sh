@@ -1275,6 +1275,33 @@ test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run() {
   assert_contains "$script_text" '--coordinator-client-key "$coordinator_workdir/tls/coordinator-client.key" \' "aws wrapper backup packages include shared coordinator client key"
 }
 
+test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers() {
+  local aws_script script_text
+  aws_script="$SCRIPT_DIR/../e2e/run-testnet-e2e-aws.sh"
+  script_text="$(cat "$aws_script")"
+
+  assert_contains "$script_text" 'forwarded_queue_driver_or_default() {' "aws wrapper derives forwarded queue drivers with defaults"
+  assert_contains "$script_text" 'effective_operator_queue_driver="$(forwarded_queue_driver_or_default "--operator-queue-driver" "kafka" "${e2e_args[@]}")"' "aws wrapper tracks effective operator queue driver"
+  assert_contains "$script_text" 'effective_checkpoint_queue_driver="$(forwarded_queue_driver_or_default "--checkpoint-queue-driver" "kafka" "${e2e_args[@]}")"' "aws wrapper tracks effective checkpoint queue driver"
+  assert_contains "$script_text" 'effective_proof_queue_driver="$(forwarded_queue_driver_or_default "--proof-queue-driver" "kafka" "${e2e_args[@]}")"' "aws wrapper tracks effective proof queue driver"
+  assert_contains "$script_text" 'local shared_queue_requires_kafka="true"' "aws wrapper defaults to requiring kafka for shared queue validation"
+  assert_contains "$script_text" 'if [[ "$effective_operator_queue_driver" == "postgres" && "$effective_checkpoint_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then' "aws wrapper enters no-kafka mode only when every active queue is postgres"
+  assert_contains "$script_text" 'shared_queue_requires_kafka="false"' "aws wrapper can disable kafka requirements for full postgres queue mode"
+  assert_contains "$script_text" 'if [[ "$shared_queue_requires_kafka" == "true" && -z "$forwarded_shared_kafka_brokers" ]]; then' "forwarded shared services require kafka brokers only when any active queue path still uses kafka"
+  assert_contains "$script_text" '--without-shared-services requires forwarded --shared-kafka-brokers unless operator, checkpoint, and proof queues are all postgres' "aws wrapper reports the mixed-mode kafka broker requirement"
+  assert_contains "$script_text" '[[ -n "$shared_kafka_brokers_for_operator" || "$shared_queue_requires_kafka" != "true" ]] || die "operator stack hydration requires shared kafka brokers"' "operator hydration allows empty kafka brokers only in full postgres mode"
+  assert_contains "$script_text" 'if [[ "$checkpoint_queue_driver" == "kafka" ]]; then' "backup restore hydrator requires kafka brokers only for kafka checkpoint queues"
+  assert_contains "$script_text" 'CHECKPOINT_QUEUE_DRIVER: \$checkpoint_queue_driver' "backup restore hydrator stages checkpoint queue driver"
+  assert_contains "$script_text" '"$effective_checkpoint_queue_driver"' "backup restore hydrator receives effective checkpoint queue driver"
+  assert_contains "$script_text" 'if [[ "$shared_queue_requires_kafka" == "true" ]]; then' "aws wrapper gates kafka-only output/probe/arg paths"
+  assert_contains "$script_text" 'remote_args+=("--shared-kafka-brokers" "$shared_kafka_brokers")' "aws wrapper still forwards kafka brokers when kafka is required"
+  assert_contains "$script_text" 'local shared_queue_requires_kafka="${5:-true}"' "runner shared probe receives queue driver policy"
+  assert_contains "$script_text" 'kafka_ready="skipped"' "runner shared probe skips kafka checks in full postgres mode"
+  assert_contains "$script_text" '"$shared_queue_requires_kafka"; then' "runner connectivity calls include queue driver policy"
+  assert_contains "$script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"' "managed shared-service preflight still probes kafka while terraform still provisions msk"
+  assert_contains "$script_text" 'validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"' "managed shared-service dr readiness still probes kafka while terraform still provisions msk"
+}
+
 test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
   local workflow_text workflow_file
   workflow_file="$SCRIPT_DIR/../../../../.github/workflows/deploy-production-canaries.yml"
@@ -1370,6 +1397,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_auto_detection_polls_bridge_api_deposits_listing
   test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run
+  test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers
   test_deploy_production_canaries_excludes_legacy_aws_e2e_paths
 }
 
