@@ -220,14 +220,19 @@ run_shared_infra_e2e() {
   local postgres_dsn="$4"
   local required_topics="$5"
   local output_path="$6"
-  local kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
+  local queue_driver kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
   local kafka_tls kafka_auth_mode kafka_auth_region
   local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   local app_role_asg app_aws_profile app_aws_region asg_json instance_id
   local checkpoint_blob_bucket stage_key stage_uri presigned_url stdout_json
-  local url_q pg_q kb_q topics_q ipfs_q operators_q threshold_q output_q remote_env_prefix remote_cmd
+  local url_q output_q remote_env_prefix remote_cmd shared_validation_args remote_args_q
 
-  kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
+  queue_driver="$(trim "$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+  case "$queue_driver" in
+    kafka|postgres) ;;
+    *) die "shared_services.queue.driver must be kafka or postgres" ;;
+  esac
+  kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers // empty' "$shared_manifest")"
   ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
   shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
   shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
@@ -241,6 +246,26 @@ run_shared_infra_e2e() {
   kafka_tls="$(jq -r 'if (.shared_services.kafka.tls // false) then "true" else "false" end' "$shared_manifest")"
   kafka_auth_mode="$(jq -r '.shared_services.kafka.auth.mode // empty' "$shared_manifest")"
   kafka_auth_region="$(jq -r '.shared_services.kafka.auth.aws_region // empty' "$shared_manifest")"
+  shared_validation_args=(
+    --postgres-dsn "$postgres_dsn"
+  )
+  if [[ "$queue_driver" == "postgres" ]]; then
+    shared_validation_args+=(
+      --queue-driver "$queue_driver"
+      --queue-postgres-dsn "$postgres_dsn"
+    )
+  else
+    [[ -n "$kafka_brokers" ]] || die "shared manifest is missing shared_services.kafka.bootstrap_brokers for kafka queue validation"
+    shared_validation_args+=(
+      --kafka-brokers "$kafka_brokers"
+      --required-kafka-topics "$required_topics"
+    )
+  fi
+  shared_validation_args+=(
+    --checkpoint-ipfs-api-url "$ipfs_api_url"
+    --checkpoint-operators "$checkpoint_operators"
+    --checkpoint-threshold "$checkpoint_threshold"
+  )
 
   app_role_asg="$(jq -r '.app_role.asg // empty' "$app_deploy")"
   if [[ -n "$app_role_asg" ]]; then
@@ -270,13 +295,11 @@ run_shared_infra_e2e() {
     }
 
     url_q="$(production_shell_quote "$presigned_url")"
-    pg_q="$(production_shell_quote "$postgres_dsn")"
-    kb_q="$(production_shell_quote "$kafka_brokers")"
-    topics_q="$(production_shell_quote "$required_topics")"
-    ipfs_q="$(production_shell_quote "$ipfs_api_url")"
-    operators_q="$(production_shell_quote "$checkpoint_operators")"
-    threshold_q="$(production_shell_quote "$checkpoint_threshold")"
     output_q="$(production_shell_quote "$output_path")"
+    remote_args_q=""
+    for arg in "${shared_validation_args[@]}"; do
+      remote_args_q+=" $(production_shell_quote "$arg")"
+    done
 
     remote_env_prefix="JUNO_QUEUE_KAFKA_TLS=$(production_shell_quote "$kafka_tls") "
     if [[ -n "$kafka_auth_mode" ]]; then
@@ -291,7 +314,7 @@ run_shared_infra_e2e() {
       remote_env_prefix+="CHECKPOINT_IPFS_API_BEARER_TOKEN=$(production_shell_quote "$ipfs_api_bearer_token") "
     fi
 
-    remote_cmd="set -eu; rm -f /var/tmp/shared-infra-e2e; curl -fsSL $url_q -o /var/tmp/shared-infra-e2e; chmod 0755 /var/tmp/shared-infra-e2e; ${remote_env_prefix}/var/tmp/shared-infra-e2e --postgres-dsn $pg_q --kafka-brokers $kb_q --required-kafka-topics $topics_q --checkpoint-ipfs-api-url $ipfs_q --checkpoint-operators $operators_q --checkpoint-threshold $threshold_q --output $output_q; cat $output_q"
+    remote_cmd="set -eu; rm -f /var/tmp/shared-infra-e2e; curl -fsSL $url_q -o /var/tmp/shared-infra-e2e; chmod 0755 /var/tmp/shared-infra-e2e; ${remote_env_prefix}/var/tmp/shared-infra-e2e$remote_args_q --output $output_q; cat $output_q"
     if ! stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd")"; then
       AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
       die "shared-infra-e2e failed on app role instance $instance_id"
@@ -316,12 +339,7 @@ run_shared_infra_e2e() {
       export CHECKPOINT_IPFS_API_BEARER_TOKEN="$ipfs_api_bearer_token"
     fi
     production_run_release_binary "$binary" \
-      --postgres-dsn "$postgres_dsn" \
-      --kafka-brokers "$kafka_brokers" \
-      --required-kafka-topics "$required_topics" \
-      --checkpoint-ipfs-api-url "$ipfs_api_url" \
-      --checkpoint-operators "$checkpoint_operators" \
-      --checkpoint-threshold "$checkpoint_threshold" \
+      "${shared_validation_args[@]}" \
       --output "$output_path"
   )
 }
