@@ -12,13 +12,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
 )
 
 const (
-	DriverKafka = "kafka"
-	DriverStdio = "stdio"
+	DriverKafka    = "kafka"
+	DriverPostgres = "postgres"
+	DriverStdio    = "stdio"
+)
+
+const (
+	PostgresInitialPositionEarliest = "earliest"
+	PostgresInitialPositionLatest   = "latest"
 )
 
 const (
@@ -186,6 +193,17 @@ type ConsumerConfig struct {
 	// Stdio fields.
 	Reader       io.Reader
 	MaxLineBytes int
+
+	// Postgres fields.
+	PostgresDSN              string
+	PostgresPool             *pgxpool.Pool
+	PostgresInitialPosition  string
+	PostgresInitialSequences map[string]int64
+	PostgresLeaseDuration    time.Duration
+	PostgresMaxLeaseDuration time.Duration
+	PostgresMaterializeLimit int
+	PostgresPollInterval     time.Duration
+	PostgresOwner            string
 }
 
 // ProducerConfig configures queue producers.
@@ -198,6 +216,10 @@ type ProducerConfig struct {
 
 	// Stdio fields.
 	Writer io.Writer
+
+	// Postgres fields.
+	PostgresDSN  string
+	PostgresPool *pgxpool.Pool
 }
 
 // NewConsumer creates a queue consumer for the configured driver.
@@ -205,6 +227,8 @@ func NewConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
 	switch normalizeDriver(cfg.Driver) {
 	case DriverKafka:
 		return newKafkaConsumer(ctx, cfg)
+	case DriverPostgres:
+		return newPostgresConsumer(ctx, cfg)
 	case DriverStdio:
 		return newStdioConsumer(ctx, cfg)
 	default:
@@ -217,6 +241,8 @@ func NewProducer(cfg ProducerConfig) (Producer, error) {
 	switch normalizeDriver(cfg.Driver) {
 	case DriverKafka:
 		return newKafkaProducer(cfg)
+	case DriverPostgres:
+		return newPostgresProducer(cfg)
 	case DriverStdio:
 		return newStdioProducer(cfg), nil
 	default:
