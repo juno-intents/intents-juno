@@ -112,6 +112,8 @@ Options:
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
   --base-event-shadow-queue-driver <driver>
                                    optional base-event-scanner shadow queue driver during Phase 5 (postgres)
+  --proof-shadow-queue-driver <driver>
+                                   optional deposit-relayer/withdraw-finalizer proof request shadow queue driver during Phase 5 (postgres)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
@@ -3431,6 +3433,7 @@ command_run() {
   local shared_validation_remote_output="/tmp/testnet-e2e-shared-infra-summary.json"
   local shared_output=""
   local base_event_shadow_queue_driver=""
+  local proof_shadow_queue_driver=""
   local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
   local relayer_runtime_operator_ssh_user=""
@@ -3837,6 +3840,11 @@ command_run() {
         base_event_shadow_queue_driver="$2"
         shift 2
         ;;
+      --proof-shadow-queue-driver)
+        [[ $# -ge 2 ]] || die "missing value for --proof-shadow-queue-driver"
+        proof_shadow_queue_driver="$2"
+        shift 2
+        ;;
       --relayer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
         relayer_runtime_mode="$(lower "$2")"
@@ -4087,6 +4095,13 @@ command_run() {
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (runner-side shared-infra checkpoint package pin/fetch verification)"
   if [[ -n "$base_event_shadow_queue_driver" ]]; then
     [[ "$base_event_shadow_queue_driver" == "postgres" ]] || die "--base-event-shadow-queue-driver supports only postgres during Phase 5 shadowing"
+  fi
+  if [[ -n "$proof_shadow_queue_driver" ]]; then
+    [[ "$proof_shadow_queue_driver" == "postgres" ]] || die "--proof-shadow-queue-driver supports only postgres during Phase 5 shadowing"
+  fi
+  local -a proof_shadow_queue_args=()
+  if [[ "$proof_shadow_queue_driver" == "postgres" ]]; then
+    proof_shadow_queue_args+=(--proof-shadow-queue-driver postgres)
   fi
   if [[ -z "$operator_checkpoint_ipfs_api_url" ]]; then
     operator_checkpoint_ipfs_api_url="$shared_ipfs_api_url"
@@ -6773,6 +6788,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$deposit_relayer_proof_group" \
+          "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
@@ -6880,6 +6896,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$withdraw_finalizer_proof_group" \
+          "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
@@ -6913,6 +6930,7 @@ command_run() {
             --proof-result-topic "$proof_result_topic" \
             --proof-failure-topic "$proof_failure_topic" \
             --proof-response-group "$deposit_relayer_proof_group" \
+            "${proof_shadow_queue_args[@]}" \
             --submit-timeout "$relayer_submit_timeout" \
             --queue-driver kafka \
             --queue-brokers "$shared_kafka_brokers" \
@@ -6994,6 +7012,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$withdraw_finalizer_proof_group" \
+          "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \

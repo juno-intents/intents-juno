@@ -974,6 +974,24 @@ test_base_event_scanner_can_shadow_to_postgres_queue() {
   assert_contains "$script_text" 'scanner_args+=(--shadow-queue-driver postgres)' "base-event-scanner shadows withdraw events into postgres queue when enabled"
 }
 
+test_proof_request_relayers_can_shadow_to_postgres_queue() {
+  local script_text
+  local proof_shadow_arg_refs
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--proof-shadow-queue-driver <driver>' "run-testnet-e2e exposes proof request shadow queue driver flag"
+  assert_contains "$script_text" 'local proof_shadow_queue_driver=""' "run-testnet-e2e tracks proof request shadow queue driver"
+  assert_contains "$script_text" '--proof-shadow-queue-driver)' "run-testnet-e2e parses proof request shadow queue driver"
+  assert_contains "$script_text" '[[ "$proof_shadow_queue_driver" == "postgres" ]] || die "--proof-shadow-queue-driver supports only postgres during Phase 5 shadowing"' "run-testnet-e2e rejects unsupported proof request shadow drivers"
+  assert_contains "$script_text" 'local -a proof_shadow_queue_args=()' "run-testnet-e2e builds reusable proof shadow queue args"
+  assert_contains "$script_text" 'proof_shadow_queue_args+=(--proof-shadow-queue-driver postgres)' "proof request relayers shadow proof requests into postgres queue when enabled"
+  proof_shadow_arg_refs="$(grep -F -c '"${proof_shadow_queue_args[@]}" \' <<<"$script_text" | tr -d ' ')"
+  if (( proof_shadow_arg_refs != 4 )); then
+    printf 'assert_count failed: proof shadow args must be passed to distributed and runner relayers (references=%s)\n' "$proof_shadow_arg_refs" >&2
+    exit 1
+  fi
+}
+
 test_shared_proof_services_restart_after_topic_ensure() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1247,6 +1265,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_sp1_rpc_defaults_and_validation_target_succinct_network
   test_shared_infra_validation_precreates_bridge_and_proof_topics
   test_base_event_scanner_can_shadow_to_postgres_queue
+  test_proof_request_relayers_can_shadow_to_postgres_queue
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
