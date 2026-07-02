@@ -85,6 +85,7 @@ locals {
   shared_deposit_image_id_hex                  = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
+  shared_queue_driver                          = lower(trimspace(var.shared_queue_driver))
   shared_kafka_cluster_arn                     = coalesce(aws_msk_cluster.shared.arn, "")
   shared_kafka_bootstrap_brokers               = coalesce(aws_msk_cluster.shared.bootstrap_brokers_sasl_iam, "")
   shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
@@ -99,7 +100,10 @@ locals {
   shared_sp1_required_credit_buffer            = local.shared_sp1_projected_with_overhead * 3
   shared_sp1_deposit_program_url               = trimspace(var.shared_sp1_deposit_program_url_override) != "" ? trimspace(var.shared_sp1_deposit_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/deposit-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_deposit_image_id_hex) : ""
   shared_sp1_withdraw_program_url              = trimspace(var.shared_sp1_withdraw_program_url_override) != "" ? trimspace(var.shared_sp1_withdraw_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
-  shared_proof_requestor_command = [
+  shared_queue_kafka_args                      = ["--queue-brokers", local.shared_kafka_bootstrap_brokers]
+  shared_queue_postgres_args                   = ["--queue-postgres-dsn-env", "POSTGRES_DSN"]
+  shared_proof_queue_args                      = concat(["--queue-driver", local.shared_queue_driver], local.shared_queue_driver == "postgres" ? local.shared_queue_postgres_args : local.shared_queue_kafka_args)
+  shared_proof_requestor_command = concat([
     "/usr/local/bin/proof-requestor",
     "--postgres-dsn-env", "POSTGRES_DSN",
     "--store-driver", "postgres",
@@ -114,12 +118,11 @@ locals {
     "--failure-topic", local.shared_proof_failure_topic,
     "--max-inflight-requests", "32",
     "--request-timeout", format("%ds", var.shared_sp1_request_timeout_seconds),
-    "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
+    ], local.shared_proof_queue_args, [
     "--queue-group", local.shared_proof_requestor_group,
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
-  ]
-  shared_proof_funder_command = [
+  ])
+  shared_proof_funder_command = concat([
     "/usr/local/bin/proof-funder",
     "--postgres-dsn-env", "POSTGRES_DSN",
     "--lease-driver", "postgres",
@@ -127,10 +130,9 @@ locals {
     "--sp1-requestor-address", local.shared_sp1_requestor_address,
     "--min-balance-wei", tostring(local.shared_sp1_required_credit_buffer),
     "--critical-balance-wei", tostring(local.shared_sp1_projected_with_overhead),
-    "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
+    ], local.shared_proof_queue_args, [
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
-  ]
+  ])
   shared_proof_requestor_environment = [
     {
       name  = "JUNO_QUEUE_KAFKA_TLS"
@@ -1483,7 +1485,7 @@ resource "aws_launch_template" "proof_role" {
     Type=simple
     ExecStartPre=/usr/local/bin/render-proof-env.sh requestor
     EnvironmentFile=/etc/intents-juno/proof-requestor.env
-    ExecStart=/usr/local/bin/proof-requestor --postgres-dsn-env POSTGRES_DSN --store-driver postgres --owner ${local.resource_name}-proof-requestor --sp1-requestor-address ${local.shared_sp1_requestor_address} --sp1-requestor-key-env PROOF_REQUESTOR_KEY --secrets-driver env --chain-id ${var.shared_base_chain_id} --input-topic ${local.shared_proof_request_topic} --result-topic ${local.shared_proof_result_topic} --failure-topic ${local.shared_proof_failure_topic} --queue-driver kafka --queue-brokers ${local.shared_kafka_bootstrap_brokers} --queue-group ${local.shared_proof_requestor_group} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    ExecStart=/usr/local/bin/proof-requestor --postgres-dsn-env POSTGRES_DSN --store-driver postgres --owner ${local.resource_name}-proof-requestor --sp1-requestor-address ${local.shared_sp1_requestor_address} --sp1-requestor-key-env PROOF_REQUESTOR_KEY --secrets-driver env --chain-id ${var.shared_base_chain_id} --input-topic ${local.shared_proof_request_topic} --result-topic ${local.shared_proof_result_topic} --failure-topic ${local.shared_proof_failure_topic} --queue-driver ${local.shared_queue_driver} ${local.shared_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --queue-group ${local.shared_proof_requestor_group} --sp1-bin /usr/local/bin/sp1-prover-adapter
     Restart=always
     RestartSec=5
 
@@ -1501,7 +1503,7 @@ resource "aws_launch_template" "proof_role" {
     Type=simple
     ExecStartPre=/usr/local/bin/render-proof-env.sh funder
     EnvironmentFile=/etc/intents-juno/proof-funder.env
-    ExecStart=/usr/local/bin/proof-funder --postgres-dsn-env POSTGRES_DSN --lease-driver postgres --owner-id ${local.resource_name}-proof-funder --sp1-requestor-address ${local.shared_sp1_requestor_address} --min-balance-wei ${local.shared_sp1_required_credit_buffer} --critical-balance-wei ${local.shared_sp1_projected_with_overhead} --queue-driver kafka --queue-brokers ${local.shared_kafka_bootstrap_brokers} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    ExecStart=/usr/local/bin/proof-funder --postgres-dsn-env POSTGRES_DSN --lease-driver postgres --owner-id ${local.resource_name}-proof-funder --sp1-requestor-address ${local.shared_sp1_requestor_address} --min-balance-wei ${local.shared_sp1_required_credit_buffer} --critical-balance-wei ${local.shared_sp1_projected_with_overhead} --queue-driver ${local.shared_queue_driver} ${local.shared_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --sp1-bin /usr/local/bin/sp1-prover-adapter
     Restart=always
     RestartSec=5
 

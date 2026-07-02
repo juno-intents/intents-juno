@@ -150,6 +150,17 @@ variable "shared_kafka_port" {
   }
 }
 
+variable "shared_queue_driver" {
+  description = "Queue transport used by shared proof services. Kafka remains the default until Postgres shadow/cutover is complete."
+  type        = string
+  default     = "kafka"
+
+  validation {
+    condition     = contains(["kafka", "postgres"], lower(trimspace(var.shared_queue_driver)))
+    error_message = "shared_queue_driver must be one of kafka or postgres."
+  }
+}
+
 variable "shared_msk_kafka_version" {
   description = "Kafka version for the production MSK cluster."
   type        = string
