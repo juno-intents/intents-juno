@@ -2704,8 +2704,19 @@ production_render_shared_manifest() {
   if [[ -z "$queue_driver" ]]; then
     queue_driver="kafka"
   fi
+  queue_driver="$(lower "$queue_driver")"
+  case "$queue_driver" in
+    kafka|postgres)
+      ;;
+    *)
+      die "shared queue driver must be kafka or postgres (got: $queue_driver)"
+      ;;
+  esac
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
-  kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
+  kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" false)"
+  if [[ "$queue_driver" == "kafka" && -z "$kafka_brokers" ]]; then
+    die "missing required terraform output: shared_kafka_bootstrap_brokers"
+  fi
   shared_ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
   shared_proof_requestor_service_name="$(production_tf_output_value "$tf_json" "shared_proof_requestor_service_name" false)"
   shared_proof_funder_service_name="$(production_tf_output_value "$tf_json" "shared_proof_funder_service_name" false)"
@@ -2953,7 +2964,7 @@ production_render_shared_manifest() {
         },
         kafka: {
           cluster_arn: (if $kafka_cluster_arn == "" then null else $kafka_cluster_arn end),
-          bootstrap_brokers: $kafka_brokers,
+          bootstrap_brokers: (if $kafka_brokers == "" then null else $kafka_brokers end),
           tls: true,
           auth: {
             mode: $kafka_auth_mode,
@@ -3874,7 +3885,7 @@ production_render_operator_stack_env() {
   esac
 
   cat >"$output_file" <<EOF
-CHECKPOINT_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
+CHECKPOINT_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")
 CHECKPOINT_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 CHECKPOINT_SIGNER_DRIVER=$signer_driver
 CHECKPOINT_OPERATORS=$checkpoint_operators
@@ -3885,8 +3896,8 @@ OPERATOR_QUEUE_DRIVER=$shared_queue_driver
 CHECKPOINT_QUEUE_DRIVER=$shared_queue_driver
 PROOF_QUEUE_DRIVER=$shared_queue_driver
 JUNO_QUEUE_KAFKA_TLS=true
-JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode' "$shared_manifest")
-JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region' "$shared_manifest")
+JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode // ""' "$shared_manifest")
+JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region // ""' "$shared_manifest")
 OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
@@ -4107,7 +4118,7 @@ BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=$base_relayer_gas_min_wei
 BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
 BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
 BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
-BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
+BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 BACKOFFICE_IPFS_API_BEARER_TOKEN=$ipfs_api_bearer_token
 BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=$cloudflare_tunnel_token

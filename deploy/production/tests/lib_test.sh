@@ -1052,6 +1052,101 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers() {
+  local workdir shared_manifest tf_json output_env
+  local backoffice_env
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_queue_driver = { value: "postgres" }
+    | del(.shared_kafka_bootstrap_brokers)
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "postgres" "shared manifest keeps postgres queue driver"
+  assert_eq "$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")" "" "postgres shared manifest allows absent kafka brokers"
+
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$shared_manifest" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+  assert_eq "$(production_env_get_value "$output_env" CHECKPOINT_KAFKA_BROKERS)" "" "postgres operator env leaves kafka brokers empty"
+  assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=postgres" "operator env follows postgres queue driver without kafka brokers"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=postgres" "checkpoint env follows postgres queue driver without kafka brokers"
+  assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=postgres" "proof env follows postgres queue driver without kafka brokers"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_KAFKA_BROKERS=null" "operator env never writes literal null kafka brokers"
+
+  cat >"$workdir/app-deploy.json" <<'EOF'
+{
+  "juno_rpc_url": "http://127.0.0.1:18232",
+  "juno_scan_wallet_id": "",
+  "operator_addresses": ["0x1111111111111111111111111111111111111111"],
+  "operator_endpoints": ["0x1111111111111111111111111111111111111111=203.0.113.11:18443"],
+  "service_urls": ["bridge-api=http://127.0.0.1:8082/readyz"],
+  "base_relayer_signer_addresses": "",
+  "services": {
+    "backoffice": {
+      "listen_addr": "127.0.0.1:8083"
+    }
+  }
+}
+EOF
+  backoffice_env="$workdir/backoffice.env"
+  production_render_backoffice_env "$shared_manifest" "$workdir/app-deploy.json" "$workdir/resolved.env" "$backoffice_env"
+  assert_eq "$(production_env_get_value "$backoffice_env" BACKOFFICE_KAFKA_BROKERS)" "" "postgres backoffice env leaves kafka brokers empty"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_KAFKA_BROKERS=null" "backoffice env never writes literal null kafka brokers"
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue() {
+  local workdir tf_json shared_manifest
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq 'del(.shared_queue_driver, .shared_kafka_bootstrap_brokers)' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+  shared_manifest="$workdir/shared-manifest.json"
+
+  if (production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir" >/dev/null 2>&1); then
+    printf 'expected kafka queue manifest rendering to require kafka brokers\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard() {
   local workdir shared_manifest app_manifest tf_json
   workdir="$(mktemp -d)"
@@ -4192,6 +4287,8 @@ main() {
   test_resolve_secret_contract_allows_alpha_literals
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
+  test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers
+  test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue
   test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard
   test_render_shared_manifest_synthesizes_legacy_wireguard_peer_roster_from_client_config_secret
   test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions
