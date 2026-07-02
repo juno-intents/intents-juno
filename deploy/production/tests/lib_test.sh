@@ -133,6 +133,19 @@ write_inventory_fixture() {
   ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_shared_manifest_fixture() {
+  local target="$1"
+  local workdir="$2"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$target" \
+    "$workdir"
+}
+
 write_live_e2e_tfvars_fixture() {
   local target="$1"
   cat >"$target" <<'EOF'
@@ -1225,6 +1238,159 @@ EOF
   production_render_backoffice_env "$shared_manifest" "$workdir/app-deploy.json" "$workdir/resolved.env" "$backoffice_env"
   assert_eq "$(production_env_get_value "$backoffice_env" BACKOFFICE_KAFKA_BROKERS)" "" "postgres backoffice env leaves kafka brokers empty"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_KAFKA_BROKERS=null" "backoffice env never writes literal null kafka brokers"
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_includes_proof_queue_controls() {
+  local workdir shared_manifest tf_json
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.shadow.driver = "postgres"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_queue_driver = { value: "kafka" }
+    | .shared_proof_queue_driver = { value: "kafka" }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "kafka" "shared manifest keeps shared queue on kafka"
+  assert_eq "$(jq -r '.shared_services.proof_queue.driver' "$shared_manifest")" "kafka" "shared manifest carries proof queue primary driver"
+  assert_eq "$(jq -r '.shared_services.proof_queue.shadow.driver' "$shared_manifest")" "postgres" "shared manifest carries proof queue shadow driver"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_enables_proof_shadow_queue() {
+  local workdir shared_manifest output_env
+  workdir="$(mktemp -d)"
+  write_shared_manifest_fixture "$workdir/shared-manifest.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.shadow.driver = "postgres"
+  ' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  shared_manifest="$workdir/shared-manifest.json"
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_QUEUE_CRITICAL_HMAC_KEY=critical
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$shared_manifest" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=kafka" "operator env keeps non-proof queue on kafka during proof shadowing"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=kafka" "checkpoint env keeps kafka during proof shadowing"
+  assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=kafka" "proof env keeps kafka as proof primary during shadowing"
+  assert_contains "$(cat "$output_env")" "PROOF_SHADOW_QUEUE_DRIVER=postgres" "proof env enables postgres shadow writes"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_uses_proof_queue_driver_override() {
+  local workdir output_env
+  workdir="$(mktemp -d)"
+  write_shared_manifest_fixture "$workdir/shared-manifest.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.driver = "postgres"
+    | del(.shared_services.proof_queue.shadow)
+  ' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_QUEUE_CRITICAL_HMAC_KEY=critical
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=kafka" "operator env keeps shared queue driver on kafka"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=kafka" "checkpoint env keeps shared queue driver on kafka"
+  assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=postgres" "proof env follows proof queue primary override"
+  assert_not_contains "$(cat "$output_env")" "PROOF_SHADOW_QUEUE_DRIVER=" "proof queue primary override does not imply shadow writes"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_rejects_duplicate_proof_shadow_driver() {
+  local workdir output_env stderr_file
+  workdir="$(mktemp -d)"
+  write_shared_manifest_fixture "$workdir/shared-manifest.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.driver = "postgres"
+    | .shared_services.proof_queue.shadow.driver = "postgres"
+  ' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_QUEUE_CRITICAL_HMAC_KEY=critical
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  output_env="$workdir/operator-stack.env"
+  stderr_file="$workdir/stderr.log"
+  if (production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env" 2>"$stderr_file"); then
+    printf 'expected production_render_operator_stack_env to reject duplicate proof primary and shadow drivers\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr_file")" "shared manifest proof queue shadow driver must differ from proof queue driver" "operator env rejects duplicate proof shadow driver"
   rm -rf "$workdir"
 }
 
@@ -4456,6 +4622,7 @@ main() {
   test_render_shared_manifest_rejects_nonroutable_dkg_endpoints
   test_render_shared_manifest_requires_signer_ufvk
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
+  test_render_shared_manifest_includes_proof_queue_controls
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_handoffs_rejects_local_checkpoint_signer_driver
   test_render_operator_handoffs_preserves_secure_preview_signer_configuration
@@ -4467,6 +4634,9 @@ main() {
   test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
   test_render_operator_stack_env_retargets_runtime_values_from_shared_manifest
+  test_render_operator_stack_env_enables_proof_shadow_queue
+  test_render_operator_stack_env_uses_proof_queue_driver_override
+  test_render_operator_stack_env_rejects_duplicate_proof_shadow_driver
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_preserves_secure_preview_signer_configuration
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id

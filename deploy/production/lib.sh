@@ -2694,7 +2694,7 @@ production_render_shared_manifest() {
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
-  local postgres_endpoint postgres_port queue_driver kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
+  local postgres_endpoint postgres_port queue_driver proof_queue_driver proof_shadow_queue_driver kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
   local shared_ecs_cluster_arn shared_proof_requestor_service_name shared_proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
@@ -2752,6 +2752,38 @@ production_render_shared_manifest() {
       die "shared queue driver must be kafka or postgres (got: $queue_driver)"
       ;;
   esac
+  proof_queue_driver="$(production_tf_output_value "$tf_json" "shared_proof_queue_driver" false)"
+  proof_queue_driver="$(trim "$proof_queue_driver")"
+  if [[ -n "$proof_queue_driver" ]]; then
+    proof_queue_driver="$(lower "$proof_queue_driver")"
+    case "$proof_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared proof queue driver must be kafka or postgres (got: $proof_queue_driver)"
+        ;;
+    esac
+  fi
+  proof_shadow_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue.shadow? | type == "object") and (.shared_services.proof_queue.shadow | has("driver"))' "$inventory" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.shadow.driver | type == "string" and (length > 0)' "$inventory" >/dev/null 2>&1; then
+      die "shared_services.proof_queue.shadow.driver must be kafka or postgres"
+    fi
+    proof_shadow_queue_driver="$(production_json_required "$inventory" '.shared_services.proof_queue.shadow.driver')"
+    proof_shadow_queue_driver="$(trim "$proof_shadow_queue_driver")"
+    [[ -n "$proof_shadow_queue_driver" ]] || die "shared_services.proof_queue.shadow.driver must be kafka or postgres"
+    proof_shadow_queue_driver="$(lower "$proof_shadow_queue_driver")"
+    case "$proof_shadow_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared_services.proof_queue.shadow.driver must be kafka or postgres (got: $proof_shadow_queue_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$proof_shadow_queue_driver" && "${proof_queue_driver:-$queue_driver}" == "$proof_shadow_queue_driver" ]]; then
+    die "shared proof queue shadow driver must differ from proof queue driver"
+  fi
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" false)"
   if [[ "$queue_driver" == "kafka" && -z "$kafka_brokers" ]]; then
@@ -2935,6 +2967,8 @@ production_render_shared_manifest() {
     --arg postgres_cluster_arn "$postgres_cluster_arn" \
     --arg postgres_port "$postgres_port" \
     --arg queue_driver "$queue_driver" \
+    --arg proof_queue_driver "$proof_queue_driver" \
+    --arg proof_shadow_queue_driver "$proof_shadow_queue_driver" \
     --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
     --arg shared_ecs_cluster_arn "$shared_ecs_cluster_arn" \
@@ -2990,7 +3024,7 @@ production_render_shared_manifest() {
       version: $version,
       environment: $environment,
       generated_at: $generated_at,
-      shared_services: {
+      shared_services: ({
         aws_profile: $aws_profile,
         aws_region: $aws_region,
         terraform_dir: $terraform_dir,
@@ -3039,7 +3073,12 @@ production_render_shared_manifest() {
           checkpoint_blob_prefix: (if $dkg_prefix == "" then null else $dkg_prefix end),
           checkpoint_blob_sse_kms_key_id: (if $dkg_kms_key_arn == "" then null else $dkg_kms_key_arn end)
         }
-      },
+      } + (if $proof_queue_driver == "" and $proof_shadow_queue_driver == "" then {} else {
+        proof_queue: (
+          (if $proof_queue_driver == "" then {} else {driver: $proof_queue_driver} end)
+          + (if $proof_shadow_queue_driver == "" then {} else {shadow: {driver: $proof_shadow_queue_driver}} end)
+        )
+      } end)),
       contracts: {
         juno_network: $juno_network,
         base_rpc_url: $base_rpc_url,
@@ -3826,7 +3865,7 @@ production_render_operator_stack_env() {
   local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
-  local shared_queue_driver
+  local shared_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver proof_shadow_queue_driver_env_line
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
   deposit_scan_wallet_id=""
@@ -3861,6 +3900,48 @@ production_render_operator_stack_env() {
       die "shared manifest queue driver must be kafka or postgres (got: $shared_queue_driver)"
       ;;
   esac
+  shared_proof_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest proof queue driver must be kafka or postgres"
+    fi
+    shared_proof_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.proof_queue.driver')"
+    shared_proof_queue_driver="$(trim "$shared_proof_queue_driver")"
+    [[ -n "$shared_proof_queue_driver" ]] || die "shared manifest proof queue driver must be kafka or postgres"
+    shared_proof_queue_driver="$(lower "$shared_proof_queue_driver")"
+    case "$shared_proof_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared manifest proof queue driver must be kafka or postgres (got: $shared_proof_queue_driver)"
+        ;;
+    esac
+  fi
+  effective_proof_queue_driver="${shared_proof_queue_driver:-$shared_queue_driver}"
+  proof_shadow_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue.shadow? | type == "object") and (.shared_services.proof_queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest proof queue shadow driver must be kafka or postgres"
+    fi
+    proof_shadow_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.proof_queue.shadow.driver')"
+    proof_shadow_queue_driver="$(trim "$proof_shadow_queue_driver")"
+    [[ -n "$proof_shadow_queue_driver" ]] || die "shared manifest proof queue shadow driver must be kafka or postgres"
+    proof_shadow_queue_driver="$(lower "$proof_shadow_queue_driver")"
+    case "$proof_shadow_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared manifest proof queue shadow driver must be kafka or postgres (got: $proof_shadow_queue_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$proof_shadow_queue_driver" && "$effective_proof_queue_driver" == "$proof_shadow_queue_driver" ]]; then
+    die "shared manifest proof queue shadow driver must differ from proof queue driver"
+  fi
+  proof_shadow_queue_driver_env_line=""
+  if [[ -n "$proof_shadow_queue_driver" ]]; then
+    proof_shadow_queue_driver_env_line="PROOF_SHADOW_QUEUE_DRIVER=$proof_shadow_queue_driver"
+  fi
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
   kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   if [[ -z "$kafka_critical_hmac_key" ]]; then
@@ -3934,7 +4015,8 @@ CHECKPOINT_SIGNATURE_TOPIC=$(jq -r '.checkpoint.signature_topic' "$shared_manife
 CHECKPOINT_PACKAGE_TOPIC=$(jq -r '.checkpoint.package_topic' "$shared_manifest")
 OPERATOR_QUEUE_DRIVER=$shared_queue_driver
 CHECKPOINT_QUEUE_DRIVER=$shared_queue_driver
-PROOF_QUEUE_DRIVER=$shared_queue_driver
+PROOF_QUEUE_DRIVER=$effective_proof_queue_driver
+$proof_shadow_queue_driver_env_line
 JUNO_QUEUE_KAFKA_TLS=true
 JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode // ""' "$shared_manifest")
 JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region // ""' "$shared_manifest")

@@ -16,7 +16,7 @@ Checks:
   - AWS auth for shared-services verification
   - Postgres reachability plus optional Aurora cluster health
   - Kafka auth mode plus broker TCP reachability and optional MSK cluster health
-  - Optional Postgres queue backlog/lease inspection when the Postgres queue driver is selected
+  - Optional Postgres queue backlog/lease inspection when a shared or proof Postgres queue path is selected
   - IPFS API reachability plus optional target-group health
   - Artifact bucket reachability, versioning, and optional object lock
 
@@ -183,6 +183,28 @@ case "$queue_driver" in
   kafka|postgres) ;;
   *) die "shared_services.queue.driver must be kafka or postgres" ;;
 esac
+proof_queue_driver="$(production_json_optional "$shared_manifest" '.shared_services.proof_queue.driver | select(type == "string" and length > 0)')"
+proof_queue_driver="${proof_queue_driver:-$queue_driver}"
+proof_queue_driver="$(trim "$(tr '[:upper:]' '[:lower:]' <<<"$proof_queue_driver")")"
+case "$proof_queue_driver" in
+  kafka|postgres) ;;
+  *) die "shared_services.proof_queue.driver must be kafka or postgres" ;;
+esac
+proof_shadow_queue_driver=""
+if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue.shadow? | type == "object") and (.shared_services.proof_queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+  if ! jq -e '.shared_services.proof_queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+    die "shared_services.proof_queue.shadow.driver must be kafka or postgres"
+  fi
+  proof_shadow_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.proof_queue.shadow.driver')"
+  proof_shadow_queue_driver="$(trim "$(tr '[:upper:]' '[:lower:]' <<<"$proof_shadow_queue_driver")")"
+  case "$proof_shadow_queue_driver" in
+    kafka|postgres) ;;
+    *) die "shared_services.proof_queue.shadow.driver must be kafka or postgres" ;;
+  esac
+fi
+if [[ -n "$proof_shadow_queue_driver" && "$proof_shadow_queue_driver" == "$proof_queue_driver" ]]; then
+  die "shared_services.proof_queue.shadow.driver must differ from proof queue driver"
+fi
 if [[ "$queue_driver" == "kafka" ]]; then
   if [[ "$dry_run" != "true" ]]; then
     have_cmd nc || die "required command not found: nc"
@@ -212,6 +234,10 @@ queue_inspect_dsn_env="${PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV:-CHECK
 queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-proof.requests.v1|proof-requestor;deposits.event.v2,checkpoints.packages.v1|deposit-relayer;withdrawals.requested.v2|withdraw-coordinator;checkpoints.packages.v1|withdraw-finalizer;proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|}"
 queue_inspect_max_expired_leases="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES:-0}"
 queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-}"
+postgres_queue_inspection_enabled="false"
+if [[ -n "$queue_inspect_bin" ]] && { [[ "$queue_driver" == "postgres" ]] || [[ "$proof_queue_driver" == "postgres" ]] || [[ "$proof_shadow_queue_driver" == "postgres" ]]; }; then
+  postgres_queue_inspection_enabled="true"
+fi
 ipfs_min_healthy_targets=1
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
@@ -314,7 +340,7 @@ else
     postgres_detail="pg_isready failed"
   fi
 
-  if [[ "$queue_driver" == "postgres" && -n "$queue_inspect_bin" ]]; then
+  if [[ "$postgres_queue_inspection_enabled" == "true" ]]; then
     if [[ "$postgres_status" != "passed" ]]; then
       queue_status="failed"
       queue_detail="queue-inspect skipped because postgres check failed"
@@ -550,6 +576,8 @@ jq -n \
   --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
   --arg manifest "$shared_manifest" \
   --arg queue_driver "$queue_driver" \
+  --arg proof_queue_driver "$proof_queue_driver" \
+  --arg proof_shadow_queue_driver "$proof_shadow_queue_driver" \
   --arg aws_auth_status "$aws_auth_status" \
   --arg aws_auth_detail "$aws_auth_detail" \
   --arg postgres_status "$postgres_status" \
@@ -572,6 +600,8 @@ jq -n \
     generated_at: $generated_at,
     shared_manifest: $manifest,
     queue_driver: $queue_driver,
+    proof_queue_driver: $proof_queue_driver,
+    proof_shadow_queue_driver: (if $proof_shadow_queue_driver == "" then null else $proof_shadow_queue_driver end),
     ready_for_deploy: $ready_for_deploy,
     checks: {
       aws_auth: {

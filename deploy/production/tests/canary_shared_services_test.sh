@@ -424,6 +424,106 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "kafka"
+    },
+    "proof_queue": {
+      "shadow": {
+        "driver": "postgres"
+      }
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.alpha.internal:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      }
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  cat >"$fake_bin/queue-inspect" <<EOF
+#!/usr/bin/env bash
+printf 'queue-inspect %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws" "$fake_bin/queue-inspect"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "nc -z broker-1.alpha.internal 9098" "proof shadow canary still checks kafka primary"
+  assert_contains "$(cat "$log_file")" "queue-inspect --postgres-dsn-env CANARY_QUEUE_DSN" "proof shadow canary inspects postgres queue"
+  assert_eq "$(jq -r '.queue_driver' "$output_json")" "kafka" "proof shadow canary reports shared queue driver"
+  assert_eq "$(jq -r '.proof_queue_driver' "$output_json")" "kafka" "proof shadow canary reports proof primary driver"
+  assert_eq "$(jq -r '.proof_shadow_queue_driver' "$output_json")" "postgres" "proof shadow canary reports proof shadow driver"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "proof shadow canary queue inspect status"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "proof shadow canary keeps kafka health status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "proof shadow canary remains deployable"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -1096,6 +1196,7 @@ main() {
   test_shared_services_canary_requires_preview_iam_kafka_auth
   test_shared_services_canary_accepts_postgres_queue_without_kafka
   test_shared_services_canary_runs_postgres_queue_inspection_when_configured
+  test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow
   test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue
   test_shared_services_canary_checks_roles_for_postgres_queue
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
