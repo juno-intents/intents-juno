@@ -795,19 +795,19 @@ resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
 }
 
 resource "random_password" "shared_kafka_critical_hmac_key" {
-  count   = local.shared_queue_uses_kafka ? 1 : 0
+  count   = 1
   length  = 48
   special = false
 }
 
 resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" {
-  count = local.shared_queue_uses_kafka ? 1 : 0
+  count = 1
   name  = "${local.resource_name}-shared-kafka-critical-hmac-key"
   tags  = local.common_tags
 }
 
 resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" {
-  count         = local.shared_queue_uses_kafka ? 1 : 0
+  count         = 1
   secret_id     = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0].id
   secret_string = random_password.shared_kafka_critical_hmac_key[0].result
 }

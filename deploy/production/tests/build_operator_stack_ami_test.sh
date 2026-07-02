@@ -297,6 +297,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"' "config hydrator persists checkpoint blob sse kms key id"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"' "config hydrator persists the operator queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"' "config hydrator persists the proof queue driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver"' "config hydrator persists the proof shadow queue driver"
   assert_contains "$hydrator_script" 'for effective_queue_driver in \' "config hydrator evaluates effective queue drivers"
   assert_contains "$hydrator_script" 'if [[ "$queue_uses_kafka" == true ]]; then' "config hydrator validates kafka auth only when an effective queue driver uses kafka"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
@@ -325,6 +326,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$deposit_wrapper" '--deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-200}"' "deposit wrapper passes deposit confirmation seed"
   assert_contains "$deposit_wrapper" '--withdraw-planner-min-confirmations "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-200}"' "deposit wrapper passes withdraw planner confirmation seed"
   assert_contains "$deposit_wrapper" '--withdraw-batch-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-200}"' "deposit wrapper passes withdraw batch confirmation seed"
+  assert_contains "$deposit_wrapper" 'deposit_proof_shadow_queue_args=(--proof-shadow-queue-driver "${deposit_proof_shadow_queue_driver}")' "deposit wrapper can enable proof shadow queue driver"
+  assert_contains "$deposit_wrapper" '--proof-shadow-queue-postgres-dsn-env "${PROOF_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "deposit wrapper passes proof shadow queue DSN by env indirection"
 
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
@@ -424,6 +427,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   local withdraw_finalizer_wrapper
   withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
   assert_contains "$withdraw_finalizer_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "withdraw finalizer exports queue and queueauth env to the binary"
+  assert_contains "$withdraw_finalizer_wrapper" 'withdraw_finalizer_proof_shadow_queue_args=(--proof-shadow-queue-driver "${withdraw_finalizer_proof_shadow_queue_driver}")' "withdraw finalizer can enable proof shadow queue driver"
+  assert_contains "$withdraw_finalizer_wrapper" '--proof-shadow-queue-postgres-dsn-env "${PROOF_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw finalizer passes proof shadow queue DSN by env indirection"
 
   local juno_scan_backfill_wrapper
   juno_scan_backfill_wrapper="$(extract_block "cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'" "EOF_SCAN_BACKFILL")"
@@ -450,6 +455,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=' "bootstrap env leaves base-event-scanner start block unset until deploy"
   assert_contains "$script_text" 'OPERATOR_QUEUE_DRIVER=kafka' "bootstrap env defaults operator main queues to kafka"
   assert_contains "$script_text" 'PROOF_QUEUE_DRIVER=kafka' "bootstrap env defaults proof queues to kafka"
+  assert_contains "$script_text" 'PROOF_SHADOW_QUEUE_DRIVER=' "bootstrap env leaves proof shadow queue disabled until Phase 5 shadowing"
   assert_contains "$script_text" 'DEPOSIT_RELAYER_BASE_RPC_URL=' "bootstrap env leaves the dedicated deposit relayer rpc url unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
   assert_contains "$script_text" 'JUNO_SCAN_BACKFILL_FROM_HEIGHT=0' "bootstrap env pins the scanner backfill floor"
@@ -1467,6 +1473,62 @@ EOF
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-driver postgres' "$name wrapper can cut proof queues over explicitly"
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name wrapper passes proof queue DSN by env indirection"
     assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-brokers' "$name wrapper does not pass proof kafka brokers for postgres proof queue mode"
+  done
+
+  cat >"$env_file" <<EOF
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+OPERATOR_QUEUE_DRIVER=kafka
+PROOF_QUEUE_DRIVER=kafka
+PROOF_SHADOW_QUEUE_DRIVER=postgres
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
+CHECKPOINT_BLOB_BUCKET=checkpoint-bucket
+CHECKPOINT_IPFS_API_URL=http://127.0.0.1:5001
+CHECKPOINT_OPERATORS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
+CHECKPOINT_THRESHOLD=2
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+DEPOSIT_IMAGE_ID=deposit-image
+WITHDRAW_IMAGE_ID=withdraw-image
+BASE_RELAYER_URL=https://127.0.0.1:18081
+BASE_RPC_URL=https://127.0.0.1:8545
+BASE_RELAYER_AUTH_TOKEN=base-relayer-token
+WITHDRAW_BLOB_BUCKET=withdraw-bucket
+WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-finalizer
+WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
+JUNO_RPC_USER=rpc-user
+JUNO_RPC_PASS=rpc-pass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=wallet-coordinator
+WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=utest1changeaddress
+WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
+TSS_AUTH_TOKEN=tss-token
+WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=$cert_file
+WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$cert_file
+WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$key_file
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$signer_key
+WITHDRAW_BLOB_PREFIX=withdraw-live
+JUNO_SCAN_BEARER_TOKEN=scan-token
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+JUNO_QUEUE_KAFKA_AWS_REGION=us-east-1
+EOF
+
+  PATH="$fake_bin:$PATH" "$tmp/deposit-relayer.sh"
+  PATH="$fake_bin:$PATH" "$tmp/withdraw-finalizer.sh"
+  for name in deposit-relayer withdraw-finalizer; do
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-driver kafka' "$name keeps kafka as proof primary during shadow mode"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-brokers b-1.example:9094' "$name keeps proof kafka brokers during shadow mode"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-driver postgres' "$name enables postgres proof shadow queue"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name passes proof shadow queue DSN by env indirection"
+    assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-required' "$name leaves optional shadow fail-open by default"
   done
 
   cat >"$env_file" <<EOF

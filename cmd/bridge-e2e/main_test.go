@@ -816,6 +816,61 @@ func TestParseArgs_SP1AutoQueueSubmissionModeValidWithoutRequestorKey(t *testing
 	}
 }
 
+func TestParseArgs_SP1AutoQueueSubmissionModePostgresWithoutBrokers(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--sp1-auto",
+		"--sp1-bin", "sp1",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
+		"--sp1-proof-submission-mode", "queue",
+		"--sp1-proof-queue-driver", "postgres",
+		"--sp1-proof-queue-postgres-dsn", "postgres://queue-db?sslmode=require",
+		"--sp1-proof-request-topic", "proof.requests.v1",
+		"--sp1-proof-result-topic", "proof.fulfillments.v1",
+		"--sp1-proof-failure-topic", "proof.failures.v1",
+		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--sp1-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--sp1-input-s3-bucket", "test-bucket",
+		"--sp1-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--sp1-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--sp1-deposit-witness-item-file", depositWitness,
+		"--sp1-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.SP1.ProofQueueDriver != "postgres" {
+		t.Fatalf("proof queue driver: got=%q want=postgres", cfg.SP1.ProofQueueDriver)
+	}
+	if len(cfg.SP1.ProofQueueBrokers) != 0 {
+		t.Fatalf("proof queue brokers should be optional for postgres, got=%v", cfg.SP1.ProofQueueBrokers)
+	}
+	if cfg.SP1.ProofQueuePostgresDSN != "postgres://queue-db?sslmode=require" {
+		t.Fatalf("proof queue postgres dsn: got=%q", cfg.SP1.ProofQueuePostgresDSN)
+	}
+}
+
 func TestParseArgs_SP1AutoQueueSubmissionModeRequiresQueueBrokers(t *testing.T) {
 	t.Parallel()
 
@@ -857,6 +912,51 @@ func TestParseArgs_SP1AutoQueueSubmissionModeRequiresQueueBrokers(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "--sp1-proof-queue-brokers") {
 		t.Fatalf("expected missing proof queue brokers error, got: %v", err)
+	}
+}
+
+func TestParseArgs_SP1AutoQueueSubmissionModeRequiresPostgresDSN(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--sp1-auto",
+		"--sp1-bin", "sp1",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
+		"--sp1-proof-submission-mode", "queue",
+		"--sp1-proof-queue-driver", "postgres",
+		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--sp1-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--sp1-input-s3-bucket", "test-bucket",
+		"--sp1-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--sp1-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--sp1-deposit-witness-item-file", depositWitness,
+		"--sp1-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--sp1-proof-queue-postgres-dsn") {
+		t.Fatalf("expected missing proof queue postgres dsn error, got: %v", err)
 	}
 }
 

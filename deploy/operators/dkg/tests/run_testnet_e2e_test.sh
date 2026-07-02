@@ -616,7 +616,7 @@ test_direct_cli_user_proof_uses_queue_submission_mode() {
 
   assert_contains "$script_text" 'direct_cli_proof_submission_mode="$sp1_proof_submission_mode"' "direct-cli user proof scenario reuses configured proof submission mode"
   assert_contains "$script_text" '"--sp1-proof-submission-mode" "$direct_cli_proof_submission_mode"' "direct-cli user proof scenario forwards explicit proof submission mode"
-  assert_contains "$script_text" '"--sp1-proof-queue-brokers" "$shared_kafka_brokers"' "direct-cli user proof scenario forwards shared proof queue brokers"
+  assert_contains "$script_text" 'direct_cli_bridge_base_args+=("${bridge_proof_queue_args[@]}")' "direct-cli user proof scenario forwards reusable bridge proof queue args"
   assert_contains "$script_text" '"--sp1-proof-request-topic" "$proof_request_topic"' "direct-cli user proof scenario forwards proof request topic"
   assert_contains "$script_text" '"--sp1-proof-result-topic" "$proof_result_topic"' "direct-cli user proof scenario forwards proof result topic"
   assert_contains "$script_text" '"--sp1-proof-failure-topic" "$proof_failure_topic"' "direct-cli user proof scenario forwards proof failure topic"
@@ -1015,8 +1015,12 @@ test_proof_request_relayers_can_cut_over_to_postgres_queue() {
   assert_contains "$script_text" '[[ "$proof_queue_driver" == "postgres" ]] || die "--proof-queue-driver supports only postgres during Phase 5 cutover"' "run-testnet-e2e rejects unsupported proof queue drivers"
   assert_contains "$script_text" '[[ -z "$proof_shadow_queue_driver" ]] || die "--proof-shadow-queue-driver must be empty when --proof-queue-driver postgres is enabled"' "run-testnet-e2e prevents duplicate postgres proof queue writes during cutover"
   assert_contains "$script_text" 'local -a proof_queue_args=()' "run-testnet-e2e builds reusable proof queue args"
+  assert_contains "$script_text" 'local -a bridge_proof_queue_args=()' "run-testnet-e2e builds reusable bridge proof queue args"
   assert_contains "$script_text" 'local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "shared proof services default to kafka queue args"
   assert_contains "$script_text" 'proof_queue_args+=(--proof-queue-driver postgres)' "proof request relayers use postgres as the primary proof queue when enabled"
+  assert_contains "$script_text" 'bridge_proof_queue_args+=(--sp1-proof-queue-driver postgres --sp1-proof-queue-postgres-dsn "$shared_postgres_dsn")' "bridge-e2e uses postgres proof queue args when enabled"
+  assert_contains "$script_text" 'bridge_proof_queue_args+=(--sp1-proof-queue-driver kafka --sp1-proof-queue-brokers "$shared_kafka_brokers")' "bridge-e2e uses kafka proof queue args by default"
+  assert_contains "$script_text" 'bridge_args+=("${bridge_proof_queue_args[@]}")' "bridge deployment forwards reusable bridge proof queue args"
   assert_contains "$script_text" 'proof_service_queue_args=(--queue-driver postgres)' "shared proof services use postgres as the primary proof queue when enabled"
   proof_queue_arg_refs="$(grep -F -c '"${proof_queue_args[@]}" \' <<<"$script_text" | tr -d ' ')"
   if (( proof_queue_arg_refs != 4 )); then

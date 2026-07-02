@@ -4232,10 +4232,14 @@ command_run() {
     [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required when any active queue path uses kafka"
   fi
   local -a proof_queue_args=()
+  local -a bridge_proof_queue_args=()
   local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
   if [[ "$proof_queue_driver" == "postgres" ]]; then
     proof_queue_args+=(--proof-queue-driver postgres)
+    bridge_proof_queue_args+=(--sp1-proof-queue-driver postgres --sp1-proof-queue-postgres-dsn "$shared_postgres_dsn")
     proof_service_queue_args=(--queue-driver postgres)
+  else
+    bridge_proof_queue_args+=(--sp1-proof-queue-driver kafka --sp1-proof-queue-brokers "$shared_kafka_brokers")
   fi
   local -a operator_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
   if [[ "$operator_queue_driver" == "postgres" ]]; then
@@ -5400,7 +5404,6 @@ command_run() {
   bridge_args+=(
     "--sp1-rpc-url" "$sp1_rpc_url"
     "--sp1-proof-submission-mode" "$sp1_proof_submission_mode"
-    "--sp1-proof-queue-brokers" "$shared_kafka_brokers"
     "--sp1-proof-request-topic" "$proof_request_topic"
     "--sp1-proof-result-topic" "$proof_result_topic"
     "--sp1-proof-failure-topic" "$proof_failure_topic"
@@ -5420,6 +5423,7 @@ command_run() {
     "--sp1-auction-timeout" "$sp1_auction_timeout"
     "--sp1-request-timeout" "$sp1_request_timeout"
   )
+  bridge_args+=("${bridge_proof_queue_args[@]}")
   bridge_args+=(
     "--sp1-deposit-owallet-ivk-hex" "$sp1_deposit_owallet_ivk_hex"
     "--sp1-withdraw-owallet-ovk-hex" "$sp1_withdraw_owallet_ovk_hex"
@@ -5537,7 +5541,6 @@ command_run() {
       "--sp1-bin" "$sp1_bin"
       "--sp1-rpc-url" "$sp1_rpc_url"
       "--sp1-proof-submission-mode" "$direct_cli_proof_submission_mode"
-      "--sp1-proof-queue-brokers" "$shared_kafka_brokers"
       "--sp1-proof-request-topic" "$proof_request_topic"
       "--sp1-proof-result-topic" "$proof_result_topic"
       "--sp1-proof-failure-topic" "$proof_failure_topic"
@@ -5558,6 +5561,7 @@ command_run() {
       "--sp1-request-timeout" "$sp1_request_timeout"
       "--sp1-requestor-key-file" "$direct_cli_requestor_key_file"
     )
+    direct_cli_bridge_base_args+=("${bridge_proof_queue_args[@]}")
     while IFS=$'\t' read -r operator_id operator_endpoint; do
       [[ -n "$operator_id" ]] || continue
       direct_cli_bridge_base_args+=("--operator-address" "$operator_id")

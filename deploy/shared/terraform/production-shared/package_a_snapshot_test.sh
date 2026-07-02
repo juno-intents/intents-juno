@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block critical_hmac_random critical_hmac_secret critical_hmac_version key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
@@ -54,6 +54,21 @@ main() {
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/variables.tf")"
+  critical_hmac_random="$(awk '
+    /resource "random_password" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  critical_hmac_secret="$(awk '
+    /resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  critical_hmac_version="$(awk '
+    /resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
   shared_ecs_desired_count_block="$(awk '
     /variable "shared_ecs_desired_count" \{/ { in_block = 1 }
     in_block { print }
@@ -105,6 +120,9 @@ main() {
   assert_contains "$main_tf" 'description     = "IPFS API from the internal load balancer"' "production-shared only allows IPFS instances to receive traffic from the IPFS ALB"
   assert_contains "$main_tf" 'location = /healthz' "production-shared nginx exposes an unauthenticated health endpoint for the IPFS ALB"
   assert_contains "$main_tf" 'resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key"' "production-shared provisions a dedicated Kafka critical-topic HMAC secret"
+  assert_not_contains "$critical_hmac_random" 'local.shared_queue_uses_kafka' "critical-topic HMAC random material is transport-neutral"
+  assert_not_contains "$critical_hmac_secret" 'local.shared_queue_uses_kafka' "critical-topic HMAC secret is transport-neutral"
+  assert_not_contains "$critical_hmac_version" 'local.shared_queue_uses_kafka' "critical-topic HMAC secret version is transport-neutral"
   assert_contains "$main_tf" 'resource "aws_security_group" "proof_role"' "production-shared provisions a dedicated proof-role security group"
   assert_contains "$main_tf" 'resource "aws_launch_template" "proof_role"' "production-shared provisions a proof-role launch template"
   assert_contains "$proof_role_launch_template" 'metadata_options {' "production-shared proof-role launch template configures instance metadata options"

@@ -1148,13 +1148,28 @@ test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue() {
 }
 
 test_production_shared_postgres_queue_gates_msk_resources() {
-  local main_tf monitoring_tf outputs_tf
+  local main_tf monitoring_tf outputs_tf critical_hmac_random critical_hmac_secret critical_hmac_version
   main_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
   monitoring_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/monitoring.tf")"
   outputs_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/outputs.tf")"
+  critical_hmac_random="$(awk '
+    /resource "random_password" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
+  critical_hmac_secret="$(awk '
+    /resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
+  critical_hmac_version="$(awk '
+    /resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
 
   assert_contains "$main_tf" 'shared_queue_uses_kafka' "production shared terraform derives kafka queue enablement from shared_queue_driver"
-  assert_contains "$main_tf" 'count = local.shared_queue_uses_kafka ? 1 : 0' "production shared terraform gates msk resources behind kafka queue mode"
+  assert_contains "$main_tf" 'count                  = local.shared_queue_uses_kafka ? 1 : 0' "production shared terraform gates msk cluster resources behind kafka queue mode"
   assert_contains "$main_tf" 'aws_msk_cluster.shared[0]' "production shared terraform indexes optional msk cluster resources"
   assert_contains "$main_tf" 'from = aws_msk_configuration.shared' "production shared terraform preserves msk configuration state address during count migration"
   assert_contains "$main_tf" 'to   = aws_msk_configuration.shared[0]' "production shared terraform preserves indexed msk configuration state address during count migration"
@@ -1166,6 +1181,9 @@ test_production_shared_postgres_queue_gates_msk_resources() {
   assert_contains "$main_tf" 'to   = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0]' "production shared terraform preserves indexed kafka critical hmac secret state address during count migration"
   assert_contains "$main_tf" 'from = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key' "production shared terraform preserves kafka critical hmac secret version state address during count migration"
   assert_contains "$main_tf" 'to   = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key[0]' "production shared terraform preserves indexed kafka critical hmac secret version state address during count migration"
+  assert_not_contains "$critical_hmac_random" 'local.shared_queue_uses_kafka' "production shared terraform keeps critical hmac random material transport-neutral"
+  assert_not_contains "$critical_hmac_secret" 'local.shared_queue_uses_kafka' "production shared terraform keeps critical hmac secret transport-neutral"
+  assert_not_contains "$critical_hmac_version" 'local.shared_queue_uses_kafka' "production shared terraform keeps critical hmac version transport-neutral"
   assert_contains "$main_tf" 'from = aws_iam_role_policy.proof_requestor_task_access' "production shared terraform preserves kafka task policy state address during count migration"
   assert_contains "$main_tf" 'to   = aws_iam_role_policy.proof_requestor_task_access[0]' "production shared terraform preserves indexed kafka requestor task policy state address during count migration"
   assert_contains "$main_tf" 'from = aws_iam_role_policy.proof_funder_task_access' "production shared terraform preserves kafka funder task policy state address during count migration"

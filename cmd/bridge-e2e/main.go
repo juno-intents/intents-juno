@@ -35,6 +35,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverexec"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
@@ -133,15 +134,18 @@ type sp1Config struct {
 
 	RequestorAddress common.Address
 
-	ProofSubmissionMode string
-	ProofQueueBrokers   []string
-	ProofRequestTopic   string
-	ProofResultTopic    string
-	ProofFailureTopic   string
-	ProofConsumerGroup  string
-	ProofQueueMaxBytes  int
-	ProofAckTimeout     time.Duration
-	ProofDeadline       time.Duration
+	ProofSubmissionMode      string
+	ProofQueueDriver         string
+	ProofQueueBrokers        []string
+	ProofQueuePostgresDSN    string
+	ProofQueuePostgresDSNEnv string
+	ProofRequestTopic        string
+	ProofResultTopic         string
+	ProofFailureTopic        string
+	ProofConsumerGroup       string
+	ProofQueueMaxBytes       int
+	ProofAckTimeout          time.Duration
+	ProofDeadline            time.Duration
 }
 
 type sp1WaitResult struct {
@@ -632,12 +636,15 @@ func parseArgs(args []string) (config, error) {
 	fs.DurationVar(&cfg.SP1.AuctionTimeout, "sp1-auction-timeout", defaultSP1AuctionTimeout, "SP1 auction timeout duration")
 	fs.DurationVar(&cfg.SP1.RequestTimeout, "sp1-request-timeout", defaultSP1RequestTimeout, "SP1 request timeout duration")
 	fs.StringVar(&cfg.SP1.ProofSubmissionMode, "sp1-proof-submission-mode", sp1ProofSubmissionDirectCLI, "proof submission mode: direct-cli|queue")
+	fs.StringVar(&cfg.SP1.ProofQueueDriver, "sp1-proof-queue-driver", queue.DriverKafka, "proof queue driver: kafka|postgres")
 	fs.StringVar(&sp1ProofQueueBrokers, "sp1-proof-queue-brokers", "", "comma-separated Kafka brokers used by centralized proof-requestor")
-	fs.StringVar(&cfg.SP1.ProofRequestTopic, "sp1-proof-request-topic", defaultProofRequestTopic, "Kafka proof request topic")
-	fs.StringVar(&cfg.SP1.ProofResultTopic, "sp1-proof-result-topic", defaultProofResultTopic, "Kafka proof fulfillment topic")
-	fs.StringVar(&cfg.SP1.ProofFailureTopic, "sp1-proof-failure-topic", defaultProofFailureTopic, "Kafka proof failure topic")
-	fs.StringVar(&cfg.SP1.ProofConsumerGroup, "sp1-proof-consumer-group", "", "Kafka consumer group used by bridge-e2e for proof results/failures")
-	fs.IntVar(&cfg.SP1.ProofQueueMaxBytes, "sp1-proof-queue-max-bytes", defaultProofQueueMaxBytes, "max Kafka message size for proof queue consumer")
+	fs.StringVar(&cfg.SP1.ProofQueuePostgresDSN, "sp1-proof-queue-postgres-dsn", "", "Postgres DSN for centralized proof request/result queue")
+	fs.StringVar(&cfg.SP1.ProofQueuePostgresDSNEnv, "sp1-proof-queue-postgres-dsn-env", "", "env var containing Postgres DSN for centralized proof request/result queue")
+	fs.StringVar(&cfg.SP1.ProofRequestTopic, "sp1-proof-request-topic", defaultProofRequestTopic, "proof request topic")
+	fs.StringVar(&cfg.SP1.ProofResultTopic, "sp1-proof-result-topic", defaultProofResultTopic, "proof fulfillment topic")
+	fs.StringVar(&cfg.SP1.ProofFailureTopic, "sp1-proof-failure-topic", defaultProofFailureTopic, "proof failure topic")
+	fs.StringVar(&cfg.SP1.ProofConsumerGroup, "sp1-proof-consumer-group", "", "consumer group used by bridge-e2e for proof results/failures")
+	fs.IntVar(&cfg.SP1.ProofQueueMaxBytes, "sp1-proof-queue-max-bytes", defaultProofQueueMaxBytes, "max message size for proof queue consumer")
 	fs.DurationVar(&cfg.SP1.ProofAckTimeout, "sp1-proof-ack-timeout", defaultProofAckTimeout, "proof queue ack timeout")
 	fs.DurationVar(&cfg.SP1.ProofDeadline, "sp1-proof-deadline", defaultProofDeadline, "default deadline passed to centralized proof-requestor")
 
@@ -841,6 +848,10 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.SP1.ProofQueueDriver, err = parseSP1ProofQueueDriver(cfg.SP1.ProofQueueDriver)
+	if err != nil {
+		return cfg, err
+	}
 	cfg.SP1.ProofQueueBrokers = queue.SplitCommaList(sp1ProofQueueBrokers)
 	if !common.IsHexAddress(sp1MarketAddressHex) {
 		return cfg, errors.New("--sp1-market-address must be a valid hex address")
@@ -893,8 +904,19 @@ func parseArgs(args []string) (config, error) {
 		return cfg, errors.New("--sp1-proof-deadline must be > 0")
 	}
 	if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionQueue {
-		if len(cfg.SP1.ProofQueueBrokers) == 0 {
-			return cfg, errors.New("--sp1-proof-queue-brokers is required when --sp1-proof-submission-mode=queue")
+		switch cfg.SP1.ProofQueueDriver {
+		case queue.DriverKafka:
+			if len(cfg.SP1.ProofQueueBrokers) == 0 {
+				return cfg, errors.New("--sp1-proof-queue-brokers is required when --sp1-proof-submission-mode=queue")
+			}
+		case queue.DriverPostgres:
+			dsn, err := pgxpoolutil.ResolveDSN(cfg.SP1.ProofQueuePostgresDSN, cfg.SP1.ProofQueuePostgresDSNEnv)
+			if err != nil {
+				return cfg, fmt.Errorf("--sp1-proof-queue-postgres-dsn or --sp1-proof-queue-postgres-dsn-env is required when --sp1-proof-submission-mode=queue and --sp1-proof-queue-driver=postgres: %w", err)
+			}
+			cfg.SP1.ProofQueuePostgresDSN = dsn
+		default:
+			return cfg, fmt.Errorf("--sp1-proof-queue-driver must be one of: kafka, postgres")
 		}
 		if strings.TrimSpace(cfg.SP1.ProofRequestTopic) == "" {
 			return cfg, errors.New("--sp1-proof-request-topic is required when --sp1-proof-submission-mode=queue")
@@ -1083,6 +1105,18 @@ func parseSP1ProofSubmissionMode(raw string) (string, error) {
 		return sp1ProofSubmissionQueue, nil
 	default:
 		return "", errors.New("--sp1-proof-submission-mode must be one of: direct-cli, queue")
+	}
+}
+
+func parseSP1ProofQueueDriver(raw string) (string, error) {
+	driver := strings.ToLower(strings.TrimSpace(raw))
+	switch driver {
+	case "", queue.DriverKafka:
+		return queue.DriverKafka, nil
+	case queue.DriverPostgres:
+		return queue.DriverPostgres, nil
+	default:
+		return "", errors.New("--sp1-proof-queue-driver must be one of: kafka, postgres")
 	}
 }
 
@@ -2316,21 +2350,24 @@ func requestSP1ProofViaQueue(
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  queue.DriverKafka,
-		Brokers: cfg.ProofQueueBrokers,
-	})
+	producerCfg, err := sp1ProofQueueProducerConfig(cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("build proof queue producer config for %s: %w", pipeline, err)
+	}
+	producer, err := queue.NewProducerContext(ctx, producerCfg)
 	if err != nil {
 		return nil, "", fmt.Errorf("init proof queue producer for %s: %w", pipeline, err)
 	}
 	defer producer.Close()
 
-	// Ensure response topics exist before creating the consumer to avoid transient
-	// unknown-topic errors on fresh Kafka clusters.
-	probe := []byte(`{"version":"bridge-e2e.proof.queue.probe.v1"}`)
-	for _, topic := range []string{cfg.ProofResultTopic, cfg.ProofFailureTopic} {
-		if err := producer.Publish(ctx, topic, probe); err != nil {
-			return nil, "", fmt.Errorf("publish proof queue topic probe for %s topic=%s: %w", pipeline, topic, err)
+	if cfg.ProofQueueDriver == queue.DriverKafka {
+		// Ensure response topics exist before creating the consumer to avoid transient
+		// unknown-topic errors on fresh Kafka clusters.
+		probe := []byte(`{"version":"bridge-e2e.proof.queue.probe.v1"}`)
+		for _, topic := range []string{cfg.ProofResultTopic, cfg.ProofFailureTopic} {
+			if err := producer.Publish(ctx, topic, probe); err != nil {
+				return nil, "", fmt.Errorf("publish proof queue topic probe for %s topic=%s: %w", pipeline, topic, err)
+			}
 		}
 	}
 
@@ -2338,13 +2375,11 @@ func requestSP1ProofViaQueue(
 	if group == "" {
 		group = fmt.Sprintf("%s-%s-%d", defaultProofConsumerGroupPrefix, pipeline, time.Now().UTC().UnixNano())
 	}
-	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
-		Driver:        queue.DriverKafka,
-		Brokers:       cfg.ProofQueueBrokers,
-		Group:         group,
-		Topics:        []string{cfg.ProofResultTopic, cfg.ProofFailureTopic},
-		KafkaMaxBytes: cfg.ProofQueueMaxBytes,
-	})
+	consumerCfg, err := sp1ProofQueueConsumerConfig(cfg, group)
+	if err != nil {
+		return nil, "", fmt.Errorf("build proof queue consumer config for %s: %w", pipeline, err)
+	}
+	consumer, err := queue.NewConsumer(ctx, consumerCfg)
 	if err != nil {
 		return nil, "", fmt.Errorf("init proof queue consumer for %s: %w", pipeline, err)
 	}
@@ -2365,8 +2400,9 @@ func requestSP1ProofViaQueue(
 
 	jobID := idempotency.ProofJobIDV1(pipeline, batchID, imageID, expectedJournal, privateInput)
 	logProgress(
-		"sp1 %s mode=queue request_topic=%s result_topic=%s failure_topic=%s group=%s job_id=%s",
+		"sp1 %s mode=queue driver=%s request_topic=%s result_topic=%s failure_topic=%s group=%s job_id=%s",
 		pipeline,
+		cfg.ProofQueueDriver,
 		cfg.ProofRequestTopic,
 		cfg.ProofResultTopic,
 		cfg.ProofFailureTopic,
@@ -2389,6 +2425,41 @@ func requestSP1ProofViaQueue(
 	}
 
 	return result.Seal, extractQueueProofRequestID(result.Metadata), nil
+}
+
+func sp1ProofQueueProducerConfig(cfg sp1Config) (queue.ProducerConfig, error) {
+	switch cfg.ProofQueueDriver {
+	case queue.DriverKafka:
+		return queue.ProducerConfig{
+			Driver:  queue.DriverKafka,
+			Brokers: cfg.ProofQueueBrokers,
+		}, nil
+	case queue.DriverPostgres:
+		return queue.ProducerConfig{
+			Driver:      queue.DriverPostgres,
+			PostgresDSN: cfg.ProofQueuePostgresDSN,
+		}, nil
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", cfg.ProofQueueDriver)
+	}
+}
+
+func sp1ProofQueueConsumerConfig(cfg sp1Config, group string) (queue.ConsumerConfig, error) {
+	consumerCfg := queue.ConsumerConfig{
+		Driver: cfg.ProofQueueDriver,
+		Group:  group,
+		Topics: []string{cfg.ProofResultTopic, cfg.ProofFailureTopic},
+	}
+	switch cfg.ProofQueueDriver {
+	case queue.DriverKafka:
+		consumerCfg.Brokers = cfg.ProofQueueBrokers
+		consumerCfg.KafkaMaxBytes = cfg.ProofQueueMaxBytes
+	case queue.DriverPostgres:
+		consumerCfg.PostgresDSN = cfg.ProofQueuePostgresDSN
+	default:
+		return queue.ConsumerConfig{}, fmt.Errorf("unsupported queue driver %q", cfg.ProofQueueDriver)
+	}
+	return consumerCfg, nil
 }
 
 func validateQueueProofFulfillment(pipeline string, expectedJournal []byte, result proofclient.Result) error {
