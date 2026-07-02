@@ -110,6 +110,8 @@ Options:
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
   --shared-timeout <duration>       shared infra validation timeout (default: 300s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
+  --base-event-shadow-queue-driver <driver>
+                                   optional base-event-scanner shadow queue driver during Phase 5 (postgres)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
@@ -3428,6 +3430,7 @@ command_run() {
   local shared_validation_remote_bin="/tmp/testnet-e2e-bin/shared-infra-e2e"
   local shared_validation_remote_output="/tmp/testnet-e2e-shared-infra-summary.json"
   local shared_output=""
+  local base_event_shadow_queue_driver=""
   local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
   local relayer_runtime_operator_ssh_user=""
@@ -3829,6 +3832,11 @@ command_run() {
         shared_output="$2"
         shift 2
         ;;
+      --base-event-shadow-queue-driver)
+        [[ $# -ge 2 ]] || die "missing value for --base-event-shadow-queue-driver"
+        base_event_shadow_queue_driver="$2"
+        shift 2
+        ;;
       --relayer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
         relayer_runtime_mode="$(lower "$2")"
@@ -4077,6 +4085,9 @@ command_run() {
   [[ -n "$shared_postgres_dsn" ]] || die "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (runner-side shared-infra checkpoint package pin/fetch verification)"
+  if [[ -n "$base_event_shadow_queue_driver" ]]; then
+    [[ "$base_event_shadow_queue_driver" == "postgres" ]] || die "--base-event-shadow-queue-driver supports only postgres during Phase 5 shadowing"
+  fi
   if [[ -z "$operator_checkpoint_ipfs_api_url" ]]; then
     operator_checkpoint_ipfs_api_url="$shared_ipfs_api_url"
   fi
@@ -7075,6 +7086,9 @@ command_run() {
       --withdraw-event-topic "$withdraw_request_topic"
       --health-port "$base_event_scanner_health_port"
     )
+    if [[ "$base_event_shadow_queue_driver" == "postgres" ]]; then
+      scanner_args+=(--shadow-queue-driver postgres)
+    fi
 
     if [[ "$deploy_mode" == "true" && -n "$base_event_scanner_binary" ]]; then
       # Deploy mode: restart loop so the scanner survives crashes.

@@ -963,6 +963,17 @@ test_shared_infra_validation_precreates_bridge_and_proof_topics() {
   assert_contains "$script_text" '--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"' "shared infra validation pre-creates proof/deposit/withdraw topics before bridge-api and relayer traffic"
 }
 
+test_base_event_scanner_can_shadow_to_postgres_queue() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--base-event-shadow-queue-driver <driver>' "run-testnet-e2e exposes base-event-scanner shadow queue driver flag"
+  assert_contains "$script_text" 'local base_event_shadow_queue_driver=""' "run-testnet-e2e tracks base-event-scanner shadow queue driver"
+  assert_contains "$script_text" '--base-event-shadow-queue-driver)' "run-testnet-e2e parses base-event-scanner shadow queue driver"
+  assert_contains "$script_text" '[[ "$base_event_shadow_queue_driver" == "postgres" ]] || die "--base-event-shadow-queue-driver supports only postgres during Phase 5 shadowing"' "run-testnet-e2e rejects unsupported base-event-scanner shadow drivers"
+  assert_contains "$script_text" 'scanner_args+=(--shadow-queue-driver postgres)' "base-event-scanner shadows withdraw events into postgres queue when enabled"
+}
+
 test_shared_proof_services_restart_after_topic_ensure() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1235,6 +1246,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only
   test_sp1_rpc_defaults_and_validation_target_succinct_network
   test_shared_infra_validation_precreates_bridge_and_proof_topics
+  test_base_event_scanner_can_shadow_to_postgres_queue
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
