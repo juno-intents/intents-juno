@@ -118,8 +118,10 @@ func main() {
 		proofPriority      = flag.Int("proof-priority", 1, "proof request priority")
 		proofMockSeal      = flag.String("proof-mock-seal", "0x99", "mock proof seal hex used when --proof-driver=mock")
 
-		queueDriver                    = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+		queueDriver                    = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
 		queueBrokers                   = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN               = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
+		queuePostgresDSNEnv            = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
 		proofQueueDriver               = flag.String("proof-queue-driver", "", "proof request/result queue driver override: kafka|postgres|stdio (defaults to --queue-driver)")
 		proofQueueBrokers              = flag.String("proof-queue-brokers", "", "comma-separated proof request/result queue brokers (defaults to --queue-brokers)")
 		proofQueuePostgresDSN          = flag.String("proof-queue-postgres-dsn", "", "Postgres DSN for proof request/result postgres queue (defaults to --postgres-dsn)")
@@ -389,14 +391,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
-		Driver:        *queueDriver,
-		Brokers:       queue.SplitCommaList(*queueBrokers),
-		Group:         *queueGroup,
-		Topics:        queue.SplitCommaList(*queueTopics),
-		KafkaMaxBytes: *queueMaxBytes,
-		MaxLineBytes:  *maxLineBytes,
+	consumerCfg, err := depositRelayerQueueConsumerConfig(depositRelayerQueueOptions{
+		Driver:           *queueDriver,
+		Brokers:          queue.SplitCommaList(*queueBrokers),
+		PostgresDSN:      *queuePostgresDSN,
+		PostgresDSNEnv:   *queuePostgresDSNEnv,
+		StorePostgresDSN: *postgresDSN,
+		Group:            *queueGroup,
+		Topics:           queue.SplitCommaList(*queueTopics),
+		QueueMaxBytes:    *queueMaxBytes,
+		MaxLineBytes:     *maxLineBytes,
 	})
+	if err != nil {
+		log.Error("configure queue consumer", "err", err)
+		os.Exit(2)
+	}
+	consumer, err := queue.NewConsumer(ctx, consumerCfg)
 	if err != nil {
 		log.Error("init queue consumer", "err", err)
 		os.Exit(2)
@@ -404,9 +414,14 @@ func main() {
 	defer func() { _ = consumer.Close() }()
 	criticalQueueCodec := queueauth.NewDefaultCodec()
 
+	resolvedProofQueueDriver, err := proofQueueDriverForProofClient(*proofDriver, *proofQueueDriver, *queueDriver)
+	if err != nil {
+		log.Error("configure proof queue driver", "err", err)
+		os.Exit(2)
+	}
 	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
 		driver:               *proofDriver,
-		queueDriver:          proofQueueDriverOrDefault(*proofQueueDriver, *queueDriver),
+		queueDriver:          resolvedProofQueueDriver,
 		queueBrokers:         proofQueueBrokersOrDefault(queue.SplitCommaList(*proofQueueBrokers), queue.SplitCommaList(*queueBrokers)),
 		queuePostgresDSN:     *proofQueuePostgresDSN,
 		queuePostgresDSNEnv:  *proofQueuePostgresDSNEnv,
@@ -712,6 +727,52 @@ func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
 	}
 }
 
+type depositRelayerQueueOptions struct {
+	Driver           string
+	Brokers          []string
+	PostgresDSN      string
+	PostgresDSNEnv   string
+	StorePostgresDSN string
+	Group            string
+	Topics           []string
+	QueueMaxBytes    int
+	MaxLineBytes     int
+}
+
+func depositRelayerQueueConsumerConfig(opts depositRelayerQueueOptions) (queue.ConsumerConfig, error) {
+	cfg := queue.ConsumerConfig{
+		Driver:        strings.TrimSpace(opts.Driver),
+		Group:         opts.Group,
+		Topics:        opts.Topics,
+		KafkaMaxBytes: opts.QueueMaxBytes,
+		MaxLineBytes:  opts.MaxLineBytes,
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = opts.Brokers
+	case queue.DriverPostgres:
+		dsn, err := depositRelayerQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ConsumerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ConsumerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func depositRelayerQueuePostgresDSN(opts depositRelayerQueueOptions) (string, error) {
+	if strings.TrimSpace(opts.PostgresDSN) != "" || strings.TrimSpace(opts.PostgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(opts.PostgresDSN, opts.PostgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(opts.StorePostgresDSN, "")
+}
+
 type initProofClientConfig struct {
 	driver               string
 	queueDriver          string
@@ -925,11 +986,21 @@ func proofQueueProducer(ctx context.Context, opts proofQueueProducerOptions, fac
 	return producer, nil
 }
 
-func proofQueueDriverOrDefault(proofQueueDriver, defaultQueueDriver string) string {
+func proofQueueDriverOrDefault(proofQueueDriver, defaultQueueDriver string) (string, error) {
 	if strings.TrimSpace(proofQueueDriver) != "" {
-		return proofQueueDriver
+		return proofQueueDriver, nil
 	}
-	return defaultQueueDriver
+	if strings.EqualFold(strings.TrimSpace(defaultQueueDriver), queue.DriverPostgres) {
+		return "", errors.New("--proof-queue-driver is required when --queue-driver=postgres")
+	}
+	return defaultQueueDriver, nil
+}
+
+func proofQueueDriverForProofClient(proofDriver, proofQueueDriver, defaultQueueDriver string) (string, error) {
+	if !strings.EqualFold(strings.TrimSpace(proofDriver), "queue") {
+		return strings.TrimSpace(proofQueueDriver), nil
+	}
+	return proofQueueDriverOrDefault(proofQueueDriver, defaultQueueDriver)
 }
 
 func proofQueueBrokersOrDefault(proofQueueBrokers, defaultQueueBrokers []string) []string {

@@ -96,6 +96,52 @@ func TestValidateWithdrawProofInputConfig_RequiresOWalletOVK(t *testing.T) {
 	}
 }
 
+func TestWithdrawFinalizerQueueConsumerConfig_PostgresFallsBackToStoreDSN(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := withdrawFinalizerQueueConsumerConfig(withdrawFinalizerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "withdraw-finalizer",
+		Topics:           []string{"checkpoints.packages.v1"},
+		QueueMaxBytes:    123,
+		MaxLineBytes:     456,
+	})
+	if err != nil {
+		t.Fatalf("withdrawFinalizerQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := cfg.Group, "withdraw-finalizer"; got != want {
+		t.Fatalf("Group = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Topics, ","), "checkpoints.packages.v1"; got != want {
+		t.Fatalf("Topics = %q, want %q", got, want)
+	}
+}
+
+func TestWithdrawFinalizerQueueConsumerConfig_PostgresDSNEnvOverridesStoreDSN(t *testing.T) {
+	t.Setenv("WITHDRAW_FINALIZER_QUEUE_DSN", "postgres://queue-db")
+
+	cfg, err := withdrawFinalizerQueueConsumerConfig(withdrawFinalizerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		PostgresDSNEnv:   "WITHDRAW_FINALIZER_QUEUE_DSN",
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "withdraw-finalizer",
+		Topics:           []string{"checkpoints.packages.v1"},
+	})
+	if err != nil {
+		t.Fatalf("withdrawFinalizerQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+}
+
 func TestWithdrawProofQueueProducerConfiguresPostgresShadow(t *testing.T) {
 	var configs []queue.ProducerConfig
 	var calls []string
@@ -142,10 +188,18 @@ func TestWithdrawProofQueueProducerConfiguresPostgresShadow(t *testing.T) {
 }
 
 func TestWithdrawProofQueueTransportDefaultsToMainQueue(t *testing.T) {
-	if got, want := proofQueueDriverOrDefault("", queue.DriverKafka), queue.DriverKafka; got != want {
+	got, err := proofQueueDriverOrDefault("", queue.DriverKafka)
+	if err != nil {
+		t.Fatalf("proofQueueDriverOrDefault empty kafka: %v", err)
+	}
+	if want := queue.DriverKafka; got != want {
 		t.Fatalf("proofQueueDriverOrDefault empty = %q, want %q", got, want)
 	}
-	if got, want := proofQueueDriverOrDefault(queue.DriverPostgres, queue.DriverKafka), queue.DriverPostgres; got != want {
+	got, err = proofQueueDriverOrDefault(queue.DriverPostgres, queue.DriverKafka)
+	if err != nil {
+		t.Fatalf("proofQueueDriverOrDefault override: %v", err)
+	}
+	if want := queue.DriverPostgres; got != want {
 		t.Fatalf("proofQueueDriverOrDefault override = %q, want %q", got, want)
 	}
 	if got, want := strings.Join(proofQueueBrokersOrDefault(nil, []string{"main-1:9098"}), ","), "main-1:9098"; got != want {
@@ -153,6 +207,22 @@ func TestWithdrawProofQueueTransportDefaultsToMainQueue(t *testing.T) {
 	}
 	if got, want := strings.Join(proofQueueBrokersOrDefault([]string{"proof-1:9098"}, []string{"main-1:9098"}), ","), "proof-1:9098"; got != want {
 		t.Fatalf("proofQueueBrokersOrDefault override = %q, want %q", got, want)
+	}
+}
+
+func TestWithdrawProofQueueTransportRequiresExplicitDriverWhenMainQueueIsPostgres(t *testing.T) {
+	if _, err := proofQueueDriverOrDefault("", queue.DriverPostgres); err == nil || !strings.Contains(err.Error(), "--proof-queue-driver is required when --queue-driver=postgres") {
+		t.Fatalf("proofQueueDriverOrDefault error = %v", err)
+	}
+}
+
+func TestWithdrawProofQueueTransportAllowsMockProofWithPostgresMainQueue(t *testing.T) {
+	got, err := proofQueueDriverForProofClient("mock", "", queue.DriverPostgres)
+	if err != nil {
+		t.Fatalf("proofQueueDriverForProofClient mock: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("proofQueueDriverForProofClient mock = %q, want empty unused driver", got)
 	}
 }
 

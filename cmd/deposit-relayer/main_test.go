@@ -153,6 +153,52 @@ func TestDefaultClaimTTLDelegatesToRelayerSafeLease(t *testing.T) {
 	}
 }
 
+func TestDepositRelayerQueueConsumerConfig_PostgresFallsBackToStoreDSN(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := depositRelayerQueueConsumerConfig(depositRelayerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "deposit-relayer",
+		Topics:           []string{"deposits.event.v2", "checkpoints.packages.v1"},
+		QueueMaxBytes:    123,
+		MaxLineBytes:     456,
+	})
+	if err != nil {
+		t.Fatalf("depositRelayerQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := cfg.Group, "deposit-relayer"; got != want {
+		t.Fatalf("Group = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Topics, ","), "deposits.event.v2,checkpoints.packages.v1"; got != want {
+		t.Fatalf("Topics = %q, want %q", got, want)
+	}
+}
+
+func TestDepositRelayerQueueConsumerConfig_PostgresDSNEnvOverridesStoreDSN(t *testing.T) {
+	t.Setenv("DEPOSIT_RELAYER_QUEUE_DSN", "postgres://queue-db")
+
+	cfg, err := depositRelayerQueueConsumerConfig(depositRelayerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		PostgresDSNEnv:   "DEPOSIT_RELAYER_QUEUE_DSN",
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "deposit-relayer",
+		Topics:           []string{"deposits.event.v2"},
+	})
+	if err != nil {
+		t.Fatalf("depositRelayerQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+}
+
 func TestDepositProofQueueProducerConfiguresPostgresShadow(t *testing.T) {
 	var configs []queue.ProducerConfig
 	var calls []string
@@ -199,10 +245,18 @@ func TestDepositProofQueueProducerConfiguresPostgresShadow(t *testing.T) {
 }
 
 func TestDepositProofQueueTransportDefaultsToMainQueue(t *testing.T) {
-	if got, want := proofQueueDriverOrDefault("", queue.DriverKafka), queue.DriverKafka; got != want {
+	got, err := proofQueueDriverOrDefault("", queue.DriverKafka)
+	if err != nil {
+		t.Fatalf("proofQueueDriverOrDefault empty kafka: %v", err)
+	}
+	if want := queue.DriverKafka; got != want {
 		t.Fatalf("proofQueueDriverOrDefault empty = %q, want %q", got, want)
 	}
-	if got, want := proofQueueDriverOrDefault(queue.DriverPostgres, queue.DriverKafka), queue.DriverPostgres; got != want {
+	got, err = proofQueueDriverOrDefault(queue.DriverPostgres, queue.DriverKafka)
+	if err != nil {
+		t.Fatalf("proofQueueDriverOrDefault override: %v", err)
+	}
+	if want := queue.DriverPostgres; got != want {
 		t.Fatalf("proofQueueDriverOrDefault override = %q, want %q", got, want)
 	}
 	if got, want := strings.Join(proofQueueBrokersOrDefault(nil, []string{"main-1:9098"}), ","), "main-1:9098"; got != want {
@@ -210,6 +264,22 @@ func TestDepositProofQueueTransportDefaultsToMainQueue(t *testing.T) {
 	}
 	if got, want := strings.Join(proofQueueBrokersOrDefault([]string{"proof-1:9098"}, []string{"main-1:9098"}), ","), "proof-1:9098"; got != want {
 		t.Fatalf("proofQueueBrokersOrDefault override = %q, want %q", got, want)
+	}
+}
+
+func TestDepositProofQueueTransportRequiresExplicitDriverWhenMainQueueIsPostgres(t *testing.T) {
+	if _, err := proofQueueDriverOrDefault("", queue.DriverPostgres); err == nil || !strings.Contains(err.Error(), "--proof-queue-driver is required when --queue-driver=postgres") {
+		t.Fatalf("proofQueueDriverOrDefault error = %v", err)
+	}
+}
+
+func TestDepositProofQueueTransportAllowsMockProofWithPostgresMainQueue(t *testing.T) {
+	got, err := proofQueueDriverForProofClient("mock", "", queue.DriverPostgres)
+	if err != nil {
+		t.Fatalf("proofQueueDriverForProofClient mock: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("proofQueueDriverForProofClient mock = %q, want empty unused driver", got)
 	}
 }
 

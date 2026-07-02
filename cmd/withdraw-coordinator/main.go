@@ -116,13 +116,15 @@ func main() {
 
 		owner = flag.String("owner", "", "unique coordinator owner id (required; used for DB claims)")
 
-		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
-		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queueGroup    = flag.String("queue-group", "withdraw-coordinator", "queue consumer group (required for kafka)")
-		queueTopics   = flag.String("queue-topics", "withdrawals.requested.v2", "comma-separated queue topics")
-		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
-		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
-		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn/--postgres-dsn-env)")
+		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+		queueGroup          = flag.String("queue-group", "withdraw-coordinator", "queue consumer group (required for kafka/postgres)")
+		queueTopics         = flag.String("queue-topics", "withdrawals.requested.v2", "comma-separated queue topics")
+		maxLineBytes        = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
+		queueMaxBytes       = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
+		ackTimeout          = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
 		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "blobstore driver: s3|memory")
 		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for durable withdrawal artifacts (required for s3)")
@@ -320,15 +322,23 @@ func main() {
 		log.Error("ensure kafka topics", "err", err)
 		os.Exit(2)
 	}
-	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
-		Driver:        *queueDriver,
-		Brokers:       queue.SplitCommaList(*queueBrokers),
-		Group:         *queueGroup,
-		Topics:        queue.SplitCommaList(*queueTopics),
-		KafkaMaxBytes: *queueMaxBytes,
-		MaxLineBytes:  *maxLineBytes,
-		KafkaLogger:   &slogKafkaLogger{log},
+	consumerCfg, err := withdrawCoordinatorQueueConsumerConfig(withdrawCoordinatorQueueOptions{
+		Driver:           *queueDriver,
+		Brokers:          queue.SplitCommaList(*queueBrokers),
+		PostgresDSN:      *queuePostgresDSN,
+		PostgresDSNEnv:   *queuePostgresDSNEnv,
+		StorePostgresDSN: postgresDSNValue,
+		Group:            *queueGroup,
+		Topics:           queue.SplitCommaList(*queueTopics),
+		QueueMaxBytes:    *queueMaxBytes,
+		MaxLineBytes:     *maxLineBytes,
+		KafkaLogger:      &slogKafkaLogger{log},
 	})
+	if err != nil {
+		log.Error("configure queue consumer", "err", err)
+		os.Exit(2)
+	}
+	consumer, err := queue.NewConsumer(ctx, consumerCfg)
 	if err != nil {
 		log.Error("init queue consumer", "err", err)
 		os.Exit(2)
@@ -1118,4 +1128,56 @@ func ensureCoordinatorQueueTopics(ctx context.Context, driver, brokers, topics s
 		return nil
 	}
 	return ensureWithdrawCoordinatorKafkaTopics(ctx, queue.SplitCommaList(brokers), queue.SplitCommaList(topics))
+}
+
+type withdrawCoordinatorQueueOptions struct {
+	Driver           string
+	Brokers          []string
+	PostgresDSN      string
+	PostgresDSNEnv   string
+	StorePostgresDSN string
+	Group            string
+	Topics           []string
+	QueueMaxBytes    int
+	MaxLineBytes     int
+	KafkaLogger      queueKafkaLogger
+}
+
+type queueKafkaLogger interface {
+	Printf(string, ...interface{})
+}
+
+func withdrawCoordinatorQueueConsumerConfig(opts withdrawCoordinatorQueueOptions) (queue.ConsumerConfig, error) {
+	cfg := queue.ConsumerConfig{
+		Driver:        strings.TrimSpace(opts.Driver),
+		Group:         opts.Group,
+		Topics:        opts.Topics,
+		KafkaMaxBytes: opts.QueueMaxBytes,
+		MaxLineBytes:  opts.MaxLineBytes,
+		KafkaLogger:   opts.KafkaLogger,
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = opts.Brokers
+	case queue.DriverPostgres:
+		dsn, err := withdrawCoordinatorQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ConsumerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ConsumerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func withdrawCoordinatorQueuePostgresDSN(opts withdrawCoordinatorQueueOptions) (string, error) {
+	if strings.TrimSpace(opts.PostgresDSN) != "" || strings.TrimSpace(opts.PostgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(opts.PostgresDSN, opts.PostgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(opts.StorePostgresDSN, "")
 }

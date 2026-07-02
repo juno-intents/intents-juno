@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -229,15 +230,15 @@ func TestEnsureCoordinatorQueueTopics(t *testing.T) {
 	})
 
 	tests := []struct {
-		name           string
-		driver         string
-		brokers        string
-		topics         string
-		wantCalled     bool
-		wantBrokers    []string
-		wantTopics     []string
-		injectedErr    error
-		wantErrSubstr  string
+		name          string
+		driver        string
+		brokers       string
+		topics        string
+		wantCalled    bool
+		wantBrokers   []string
+		wantTopics    []string
+		injectedErr   error
+		wantErrSubstr string
 	}{
 		{
 			name:        "kafka ensures topics",
@@ -251,6 +252,13 @@ func TestEnsureCoordinatorQueueTopics(t *testing.T) {
 		{
 			name:       "stdio skips topic creation",
 			driver:     "stdio",
+			brokers:    "broker-a:9092",
+			topics:     "withdrawals.requested.v2",
+			wantCalled: false,
+		},
+		{
+			name:       "postgres skips topic creation",
+			driver:     "postgres",
 			brokers:    "broker-a:9092",
 			topics:     "withdrawals.requested.v2",
 			wantCalled: false,
@@ -300,6 +308,52 @@ func TestEnsureCoordinatorQueueTopics(t *testing.T) {
 				t.Fatalf("topics = %#v want %#v", gotTopics, tc.wantTopics)
 			}
 		})
+	}
+}
+
+func TestWithdrawCoordinatorQueueConsumerConfig_PostgresFallsBackToStoreDSN(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := withdrawCoordinatorQueueConsumerConfig(withdrawCoordinatorQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "withdraw-coordinator",
+		Topics:           []string{"withdrawals.requested.v2"},
+		QueueMaxBytes:    123,
+		MaxLineBytes:     456,
+	})
+	if err != nil {
+		t.Fatalf("withdrawCoordinatorQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := cfg.Group, "withdraw-coordinator"; got != want {
+		t.Fatalf("Group = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Topics, ","), "withdrawals.requested.v2"; got != want {
+		t.Fatalf("Topics = %q, want %q", got, want)
+	}
+}
+
+func TestWithdrawCoordinatorQueueConsumerConfig_PostgresDSNEnvOverridesStoreDSN(t *testing.T) {
+	t.Setenv("WITHDRAW_COORDINATOR_QUEUE_DSN", "postgres://queue-db")
+
+	cfg, err := withdrawCoordinatorQueueConsumerConfig(withdrawCoordinatorQueueOptions{
+		Driver:           queue.DriverPostgres,
+		PostgresDSNEnv:   "WITHDRAW_COORDINATOR_QUEUE_DSN",
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "withdraw-coordinator",
+		Topics:           []string{"withdrawals.requested.v2"},
+	})
+	if err != nil {
+		t.Fatalf("withdrawCoordinatorQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
 	}
 }
 
