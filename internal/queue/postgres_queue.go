@@ -149,10 +149,6 @@ func (s *postgresQueueStore) ensureSchema(ctx context.Context) error {
 }
 
 func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload []byte) error {
-	topic = strings.TrimSpace(topic)
-	if topic == "" {
-		return errors.New("topic is required")
-	}
 	if s == nil || s.pool == nil {
 		return errors.New("postgres queue: nil store")
 	}
@@ -162,6 +158,27 @@ func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload 
 		return fmt.Errorf("postgres queue: begin enqueue tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := EnqueuePostgresTx(ctx, tx, topic, payload); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres queue: commit enqueue tx: %w", err)
+	}
+	return nil
+}
+
+// EnqueuePostgresTx appends a message to the Postgres queue inside an existing transaction.
+// The caller is responsible for committing or rolling back the transaction and for ensuring
+// the Postgres queue schema has already been created.
+func EnqueuePostgresTx(ctx context.Context, tx pgx.Tx, topic string, payload []byte) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is required")
+	}
+	if tx == nil {
+		return errors.New("postgres queue: nil transaction")
+	}
 
 	var seq int64
 	if err := tx.QueryRow(ctx, `
@@ -179,9 +196,6 @@ func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload 
 		VALUES ($1, $2, $3, now())
 	`, topic, seq, append([]byte(nil), payload...)); err != nil {
 		return fmt.Errorf("postgres queue: insert message: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres queue: commit enqueue tx: %w", err)
 	}
 	return nil
 }

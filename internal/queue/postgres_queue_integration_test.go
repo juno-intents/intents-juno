@@ -89,6 +89,89 @@ func TestPostgresQueueIntegration_RoundTripAndResume(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueIntegration_EnqueueTxCommitsWithTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	store := &postgresQueueStore{pool: pool}
+	if err := store.ensureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := EnqueuePostgresTx(ctx, tx, "proof.requests.v1", []byte("tx-committed")); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("EnqueuePostgresTx: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+
+	consumer, err := NewConsumer(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		PostgresPool:          pool,
+		Group:                 "proof-requestor",
+		Topics:                []string{"proof.requests.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+		PostgresOwner:         "tx-commit",
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	msg := readQueueMessage(t, consumer)
+	if got, want := string(msg.Value), "tx-committed"; got != want {
+		t.Fatalf("message value = %q, want %q", got, want)
+	}
+}
+
+func TestPostgresQueueIntegration_EnqueueTxRollsBackWithTransaction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	store := &postgresQueueStore{pool: pool}
+	if err := store.ensureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := EnqueuePostgresTx(ctx, tx, "proof.requests.v1", []byte("tx-rolled-back")); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("EnqueuePostgresTx: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback tx: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM queue_messages WHERE topic = $1`, "proof.requests.v1").Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("queue_messages count = %d, want 0 after rollback", count)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM queue_topic_sequences WHERE topic = $1`, "proof.requests.v1").Scan(&count); err != nil {
+		t.Fatalf("count topic sequences: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("queue_topic_sequences count = %d, want 0 after rollback", count)
+	}
+}
+
 func TestPostgresQueueIntegration_SameGroupConsumersLeaseAndOrdering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
