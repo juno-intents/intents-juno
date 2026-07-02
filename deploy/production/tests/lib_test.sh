@@ -1046,6 +1046,9 @@ EOF
   output_env="$workdir/operator-stack.env"
   production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_OPERATORS=0x9999999999999999999999999999999999999999" "operator stack env uses live checkpoint operator addresses"
+  assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=postgres" "operator env follows shared postgres queue driver"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=postgres" "checkpoint services follow shared postgres queue driver"
+  assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=postgres" "proof request/result services follow shared postgres queue driver"
   rm -rf "$workdir"
 }
 

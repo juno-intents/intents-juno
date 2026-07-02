@@ -3775,6 +3775,7 @@ production_render_operator_stack_env() {
   local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
+  local shared_queue_driver
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
   deposit_scan_wallet_id=""
@@ -3797,6 +3798,18 @@ production_render_operator_stack_env() {
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
+  shared_queue_driver="$(production_json_optional "$shared_manifest" '.shared_services.queue.driver | select(type == "string" and length > 0)')"
+  if [[ -z "$shared_queue_driver" ]]; then
+    shared_queue_driver="kafka"
+  fi
+  shared_queue_driver="$(lower "$shared_queue_driver")"
+  case "$shared_queue_driver" in
+    kafka|postgres)
+      ;;
+    *)
+      die "shared manifest queue driver must be kafka or postgres (got: $shared_queue_driver)"
+      ;;
+  esac
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
   kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   if [[ -z "$kafka_critical_hmac_key" ]]; then
@@ -3868,6 +3881,9 @@ CHECKPOINT_OPERATORS=$checkpoint_operators
 CHECKPOINT_THRESHOLD=$(jq -r '.checkpoint.threshold' "$shared_manifest")
 CHECKPOINT_SIGNATURE_TOPIC=$(jq -r '.checkpoint.signature_topic' "$shared_manifest")
 CHECKPOINT_PACKAGE_TOPIC=$(jq -r '.checkpoint.package_topic' "$shared_manifest")
+OPERATOR_QUEUE_DRIVER=$shared_queue_driver
+CHECKPOINT_QUEUE_DRIVER=$shared_queue_driver
+PROOF_QUEUE_DRIVER=$shared_queue_driver
 JUNO_QUEUE_KAFKA_TLS=true
 JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode' "$shared_manifest")
 JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region' "$shared_manifest")
