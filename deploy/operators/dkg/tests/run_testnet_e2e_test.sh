@@ -1018,6 +1018,26 @@ test_proof_request_relayers_can_cut_over_to_postgres_queue() {
   fi
 }
 
+test_operator_main_event_queues_can_cut_over_to_postgres_queue() {
+  local script_text
+  local operator_queue_arg_refs
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--operator-queue-driver <driver>' "run-testnet-e2e exposes operator main event queue driver flag"
+  assert_contains "$script_text" 'local operator_queue_driver=""' "run-testnet-e2e tracks operator main event queue driver"
+  assert_contains "$script_text" '--operator-queue-driver)' "run-testnet-e2e parses operator main event queue driver"
+  assert_contains "$script_text" '[[ "$operator_queue_driver" == "postgres" ]] || die "--operator-queue-driver supports only postgres during Phase 5 cutover"' "run-testnet-e2e rejects unsupported operator queue drivers"
+  assert_contains "$script_text" 'local -a operator_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "operator main event queues default to kafka queue args"
+  assert_contains "$script_text" 'operator_queue_args=(--queue-driver postgres)' "operator main event queues can cut over to postgres queue"
+  assert_contains "$script_text" 'if [[ "$operator_queue_driver" == "postgres" && -z "$proof_queue_driver" ]]; then' "operator queue cutover keeps proof queue transport explicit when proof stays on kafka"
+  assert_contains "$script_text" 'proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")' "operator queue cutover passes explicit kafka proof queue args"
+  operator_queue_arg_refs="$(grep -F -c '"${operator_queue_args[@]}"' <<<"$script_text" | tr -d ' ')"
+  if (( operator_queue_arg_refs != 7 )); then
+    printf 'assert_count failed: operator queue args must be passed to distributed and runner relayers plus base-event-scanner (references=%s)\n' "$operator_queue_arg_refs" >&2
+    exit 1
+  fi
+}
+
 test_shared_proof_services_restart_after_topic_ensure() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1293,6 +1313,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_base_event_scanner_can_shadow_to_postgres_queue
   test_proof_request_relayers_can_shadow_to_postgres_queue
   test_proof_request_relayers_can_cut_over_to_postgres_queue
+  test_operator_main_event_queues_can_cut_over_to_postgres_queue
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait

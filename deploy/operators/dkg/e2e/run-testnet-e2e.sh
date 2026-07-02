@@ -115,6 +115,7 @@ Options:
   --proof-shadow-queue-driver <driver>
                                    optional deposit-relayer/withdraw-finalizer proof request shadow queue driver during Phase 5 (postgres)
   --proof-queue-driver <driver>    optional deposit-relayer/withdraw-finalizer proof request/result primary queue driver during Phase 5 cutover (postgres)
+  --operator-queue-driver <driver> optional deposit/withdraw/base-event main queue driver during Phase 5 cutover (postgres)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
@@ -3434,6 +3435,7 @@ command_run() {
   local shared_validation_remote_output="/tmp/testnet-e2e-shared-infra-summary.json"
   local shared_output=""
   local base_event_shadow_queue_driver=""
+  local operator_queue_driver=""
   local proof_shadow_queue_driver=""
   local proof_queue_driver=""
   local relayer_runtime_mode="distributed"
@@ -3852,6 +3854,11 @@ command_run() {
         proof_queue_driver="$2"
         shift 2
         ;;
+      --operator-queue-driver)
+        [[ $# -ge 2 ]] || die "missing value for --operator-queue-driver"
+        operator_queue_driver="$2"
+        shift 2
+        ;;
       --relayer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
         relayer_runtime_mode="$(lower "$2")"
@@ -4103,6 +4110,9 @@ command_run() {
   if [[ -n "$base_event_shadow_queue_driver" ]]; then
     [[ "$base_event_shadow_queue_driver" == "postgres" ]] || die "--base-event-shadow-queue-driver supports only postgres during Phase 5 shadowing"
   fi
+  if [[ -n "$operator_queue_driver" ]]; then
+    [[ "$operator_queue_driver" == "postgres" ]] || die "--operator-queue-driver supports only postgres during Phase 5 cutover"
+  fi
   if [[ -n "$proof_shadow_queue_driver" ]]; then
     [[ "$proof_shadow_queue_driver" == "postgres" ]] || die "--proof-shadow-queue-driver supports only postgres during Phase 5 shadowing"
   fi
@@ -4115,6 +4125,13 @@ command_run() {
   if [[ "$proof_queue_driver" == "postgres" ]]; then
     proof_queue_args+=(--proof-queue-driver postgres)
     proof_service_queue_args=(--queue-driver postgres)
+  fi
+  local -a operator_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
+  if [[ "$operator_queue_driver" == "postgres" ]]; then
+    operator_queue_args=(--queue-driver postgres)
+  fi
+  if [[ "$operator_queue_driver" == "postgres" && -z "$proof_queue_driver" ]]; then
+    proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")
   fi
   local -a proof_shadow_queue_args=()
   if [[ "$proof_shadow_queue_driver" == "postgres" ]]; then
@@ -6806,8 +6823,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
+          "${operator_queue_args[@]}" \
           --queue-group "$deposit_relayer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --scan-enabled \
@@ -6838,8 +6854,7 @@ command_run() {
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
           --leader-election=false \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
+          "${operator_queue_args[@]}" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
           --max-items "$withdraw_coordinator_max_items" \
@@ -6915,8 +6930,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
+          "${operator_queue_args[@]}" \
           --queue-group "$withdraw_finalizer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
@@ -6950,8 +6964,7 @@ command_run() {
             "${proof_queue_args[@]}" \
             "${proof_shadow_queue_args[@]}" \
             --submit-timeout "$relayer_submit_timeout" \
-            --queue-driver kafka \
-            --queue-brokers "$shared_kafka_brokers" \
+            "${operator_queue_args[@]}" \
             --queue-group "$deposit_relayer_group" \
             --queue-topics "$checkpoint_package_topic" \
             --health-port "$deposit_relayer_health_port" \
@@ -6974,8 +6987,7 @@ command_run() {
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
           --leader-election=false \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
+          "${operator_queue_args[@]}" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
           --max-items "$withdraw_coordinator_max_items" \
@@ -7033,8 +7045,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
+          "${operator_queue_args[@]}" \
           --queue-group "$withdraw_finalizer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
@@ -7119,8 +7130,7 @@ command_run() {
       --postgres-dsn "$shared_postgres_dsn"
       --start-block "$scanner_start_block"
       --poll-interval 3s
-      --queue-driver kafka
-      --queue-brokers "$shared_kafka_brokers"
+      "${operator_queue_args[@]}"
       --withdraw-event-topic "$withdraw_request_topic"
       --health-port "$base_event_scanner_health_port"
     )
