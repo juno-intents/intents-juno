@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
 type stubReadyDependency struct {
@@ -149,6 +152,121 @@ func TestKafkaBrokerReadinessCheckWithDialer_EmptyBrokersIsNoop(t *testing.T) {
 
 	if check := kafkaBrokerReadinessCheckWithDialer(nil, nil); check != nil {
 		t.Fatalf("expected nil check")
+	}
+}
+
+func TestProofRequestorQueueConfigs_DefaultKafka(t *testing.T) {
+	t.Parallel()
+
+	opts := proofRequestorQueueOptions{
+		Driver:        "",
+		Brokers:       "broker-a:9092, broker-b:9092",
+		Group:         "proof-requestor",
+		InputTopic:    "proof.requests.v1",
+		QueueMaxBytes: 1234,
+		MaxLineBytes:  5678,
+	}
+
+	consumerCfg, err := proofRequestorConsumerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorConsumerConfig: %v", err)
+	}
+	if consumerCfg.Driver != queue.DriverKafka {
+		t.Fatalf("consumer driver = %q, want %q", consumerCfg.Driver, queue.DriverKafka)
+	}
+	if !reflect.DeepEqual(consumerCfg.Brokers, []string{"broker-a:9092", "broker-b:9092"}) {
+		t.Fatalf("consumer brokers = %#v", consumerCfg.Brokers)
+	}
+	if consumerCfg.PostgresDSN != "" {
+		t.Fatalf("consumer PostgresDSN = %q, want empty", consumerCfg.PostgresDSN)
+	}
+	if consumerCfg.Group != "proof-requestor" || !reflect.DeepEqual(consumerCfg.Topics, []string{"proof.requests.v1"}) {
+		t.Fatalf("consumer group/topics = %q/%#v", consumerCfg.Group, consumerCfg.Topics)
+	}
+	if consumerCfg.KafkaMaxBytes != 1234 || consumerCfg.MaxLineBytes != 5678 {
+		t.Fatalf("consumer byte limits = %d/%d", consumerCfg.KafkaMaxBytes, consumerCfg.MaxLineBytes)
+	}
+
+	producerCfg, err := proofRequestorProducerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorProducerConfig: %v", err)
+	}
+	if producerCfg.Driver != queue.DriverKafka {
+		t.Fatalf("producer driver = %q, want %q", producerCfg.Driver, queue.DriverKafka)
+	}
+	if !reflect.DeepEqual(producerCfg.Brokers, []string{"broker-a:9092", "broker-b:9092"}) {
+		t.Fatalf("producer brokers = %#v", producerCfg.Brokers)
+	}
+	if producerCfg.PostgresDSN != "" {
+		t.Fatalf("producer PostgresDSN = %q, want empty", producerCfg.PostgresDSN)
+	}
+}
+
+func TestProofRequestorQueueConfigs_PostgresDSNEnv(t *testing.T) {
+	t.Setenv("PROOF_REQUESTOR_QUEUE_POSTGRES_DSN", " postgres://queue-user:queue-pass@127.0.0.1:5432/queue_db?sslmode=disable ")
+
+	opts := proofRequestorQueueOptions{
+		Driver:         " postgres ",
+		PostgresDSNEnv: "PROOF_REQUESTOR_QUEUE_POSTGRES_DSN",
+		Group:          "proof-requestor",
+		InputTopic:     "proof.requests.v1",
+		QueueMaxBytes:  1234,
+		MaxLineBytes:   5678,
+	}
+
+	consumerCfg, err := proofRequestorConsumerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorConsumerConfig: %v", err)
+	}
+	if consumerCfg.Driver != queue.DriverPostgres {
+		t.Fatalf("consumer driver = %q, want %q", consumerCfg.Driver, queue.DriverPostgres)
+	}
+	if consumerCfg.PostgresDSN != "postgres://queue-user:queue-pass@127.0.0.1:5432/queue_db?sslmode=disable" {
+		t.Fatalf("consumer PostgresDSN = %q", consumerCfg.PostgresDSN)
+	}
+	if len(consumerCfg.Brokers) != 0 {
+		t.Fatalf("consumer brokers = %#v, want none", consumerCfg.Brokers)
+	}
+
+	producerCfg, err := proofRequestorProducerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorProducerConfig: %v", err)
+	}
+	if producerCfg.Driver != queue.DriverPostgres {
+		t.Fatalf("producer driver = %q, want %q", producerCfg.Driver, queue.DriverPostgres)
+	}
+	if producerCfg.PostgresDSN != "postgres://queue-user:queue-pass@127.0.0.1:5432/queue_db?sslmode=disable" {
+		t.Fatalf("producer PostgresDSN = %q", producerCfg.PostgresDSN)
+	}
+	if len(producerCfg.Brokers) != 0 {
+		t.Fatalf("producer brokers = %#v, want none", producerCfg.Brokers)
+	}
+}
+
+func TestProofRequestorQueueConfigs_PostgresFallsBackToStoreDSNEnv(t *testing.T) {
+	t.Setenv("POSTGRES_DSN", " postgres://store-user:store-pass@127.0.0.1:5432/store_db?sslmode=disable ")
+
+	opts := proofRequestorQueueOptions{
+		Driver:              queue.DriverPostgres,
+		StorePostgresDSNEnv: "POSTGRES_DSN",
+		Group:               "proof-requestor",
+		InputTopic:          "proof.requests.v1",
+	}
+
+	consumerCfg, err := proofRequestorConsumerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorConsumerConfig: %v", err)
+	}
+	if consumerCfg.PostgresDSN != "postgres://store-user:store-pass@127.0.0.1:5432/store_db?sslmode=disable" {
+		t.Fatalf("consumer PostgresDSN = %q", consumerCfg.PostgresDSN)
+	}
+
+	producerCfg, err := proofRequestorProducerConfig(opts)
+	if err != nil {
+		t.Fatalf("proofRequestorProducerConfig: %v", err)
+	}
+	if producerCfg.PostgresDSN != "postgres://store-user:store-pass@127.0.0.1:5432/store_db?sslmode=disable" {
+		t.Fatalf("producer PostgresDSN = %q", producerCfg.PostgresDSN)
 	}
 }
 

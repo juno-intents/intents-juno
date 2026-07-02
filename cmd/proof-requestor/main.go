@@ -55,12 +55,14 @@ func main() {
 		reqTimeout  = flag.Duration("request-timeout", 15*time.Minute, "per request timeout")
 		callbackTTL = flag.Duration("callback-idempotency-ttl", 72*time.Hour, "callback idempotency ttl")
 
-		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
-		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queueGroup    = flag.String("queue-group", "proof-requestor", "queue consumer group")
-		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "max stdin line bytes for stdio driver")
-		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "max kafka message size to consume")
-		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "queue message ack timeout")
+		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver")
+		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+		queueGroup          = flag.String("queue-group", "proof-requestor", "queue consumer group")
+		maxLineBytes        = flag.Int("max-line-bytes", 1<<20, "max stdin line bytes for stdio driver")
+		queueMaxBytes       = flag.Int("queue-max-bytes", 10<<20, "max kafka message size to consume")
+		ackTimeout          = flag.Duration("queue-ack-timeout", 5*time.Second, "queue message ack timeout")
 
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter binary")
@@ -132,24 +134,36 @@ func main() {
 		}
 	}
 
-	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
-		Driver:        *queueDriver,
-		Brokers:       queue.SplitCommaList(*queueBrokers),
-		Group:         *queueGroup,
-		Topics:        []string{*inputTopic},
-		KafkaMaxBytes: *queueMaxBytes,
-		MaxLineBytes:  *maxLineBytes,
-	})
+	queueOpts := proofRequestorQueueOptions{
+		Driver:              *queueDriver,
+		Brokers:             *queueBrokers,
+		PostgresDSN:         *queuePostgresDSN,
+		PostgresDSNEnv:      *queuePostgresDSNEnv,
+		StorePostgresDSN:    *postgresDSN,
+		StorePostgresDSNEnv: *postgresDSNEnv,
+		Group:               *queueGroup,
+		InputTopic:          *inputTopic,
+		QueueMaxBytes:       *queueMaxBytes,
+		MaxLineBytes:        *maxLineBytes,
+	}
+	consumerCfg, err := proofRequestorConsumerConfig(queueOpts)
+	if err != nil {
+		log.Error("configure queue consumer", "err", err)
+		os.Exit(2)
+	}
+	consumer, err := queue.NewConsumer(ctx, consumerCfg)
 	if err != nil {
 		log.Error("init queue consumer", "err", err)
 		os.Exit(2)
 	}
 	defer func() { _ = consumer.Close() }()
 
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  *queueDriver,
-		Brokers: queue.SplitCommaList(*queueBrokers),
-	})
+	producerCfg, err := proofRequestorProducerConfig(queueOpts)
+	if err != nil {
+		log.Error("configure queue producer", "err", err)
+		os.Exit(2)
+	}
+	producer, err := queue.NewProducer(producerCfg)
 	if err != nil {
 		log.Error("init queue producer", "err", err)
 		os.Exit(2)
@@ -291,6 +305,78 @@ func newSecretProvider(ctx context.Context, driver string) (secrets.Provider, er
 	default:
 		return nil, fmt.Errorf("unsupported secrets driver %q", driver)
 	}
+}
+
+type proofRequestorQueueOptions struct {
+	Driver              string
+	Brokers             string
+	PostgresDSN         string
+	PostgresDSNEnv      string
+	StorePostgresDSN    string
+	StorePostgresDSNEnv string
+	Group               string
+	InputTopic          string
+	QueueMaxBytes       int
+	MaxLineBytes        int
+}
+
+func proofRequestorConsumerConfig(opts proofRequestorQueueOptions) (queue.ConsumerConfig, error) {
+	driver := normalizeProofRequestorQueueDriver(opts.Driver)
+	cfg := queue.ConsumerConfig{
+		Driver:        driver,
+		Group:         opts.Group,
+		Topics:        []string{opts.InputTopic},
+		KafkaMaxBytes: opts.QueueMaxBytes,
+		MaxLineBytes:  opts.MaxLineBytes,
+	}
+	switch driver {
+	case queue.DriverKafka:
+		cfg.Brokers = queue.SplitCommaList(opts.Brokers)
+	case queue.DriverPostgres:
+		dsn, err := proofRequestorQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ConsumerConfig{}, err
+		}
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+	default:
+		return queue.ConsumerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func proofRequestorProducerConfig(opts proofRequestorQueueOptions) (queue.ProducerConfig, error) {
+	driver := normalizeProofRequestorQueueDriver(opts.Driver)
+	cfg := queue.ProducerConfig{Driver: driver}
+	switch driver {
+	case queue.DriverKafka:
+		cfg.Brokers = queue.SplitCommaList(opts.Brokers)
+	case queue.DriverPostgres:
+		dsn, err := proofRequestorQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func normalizeProofRequestorQueueDriver(driver string) string {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver == "" {
+		return queue.DriverKafka
+	}
+	return driver
+}
+
+func proofRequestorQueuePostgresDSN(opts proofRequestorQueueOptions) (string, error) {
+	if strings.TrimSpace(opts.PostgresDSN) != "" || strings.TrimSpace(opts.PostgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(opts.PostgresDSN, opts.PostgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(opts.StorePostgresDSN, opts.StorePostgresDSNEnv)
 }
 
 type readyChecker interface {
