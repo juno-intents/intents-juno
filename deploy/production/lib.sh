@@ -680,7 +680,7 @@ production_write_shared_terraform_override_tfvars() {
 
   local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id bridge_guest_release_tag
   local bridge_paused shared_proof_requestor_desired_count shared_proof_funder_desired_count
-  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_services_json shared_terraform_dir shared_queue_driver
+  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_services_json shared_terraform_dir shared_queue_driver shared_proof_queue_driver
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
@@ -712,6 +712,22 @@ production_write_shared_terraform_override_tfvars() {
       kafka | postgres) ;;
       *)
         die "shared_services.queue.driver must be kafka or postgres (got: $shared_queue_driver)"
+        ;;
+    esac
+  fi
+  shared_proof_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue | has("driver"))' "$inventory" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.driver | type == "string"' "$inventory" >/dev/null 2>&1; then
+      die "shared_services.proof_queue.driver must be kafka or postgres"
+    fi
+    shared_proof_queue_driver="$(production_json_required "$inventory" '.shared_services.proof_queue.driver')"
+    shared_proof_queue_driver="$(trim "$shared_proof_queue_driver")"
+    [[ -n "$shared_proof_queue_driver" ]] || die "shared_services.proof_queue.driver must be kafka or postgres"
+    shared_proof_queue_driver="$(lower "$shared_proof_queue_driver")"
+    case "$shared_proof_queue_driver" in
+      kafka | postgres) ;;
+      *)
+        die "shared_services.proof_queue.driver must be kafka or postgres (got: $shared_proof_queue_driver)"
         ;;
     esac
   fi
@@ -946,6 +962,7 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
     --arg shared_queue_driver "$shared_queue_driver" \
+    --arg shared_proof_queue_driver "$shared_proof_queue_driver" \
     --argjson shared_proof_requestor_desired_count "$shared_proof_requestor_desired_count" \
     --argjson shared_proof_funder_desired_count "$shared_proof_funder_desired_count" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
@@ -994,6 +1011,9 @@ production_write_shared_terraform_override_tfvars() {
     } else {} end)
     + (if $shared_queue_driver == "" then {} else {
       shared_queue_driver: $shared_queue_driver
+    } end)
+    + (if $shared_proof_queue_driver == "" then {} else {
+      shared_proof_queue_driver: $shared_proof_queue_driver
     } end)
     + (if ($shared_services.ipfs_ami_id? | type) == "string" and ($shared_services.ipfs_ami_id | length) > 0 then {
       shared_ipfs_ami_id: $shared_services.ipfs_ami_id

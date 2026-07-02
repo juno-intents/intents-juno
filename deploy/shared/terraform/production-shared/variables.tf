@@ -151,13 +151,24 @@ variable "shared_kafka_port" {
 }
 
 variable "shared_queue_driver" {
-  description = "Queue transport used by shared proof services. Kafka remains the default until Postgres shadow/cutover is complete."
+  description = "Shared queue transport that controls production MSK lifecycle. Kafka remains the default until all shared consumers have cut over."
   type        = string
   default     = "kafka"
 
   validation {
     condition     = contains(["kafka", "postgres"], lower(trimspace(var.shared_queue_driver)))
     error_message = "shared_queue_driver must be one of kafka or postgres."
+  }
+}
+
+variable "shared_proof_queue_driver" {
+  description = "Optional proof-service queue transport override. Empty follows shared_queue_driver so proof ECS can cut over before MSK deletion."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = trimspace(var.shared_proof_queue_driver) == "" || contains(["kafka", "postgres"], lower(trimspace(var.shared_proof_queue_driver)))
+    error_message = "shared_proof_queue_driver must be empty or one of kafka or postgres."
   }
 }
 

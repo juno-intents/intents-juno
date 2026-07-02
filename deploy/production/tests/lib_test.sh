@@ -248,6 +248,68 @@ test_write_shared_terraform_override_tfvars_rejects_invalid_queue_driver() {
   done
 }
 
+test_write_shared_terraform_override_tfvars_writes_proof_queue_driver() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.driver = "postgres"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_queue_driver' "$override_file")" "kafka" "production shared tfvars keep MSK lifecycle on kafka"
+  assert_eq "$(jq -r '.shared_proof_queue_driver' "$override_file")" "postgres" "production shared tfvars include proof queue transport override"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_rejects_invalid_proof_queue_driver() {
+  local case_name driver_expr workdir override_file stderr_file
+  for case_name in invalid-string non-string blank-string; do
+    case "$case_name" in
+      invalid-string)
+        driver_expr='"sqs"'
+        ;;
+      non-string)
+        driver_expr='true'
+        ;;
+      blank-string)
+        driver_expr='"   "'
+        ;;
+    esac
+
+    workdir="$(mktemp -d)"
+    write_inventory_fixture "$workdir/inventory.json" "$workdir"
+    jq "
+      .environment = \"mainnet\"
+      | .shared_postgres_password = \"mainnet-postgres-password\"
+      | .app_role.private_subnet_ids = [\"subnet-0afebf35409cafe82\", \"subnet-0dfe9dd62ddea943b\"]
+      | .shared_services.alarm_actions = [\"arn:aws:sns:us-east-1:021490342184:intents-juno-alerts\"]
+      | .shared_services.proof_queue.driver = $driver_expr
+      | .contracts.bridge_guest_release_tag = \"bridge-guests-v2026.04.06-r1-mainnet\"
+    " "$workdir/inventory.json" >"$workdir/inventory.next"
+    mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+    override_file="$workdir/shared-terraform.auto.tfvars.json"
+    stderr_file="$workdir/stderr"
+    if (production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file") 2>"$stderr_file"; then
+      printf 'expected invalid shared proof queue driver case %s to fail\n' "$case_name" >&2
+      exit 1
+    fi
+
+    assert_contains "$(cat "$stderr_file")" "shared_services.proof_queue.driver must be kafka or postgres" "production shared tfvars reject invalid proof queue driver case $case_name"
+    rm -rf "$workdir"
+  done
+}
+
 test_write_shared_terraform_override_tfvars_writes_right_sizing_controls() {
   local workdir override_file
   workdir="$(mktemp -d)"
@@ -4017,6 +4079,7 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   jq '
     .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
     | .shared_services.queue.driver = "postgres"
+    | .shared_services.proof_queue.driver = "postgres"
     | .shared_postgres_password = "preview-postgres-password"
     | .shared_postgres_db = "preview-intents-db"
     | .shared_services.live_e2e = {
@@ -4074,6 +4137,7 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   assert_eq "$(jq -r 'has("shared_wireguard_role_ami_id")' "$override_file")" "false" "preview override does not write the unsupported wireguard ami input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
   assert_eq "$(jq -r 'has("shared_queue_driver")' "$override_file")" "false" "preview override does not write the unsupported production shared queue driver input"
+  assert_eq "$(jq -r 'has("shared_proof_queue_driver")' "$override_file")" "false" "preview override does not write the unsupported production proof queue driver input"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | length' "$override_file")" "0" "preview override writes an empty reusable VPC endpoint list when the VPC has none"
   rm -rf "$workdir"
 }
@@ -4430,6 +4494,8 @@ main() {
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
   test_write_shared_terraform_override_tfvars_rejects_invalid_queue_driver
+  test_write_shared_terraform_override_tfvars_writes_proof_queue_driver
+  test_write_shared_terraform_override_tfvars_rejects_invalid_proof_queue_driver
   test_write_shared_terraform_override_tfvars_writes_right_sizing_controls
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias

@@ -126,7 +126,9 @@ locals {
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
   shared_queue_driver                          = lower(trimspace(var.shared_queue_driver))
+  shared_proof_queue_driver                    = trimspace(var.shared_proof_queue_driver) == "" ? local.shared_queue_driver : lower(trimspace(var.shared_proof_queue_driver))
   shared_queue_uses_kafka                      = local.shared_queue_driver == "kafka"
+  shared_proof_queue_uses_kafka                = local.shared_proof_queue_driver == "kafka"
   shared_kafka_cluster_arn                     = try(aws_msk_cluster.shared[0].arn, "")
   shared_kafka_bootstrap_brokers               = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")
   shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
@@ -143,7 +145,7 @@ locals {
   shared_sp1_withdraw_program_url              = trimspace(var.shared_sp1_withdraw_program_url_override) != "" ? trimspace(var.shared_sp1_withdraw_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
   shared_queue_kafka_args                      = ["--queue-brokers", local.shared_kafka_bootstrap_brokers]
   shared_queue_postgres_args                   = ["--queue-postgres-dsn-env", "POSTGRES_DSN"]
-  shared_proof_queue_args                      = concat(["--queue-driver", local.shared_queue_driver], local.shared_queue_driver == "postgres" ? local.shared_queue_postgres_args : local.shared_queue_kafka_args)
+  shared_proof_queue_args                      = concat(["--queue-driver", local.shared_proof_queue_driver], local.shared_proof_queue_driver == "postgres" ? local.shared_queue_postgres_args : local.shared_queue_kafka_args)
   shared_proof_requestor_command = concat([
     "/usr/local/bin/proof-requestor",
     "--postgres-dsn-env", "POSTGRES_DSN",
@@ -928,7 +930,7 @@ data "aws_iam_policy_document" "proof_funder_execution_access" {
 
 data "aws_iam_policy_document" "proof_requestor_task_access" {
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowMSKConnect"
       actions = [
@@ -941,7 +943,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowMSKTopicAccess"
       actions = [
@@ -958,7 +960,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowMSKGroupAccess"
       actions = [
@@ -970,7 +972,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowReadProofRequestsTopic"
       actions = [
@@ -982,7 +984,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowWriteProofResultsTopic"
       actions = [
@@ -994,7 +996,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowWriteProofFailuresTopic"
       actions = [
@@ -1006,7 +1008,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowReadProofRequestorGroup"
       actions = [
@@ -1020,7 +1022,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
 
 data "aws_iam_policy_document" "proof_funder_task_access" {
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowMSKConnect"
       actions = [
@@ -1033,7 +1035,7 @@ data "aws_iam_policy_document" "proof_funder_task_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_proof_queue_uses_kafka ? [1] : []
     content {
       sid = "AllowWriteOpsAlertsTopic"
       actions = [
@@ -1058,14 +1060,14 @@ resource "aws_iam_role_policy" "proof_funder_execution_access" {
 }
 
 resource "aws_iam_role_policy" "proof_requestor_task_access" {
-  count  = local.shared_queue_uses_kafka ? 1 : 0
+  count  = local.shared_proof_queue_uses_kafka ? 1 : 0
   name   = "${local.resource_name}-proof-requestor-task"
   role   = aws_iam_role.proof_requestor_task.id
   policy = data.aws_iam_policy_document.proof_requestor_task_access.json
 }
 
 resource "aws_iam_role_policy" "proof_funder_task_access" {
-  count  = local.shared_queue_uses_kafka ? 1 : 0
+  count  = local.shared_proof_queue_uses_kafka ? 1 : 0
   name   = "${local.resource_name}-proof-funder-task"
   role   = aws_iam_role.proof_funder_task.id
   policy = data.aws_iam_policy_document.proof_funder_task_access.json
@@ -1241,6 +1243,10 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       error_message = "shared_base_chain_id must be > 0 when a shared proof service desired count is > 0."
     }
     precondition {
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
+      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
+    }
+    precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
       error_message = "shared_deposit_image_id must be a 32-byte hex value when a shared proof service desired count is > 0."
     }
@@ -1302,6 +1308,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
     precondition {
       condition     = !local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""
       error_message = "shared_sp1_requestor_address must be set when a shared proof service desired count is > 0."
+    }
+    precondition {
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
+      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
@@ -1569,7 +1579,7 @@ resource "aws_launch_template" "proof_role" {
     Type=simple
     ExecStartPre=/usr/local/bin/render-proof-env.sh requestor
     EnvironmentFile=/etc/intents-juno/proof-requestor.env
-    ExecStart=/usr/local/bin/proof-requestor --postgres-dsn-env POSTGRES_DSN --store-driver postgres --owner ${local.resource_name}-proof-requestor --sp1-requestor-address ${local.shared_sp1_requestor_address} --sp1-requestor-key-env PROOF_REQUESTOR_KEY --secrets-driver env --chain-id ${var.shared_base_chain_id} --input-topic ${local.shared_proof_request_topic} --result-topic ${local.shared_proof_result_topic} --failure-topic ${local.shared_proof_failure_topic} --queue-driver ${local.shared_queue_driver} ${local.shared_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --queue-group ${local.shared_proof_requestor_group} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    ExecStart=/usr/local/bin/proof-requestor --postgres-dsn-env POSTGRES_DSN --store-driver postgres --owner ${local.resource_name}-proof-requestor --sp1-requestor-address ${local.shared_sp1_requestor_address} --sp1-requestor-key-env PROOF_REQUESTOR_KEY --secrets-driver env --chain-id ${var.shared_base_chain_id} --input-topic ${local.shared_proof_request_topic} --result-topic ${local.shared_proof_result_topic} --failure-topic ${local.shared_proof_failure_topic} --queue-driver ${local.shared_proof_queue_driver} ${local.shared_proof_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --queue-group ${local.shared_proof_requestor_group} --sp1-bin /usr/local/bin/sp1-prover-adapter
     Restart=always
     RestartSec=5
 
@@ -1587,7 +1597,7 @@ resource "aws_launch_template" "proof_role" {
     Type=simple
     ExecStartPre=/usr/local/bin/render-proof-env.sh funder
     EnvironmentFile=/etc/intents-juno/proof-funder.env
-    ExecStart=/usr/local/bin/proof-funder --postgres-dsn-env POSTGRES_DSN --lease-driver postgres --owner-id ${local.resource_name}-proof-funder --sp1-requestor-address ${local.shared_sp1_requestor_address} --min-balance-wei ${local.shared_sp1_required_credit_buffer} --critical-balance-wei ${local.shared_sp1_projected_with_overhead} --queue-driver ${local.shared_queue_driver} ${local.shared_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    ExecStart=/usr/local/bin/proof-funder --postgres-dsn-env POSTGRES_DSN --lease-driver postgres --owner-id ${local.resource_name}-proof-funder --sp1-requestor-address ${local.shared_sp1_requestor_address} --min-balance-wei ${local.shared_sp1_required_credit_buffer} --critical-balance-wei ${local.shared_sp1_projected_with_overhead} --queue-driver ${local.shared_proof_queue_driver} ${local.shared_proof_queue_driver == "postgres" ? "--queue-postgres-dsn-env POSTGRES_DSN" : "--queue-brokers ${local.shared_kafka_bootstrap_brokers}"} --sp1-bin /usr/local/bin/sp1-prover-adapter
     Restart=always
     RestartSec=5
 

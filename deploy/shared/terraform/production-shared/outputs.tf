@@ -39,8 +39,13 @@ output "shared_kafka_bootstrap_brokers_tls" {
 }
 
 output "shared_queue_driver" {
-  description = "Selected queue transport for shared proof services."
+  description = "Selected shared queue transport that controls MSK lifecycle."
   value       = local.shared_queue_driver
+}
+
+output "shared_proof_queue_driver" {
+  description = "Selected queue transport for shared proof services."
+  value       = local.shared_proof_queue_driver
 }
 
 output "shared_sp1_requestor_address" {
