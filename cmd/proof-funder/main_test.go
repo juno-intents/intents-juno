@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
 type stubBalanceClient struct {
@@ -105,5 +107,62 @@ func TestSP1BalanceReadinessCheck_RejectsNilBalance(t *testing.T) {
 	err := check(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "empty balance") {
 		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+func TestProofFunderQueueConfig_DefaultKafka(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := proofFunderQueueConfig(proofFunderQueueOptions{
+		Driver:  "",
+		Brokers: "broker-a:9092, broker-b:9092",
+	})
+	if err != nil {
+		t.Fatalf("proofFunderQueueConfig: %v", err)
+	}
+	if cfg.Driver != queue.DriverKafka {
+		t.Fatalf("driver = %q, want %q", cfg.Driver, queue.DriverKafka)
+	}
+	if !reflect.DeepEqual(cfg.Brokers, []string{"broker-a:9092", "broker-b:9092"}) {
+		t.Fatalf("brokers = %#v", cfg.Brokers)
+	}
+	if cfg.PostgresDSN != "" {
+		t.Fatalf("PostgresDSN = %q, want empty", cfg.PostgresDSN)
+	}
+}
+
+func TestProofFunderQueueConfig_PostgresDSNEnv(t *testing.T) {
+	t.Setenv("PROOF_FUNDER_QUEUE_POSTGRES_DSN", " postgres://queue-user:queue-pass@127.0.0.1:5432/queue_db?sslmode=disable ")
+
+	cfg, err := proofFunderQueueConfig(proofFunderQueueOptions{
+		Driver:         " postgres ",
+		PostgresDSNEnv: "PROOF_FUNDER_QUEUE_POSTGRES_DSN",
+	})
+	if err != nil {
+		t.Fatalf("proofFunderQueueConfig: %v", err)
+	}
+	if cfg.Driver != queue.DriverPostgres {
+		t.Fatalf("driver = %q, want %q", cfg.Driver, queue.DriverPostgres)
+	}
+	if cfg.PostgresDSN != "postgres://queue-user:queue-pass@127.0.0.1:5432/queue_db?sslmode=disable" {
+		t.Fatalf("PostgresDSN = %q", cfg.PostgresDSN)
+	}
+	if len(cfg.Brokers) != 0 {
+		t.Fatalf("brokers = %#v, want none", cfg.Brokers)
+	}
+}
+
+func TestProofFunderQueueConfig_PostgresFallsBackToLeaseDSNEnv(t *testing.T) {
+	t.Setenv("POSTGRES_DSN", " postgres://lease-user:lease-pass@127.0.0.1:5432/lease_db?sslmode=disable ")
+
+	cfg, err := proofFunderQueueConfig(proofFunderQueueOptions{
+		Driver:              queue.DriverPostgres,
+		LeasePostgresDSNEnv: "POSTGRES_DSN",
+	})
+	if err != nil {
+		t.Fatalf("proofFunderQueueConfig: %v", err)
+	}
+	if cfg.PostgresDSN != "postgres://lease-user:lease-pass@127.0.0.1:5432/lease_db?sslmode=disable" {
+		t.Fatalf("PostgresDSN = %q", cfg.PostgresDSN)
 	}
 }

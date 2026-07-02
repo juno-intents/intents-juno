@@ -48,8 +48,10 @@ func main() {
 
 		alertTopic = flag.String("alert-topic", "ops.alerts.v1", "critical alert topic")
 
-		queueDriver  = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
-		queueBrokers = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver")
+		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
 
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter")
@@ -138,10 +140,19 @@ func main() {
 		os.Exit(2)
 	}
 
-	alertProducer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  *queueDriver,
-		Brokers: queue.SplitCommaList(*queueBrokers),
+	alertProducerCfg, err := proofFunderQueueConfig(proofFunderQueueOptions{
+		Driver:              *queueDriver,
+		Brokers:             *queueBrokers,
+		PostgresDSN:         *queuePostgresDSN,
+		PostgresDSNEnv:      *queuePostgresDSNEnv,
+		LeasePostgresDSN:    *postgresDSN,
+		LeasePostgresDSNEnv: *postgresDSNEnv,
 	})
+	if err != nil {
+		log.Error("configure alert producer", "err", err)
+		os.Exit(2)
+	}
+	alertProducer, err := queue.NewProducer(alertProducerCfg)
 	if err != nil {
 		log.Error("init alert producer", "err", err)
 		os.Exit(2)
@@ -249,6 +260,49 @@ func parseBigInt(v string) (*big.Int, error) {
 		return nil, fmt.Errorf("must be > 0")
 	}
 	return out, nil
+}
+
+type proofFunderQueueOptions struct {
+	Driver              string
+	Brokers             string
+	PostgresDSN         string
+	PostgresDSNEnv      string
+	LeasePostgresDSN    string
+	LeasePostgresDSNEnv string
+}
+
+func proofFunderQueueConfig(opts proofFunderQueueOptions) (queue.ProducerConfig, error) {
+	driver := normalizeProofFunderQueueDriver(opts.Driver)
+	cfg := queue.ProducerConfig{Driver: driver}
+	switch driver {
+	case queue.DriverKafka:
+		cfg.Brokers = queue.SplitCommaList(opts.Brokers)
+	case queue.DriverPostgres:
+		dsn, err := proofFunderQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func normalizeProofFunderQueueDriver(driver string) string {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver == "" {
+		return queue.DriverKafka
+	}
+	return driver
+}
+
+func proofFunderQueuePostgresDSN(opts proofFunderQueueOptions) (string, error) {
+	if strings.TrimSpace(opts.PostgresDSN) != "" || strings.TrimSpace(opts.PostgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(opts.PostgresDSN, opts.PostgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(opts.LeasePostgresDSN, opts.LeasePostgresDSNEnv)
 }
 
 type sp1BalanceChecker interface {
