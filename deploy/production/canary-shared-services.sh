@@ -165,7 +165,7 @@ for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 if [[ "$dry_run" != "true" ]]; then
-  for cmd in pg_isready nc curl; do
+  for cmd in pg_isready curl; do
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
 fi
@@ -175,9 +175,24 @@ aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_
 postgres_endpoint="$(production_json_required "$shared_manifest" '.shared_services.postgres.endpoint | select(type == "string" and length > 0)')"
 postgres_cluster_arn="$(production_json_optional "$shared_manifest" '.shared_services.postgres.cluster_arn | select(type == "string" and length > 0)')"
 postgres_port="$(production_json_required "$shared_manifest" '.shared_services.postgres.port')"
-kafka_brokers="$(production_json_required "$shared_manifest" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
+queue_driver="$(production_json_optional "$shared_manifest" '.shared_services.queue.driver | select(type == "string" and length > 0)')"
+queue_driver="${queue_driver:-kafka}"
+queue_driver="$(trim "$(tr '[:upper:]' '[:lower:]' <<<"$queue_driver")")"
+case "$queue_driver" in
+  kafka|postgres) ;;
+  *) die "shared_services.queue.driver must be kafka or postgres" ;;
+esac
+if [[ "$queue_driver" == "kafka" ]]; then
+  if [[ "$dry_run" != "true" ]]; then
+    have_cmd nc || die "required command not found: nc"
+  fi
+  kafka_brokers="$(production_json_required "$shared_manifest" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
+  kafka_auth_mode="$(production_json_required "$shared_manifest" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
+else
+  kafka_brokers="$(production_json_optional "$shared_manifest" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
+  kafka_auth_mode="$(production_json_optional "$shared_manifest" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
+fi
 kafka_cluster_arn="$(production_json_optional "$shared_manifest" '.shared_services.kafka.cluster_arn | select(type == "string" and length > 0)')"
-kafka_auth_mode="$(production_json_required "$shared_manifest" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
 ipfs_api_url="$(production_json_required "$shared_manifest" '.shared_services.ipfs.api_url | select(type == "string" and length > 0)')"
 ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn | select(type == "string" and length > 0)')"
 ipfs_target_group_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.target_group_arn | select(type == "string" and length > 0)')"
@@ -212,6 +227,9 @@ if [[ "$environment" == "preview" && -n "$kafka_cluster_arn" ]]; then
   skip_kafka_local_check="true"
   kafka_detail="awaiting msk health verification"
 fi
+if [[ "$queue_driver" == "postgres" ]]; then
+  skip_kafka_local_check="true"
+fi
 if [[ "$environment" == "preview" && -n "$ipfs_target_group_arn" ]]; then
   skip_ipfs_local_check="true"
   ipfs_detail="awaiting ipfs target-group health verification"
@@ -240,6 +258,10 @@ artifacts_detail="no artifact bucket configured"
 shared_proof_role_detail="legacy ecs path"
 wireguard_role_detail="legacy singleton path"
 ipfs_auth_header=()
+if [[ "$queue_driver" == "postgres" ]]; then
+  kafka_status="skipped"
+  kafka_detail="postgres queue driver selected; kafka checks skipped"
+fi
 
 if [[ "$dry_run" == "true" ]]; then
   aws_auth_status="skipped"
@@ -257,11 +279,13 @@ if [[ "$dry_run" == "true" ]]; then
   shared_proof_role_detail="dry run"
   wireguard_role_detail="dry run"
 else
-  if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
-    kafka_detail="all brokers reachable with aws-msk-iam"
-  else
-    kafka_status="failed"
-    kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam"
+  if [[ "$queue_driver" == "kafka" ]]; then
+    if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
+      kafka_detail="all brokers reachable with aws-msk-iam"
+    else
+      kafka_status="failed"
+      kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam"
+    fi
   fi
 
   if [[ "$skip_postgres_local_check" != "true" ]] && ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then
@@ -269,7 +293,7 @@ else
     postgres_detail="pg_isready failed"
   fi
 
-  if [[ "$skip_kafka_local_check" != "true" ]]; then
+  if [[ "$queue_driver" == "kafka" && "$skip_kafka_local_check" != "true" ]]; then
     IFS=',' read -r -a broker_array <<<"$kafka_brokers"
     for broker in "${broker_array[@]}"; do
       broker="$(trim "$broker")"
@@ -284,7 +308,23 @@ else
     done
   fi
 
-  if [[ "$kafka_auth_mode" == "aws-msk-iam" || -n "$postgres_cluster_arn" || -n "$kafka_cluster_arn" || -n "$ipfs_target_group_arn" || -n "$checkpoint_blob_bucket" ]]; then
+  aws_auth_required="false"
+  if [[ "$queue_driver" == "kafka" && "$kafka_auth_mode" == "aws-msk-iam" ]]; then
+    aws_auth_required="true"
+  fi
+  if [[ -n "$postgres_cluster_arn" ]]; then
+    aws_auth_required="true"
+  fi
+  if [[ "$queue_driver" == "kafka" && -n "$kafka_cluster_arn" ]]; then
+    aws_auth_required="true"
+  fi
+  if [[ -n "$ipfs_target_group_arn" || -n "$ipfs_api_auth_secret_arn" || -n "$checkpoint_blob_bucket" ]]; then
+    aws_auth_required="true"
+  fi
+  if [[ -n "$shared_proof_role_asg" || -n "$shared_wireguard_role_asg" ]]; then
+    aws_auth_required="true"
+  fi
+  if [[ "$aws_auth_required" == "true" ]]; then
     have_cmd aws || die "required command not found: aws"
     if [[ -z "$aws_profile" || -z "$aws_region" ]]; then
       aws_auth_status="failed"
@@ -325,7 +365,7 @@ else
     fi
   fi
 
-  if [[ "$aws_auth_status" == "passed" && "$kafka_status" == "passed" && -n "$kafka_cluster_arn" ]]; then
+  if [[ "$queue_driver" == "kafka" && "$aws_auth_status" == "passed" && "$kafka_status" == "passed" && -n "$kafka_cluster_arn" ]]; then
     kafka_cluster_json="$(AWS_PAGER="" "${aws_args[@]}" kafka describe-cluster-v2 --cluster-arn "$kafka_cluster_arn" --output json 2>/dev/null || true)"
     kafka_cluster_state="$(jq -r '.ClusterInfo.State // empty' <<<"$kafka_cluster_json")"
     kafka_cluster_subnets="$(jq -r '(.ClusterInfo.Provisioned.BrokerNodeGroupInfo.ClientSubnets // []) | length' <<<"$kafka_cluster_json")"
@@ -433,6 +473,7 @@ jq -n \
   --arg version "1" \
   --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
   --arg manifest "$shared_manifest" \
+  --arg queue_driver "$queue_driver" \
   --arg aws_auth_status "$aws_auth_status" \
   --arg aws_auth_detail "$aws_auth_detail" \
   --arg postgres_status "$postgres_status" \
@@ -452,6 +493,7 @@ jq -n \
     version: $version,
     generated_at: $generated_at,
     shared_manifest: $manifest,
+    queue_driver: $queue_driver,
     ready_for_deploy: $ready_for_deploy,
     checks: {
       aws_auth: {

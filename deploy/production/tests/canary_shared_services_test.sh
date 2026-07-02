@@ -266,6 +266,246 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_accepts_postgres_queue_without_kafka() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 1
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "pg_isready -h postgres.alpha.internal -p 5432" "postgres queue canary still checks postgres"
+  assert_contains "$(cat "$log_file")" "curl --max-time 10 -fsS -X POST https://ipfs.alpha.internal/api/v0/version" "postgres queue canary still checks ipfs"
+  assert_not_contains "$(cat "$log_file")" "nc -z " "postgres queue canary skips kafka socket checks"
+  assert_eq "$(jq -r '.queue_driver' "$output_json")" "postgres" "shared canary reports queue driver"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "skipped" "postgres queue canary skips kafka status"
+  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "postgres" "postgres queue canary explains kafka skip"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue canary ready flag"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal",
+      "api_auth_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-ipfs-token"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"secretsmanager get-secret-value"*"alpha-ipfs-token"*)
+    printf 'ipfs-secret-token\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "aws --profile juno --region us-east-1 sts get-caller-identity" "postgres queue canary verifies aws auth before resolving ipfs token"
+  assert_contains "$(cat "$log_file")" "secretsmanager get-secret-value --secret-id arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-ipfs-token" "postgres queue canary resolves ipfs auth secret"
+  assert_contains "$(cat "$log_file")" "curl --max-time 10 -fsS -H Authorization: Bearer ipfs-secret-token -X POST https://ipfs.alpha.internal/api/v0/version" "postgres queue canary sends ipfs auth header"
+  assert_eq "$(jq -r '.checks.aws_auth.status' "$output_json")" "passed" "postgres queue canary aws auth status"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "skipped" "postgres queue canary skips kafka status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue canary ready flag with ipfs auth"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_canary_checks_roles_for_postgres_queue() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "version": "2",
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  },
+  "shared_roles": {
+    "proof": {
+      "asg": "alpha-proof-role"
+    }
+  },
+  "wireguard_role": {
+    "asg": "alpha-wireguard-role",
+    "peer_roster_secret_arns": [
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop"
+    ],
+    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"alpha-proof-role"*)
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"alpha-wireguard-role"*)
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"secretsmanager describe-secret"*"alpha-wireguard-server-key"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"}\n'
+    ;;
+  *"secretsmanager describe-secret"*"alpha-wireguard-peer-ops-laptop"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=1 \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "aws --profile juno --region us-east-1 sts get-caller-identity" "postgres queue canary verifies aws auth before role checks"
+  assert_contains "$(cat "$log_file")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-proof-role" "postgres queue canary checks proof role asg"
+  assert_contains "$(cat "$log_file")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-wireguard-role" "postgres queue canary checks wireguard role asg"
+  assert_eq "$(jq -r '.checks.aws_auth.status' "$output_json")" "passed" "postgres queue canary aws auth status for roles"
+  assert_eq "$(jq -r '.checks.shared_proof_role.status' "$output_json")" "passed" "postgres queue canary proof role status"
+  assert_eq "$(jq -r '.checks.wireguard_role.status' "$output_json")" "passed" "postgres queue canary wireguard role status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue canary ready flag with roles"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -759,6 +999,9 @@ main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
   test_shared_services_canary_requires_preview_iam_kafka_auth
+  test_shared_services_canary_accepts_postgres_queue_without_kafka
+  test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue
+  test_shared_services_canary_checks_roles_for_postgres_queue
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
   test_shared_services_canary_uses_aws_health_for_preview_private_services
   test_shared_services_canary_accepts_single_healthy_preview_ipfs_target
