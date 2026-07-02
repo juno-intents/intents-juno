@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
@@ -60,8 +61,10 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 	fs := flag.NewFlagSet("queue-publish", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+	queuePostgresDSN := fs.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver")
+	queuePostgresDSNEnv := fs.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
 	topic := fs.String("topic", "", "queue topic (required)")
 	payload := fs.String("payload", "", "inline payload body")
 	fs.Var(&payloadFiles, "payload-file", "payload file path (repeatable)")
@@ -82,21 +85,15 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		Secret: queueauth.ResolveSecret("", *queueAuthHMACEnv),
 	})
 
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  *queueDriver,
-		Brokers: queue.SplitCommaList(*queueBrokers),
-		Writer:  stdout,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = producer.Close() }()
-
 	payloads, err := loadPayloads(strings.TrimSpace(*payload), payloadFiles, stdin)
 	if err != nil {
 		return err
 	}
+	if err := validateQueuePublishConfig(*queueDriver, *queueBrokers, *queuePostgresDSN, *queuePostgresDSNEnv, *dryRun); err != nil {
+		return err
+	}
 
+	var producer queue.Producer
 	ctx := context.Background()
 	for _, p := range payloads {
 		if len(bytes.TrimSpace(p)) == 0 {
@@ -124,6 +121,17 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 			writeAuditRecord(stderr, rec)
 			continue
 		}
+		if producer == nil {
+			cfg, err := producerConfigForQueueDriver(*queueDriver, *queueBrokers, *queuePostgresDSN, *queuePostgresDSNEnv, stdout)
+			if err != nil {
+				return err
+			}
+			producer, err = queue.NewProducer(cfg)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = producer.Close() }()
+		}
 		if err := producer.Publish(ctx, *topic, wirePayload); err != nil {
 			rec.Status = "publish_failed"
 			rec.Error = err.Error()
@@ -134,6 +142,51 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		writeAuditRecord(stderr, rec)
 	}
 	return nil
+}
+
+func validateQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv string, dryRun bool) error {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", queue.DriverKafka:
+		if len(queue.SplitCommaList(brokers)) == 0 {
+			return errors.New("--queue-brokers is required when --queue-driver=kafka")
+		}
+	case queue.DriverPostgres:
+		if dryRun {
+			return nil
+		}
+		if _, err := pgxpoolutil.ResolveDSN(postgresDSN, postgresDSNEnv); err != nil {
+			return err
+		}
+	case queue.DriverStdio:
+		return nil
+	default:
+		return fmt.Errorf("unsupported queue driver %q", driver)
+	}
+	return nil
+}
+
+func producerConfigForQueueDriver(driver, brokers, postgresDSN, postgresDSNEnv string, stdout io.Writer) (queue.ProducerConfig, error) {
+	cfg := queue.ProducerConfig{
+		Driver: strings.TrimSpace(driver),
+		Writer: stdout,
+	}
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case queue.DriverKafka, "":
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = queue.SplitCommaList(brokers)
+	case queue.DriverPostgres:
+		resolvedDSN, err := pgxpoolutil.ResolveDSN(postgresDSN, postgresDSNEnv)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = resolvedDSN
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", driver)
+	}
+	return cfg, nil
 }
 
 func loadPayloads(payloadInline string, payloadFiles []string, stdin io.Reader) ([][]byte, error) {

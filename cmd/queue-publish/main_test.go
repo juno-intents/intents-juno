@@ -179,3 +179,93 @@ func TestRunMain_DryRunSkipsPublish(t *testing.T) {
 		t.Fatalf("expected dry_run audit record, got %q", got)
 	}
 }
+
+func TestRunMain_DryRunPostgresDoesNotRequireDSN(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runMain(
+		[]string{
+			"--queue-driver", "postgres",
+			"--topic", "example.topic",
+			"--payload", `{"version":"v1"}`,
+			"--dry-run",
+		},
+		bytes.NewBuffer(nil),
+		&out,
+		&errOut,
+	)
+	if err != nil {
+		t.Fatalf("runMain: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no publish output, got %q", out.String())
+	}
+	if got := errOut.String(); !bytes.Contains([]byte(got), []byte(`"status":"dry_run"`)) {
+		t.Fatalf("expected dry_run audit record, got %q", got)
+	}
+}
+
+func TestRunMain_DryRunRejectsUnsupportedQueueDriver(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runMain(
+		[]string{
+			"--queue-driver", "typo",
+			"--topic", "example.topic",
+			"--payload", `{"version":"v1"}`,
+			"--dry-run",
+		},
+		bytes.NewBuffer(nil),
+		&out,
+		&errOut,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestRunMain_DryRunKafkaRequiresBrokers(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runMain(
+		[]string{
+			"--queue-driver", "kafka",
+			"--topic", "example.topic",
+			"--payload", `{"version":"v1"}`,
+			"--dry-run",
+		},
+		bytes.NewBuffer(nil),
+		&out,
+		&errOut,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProducerConfigForQueueDriverPostgresRequiresDSN(t *testing.T) {
+	t.Parallel()
+
+	_, err := producerConfigForQueueDriver("postgres", "", "", "", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestProducerConfigForQueueDriverPostgresUsesDSNEnv(t *testing.T) {
+	t.Setenv("QUEUE_POSTGRES_DSN", "postgres://user:pass@127.0.0.1:5432/db")
+
+	cfg, err := producerConfigForQueueDriver("postgres", "", "", "QUEUE_POSTGRES_DSN", nil)
+	if err != nil {
+		t.Fatalf("producerConfigForQueueDriver: %v", err)
+	}
+	if cfg.PostgresDSN != "postgres://user:pass@127.0.0.1:5432/db" {
+		t.Fatalf("PostgresDSN = %q", cfg.PostgresDSN)
+	}
+}
