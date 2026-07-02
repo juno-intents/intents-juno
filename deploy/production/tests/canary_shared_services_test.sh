@@ -329,6 +329,101 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_runs_postgres_queue_inspection_when_configured() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/queue-inspect" <<EOF
+#!/usr/bin/env bash
+printf 'queue-inspect %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.requests.v1"*"--groups proof-requestor"*"--format json"*"--max-expired-leases 0"*)
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics deposits.event.v2,checkpoints.packages.v1"*"--groups deposit-relayer"*"--format json"*"--max-expired-leases 0"*)
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics withdrawals.requested.v2"*"--groups withdraw-coordinator"*"--format json"*"--max-expired-leases 0"*)
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics checkpoints.packages.v1"*"--groups withdraw-finalizer"*"--format json"*"--max-expired-leases 0"*)
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1"*"--format json"*"--max-expired-leases 0"*)
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected queue inspect invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/curl" "$fake_bin/queue-inspect"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "queue-inspect --postgres-dsn-env CANARY_QUEUE_DSN" "postgres queue canary runs queue inspection through env indirection"
+  assert_contains "$(cat "$log_file")" "--topics proof.requests.v1 --groups proof-requestor" "postgres queue canary inspects proof request consumer mapping"
+  assert_contains "$(cat "$log_file")" "--topics deposits.event.v2,checkpoints.packages.v1 --groups deposit-relayer" "postgres queue canary inspects deposit relayer mapping"
+  assert_contains "$(cat "$log_file")" "--topics withdrawals.requested.v2 --groups withdraw-coordinator" "postgres queue canary inspects withdraw coordinator mapping"
+  assert_contains "$(cat "$log_file")" "--topics checkpoints.packages.v1 --groups withdraw-finalizer" "postgres queue canary inspects withdraw finalizer mapping"
+  assert_contains "$(cat "$log_file")" "--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1" "postgres queue canary inspects dynamic and publisher-only topics"
+  assert_not_contains "$(cat "$log_file")" "--groups proof-requestor,deposit-relayer,withdraw-finalizer,withdraw-coordinator" "postgres queue canary avoids cross-product topic/group checks"
+  assert_not_contains "$(cat "$log_file")" "postgres://queue.example.invalid" "postgres queue canary keeps dsn out of command arguments"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "postgres queue canary queue status"
+  assert_contains "$(jq -r '.checks.queue.detail' "$output_json")" "queue-inspect passed for 5 targets" "postgres queue canary queue detail"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue inspect keeps canary deployable"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -1000,6 +1095,7 @@ main() {
   test_shared_services_canary_rejects_non_iam_kafka_auth
   test_shared_services_canary_requires_preview_iam_kafka_auth
   test_shared_services_canary_accepts_postgres_queue_without_kafka
+  test_shared_services_canary_runs_postgres_queue_inspection_when_configured
   test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue
   test_shared_services_canary_checks_roles_for_postgres_queue
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present

@@ -16,6 +16,7 @@ Checks:
   - AWS auth for shared-services verification
   - Postgres reachability plus optional Aurora cluster health
   - Kafka auth mode plus broker TCP reachability and optional MSK cluster health
+  - Optional Postgres queue backlog/lease inspection when the Postgres queue driver is selected
   - IPFS API reachability plus optional target-group health
   - Artifact bucket reachability, versioning, and optional object lock
 
@@ -206,6 +207,11 @@ environment="$(production_json_required "$shared_manifest" '.environment | selec
 canary_retry_attempts="${PRODUCTION_CANARY_RETRY_ATTEMPTS:-12}"
 canary_retry_sleep_seconds="${PRODUCTION_CANARY_RETRY_SLEEP_SECONDS:-15}"
 canary_curl_max_time_seconds="${PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS:-10}"
+queue_inspect_bin="${PRODUCTION_CANARY_QUEUE_INSPECT_BIN:-}"
+queue_inspect_dsn_env="${PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
+queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-proof.requests.v1|proof-requestor;deposits.event.v2,checkpoints.packages.v1|deposit-relayer;withdrawals.requested.v2|withdraw-coordinator;checkpoints.packages.v1|withdraw-finalizer;proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|}"
+queue_inspect_max_expired_leases="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES:-0}"
+queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-}"
 ipfs_min_healthy_targets=1
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
@@ -216,6 +222,14 @@ fi
 [[ "$canary_curl_max_time_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be numeric"
 (( canary_retry_attempts >= 1 )) || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be at least 1"
 (( canary_curl_max_time_seconds >= 1 )) || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be at least 1"
+if [[ -n "$queue_inspect_bin" ]]; then
+  [[ "$queue_inspect_dsn_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV must be an environment variable name"
+  [[ -n "$(trim "$queue_inspect_targets")" ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS must not be empty"
+  [[ "$queue_inspect_max_expired_leases" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES must be numeric"
+  if [[ -n "$queue_inspect_max_backlog" ]]; then
+    [[ "$queue_inspect_max_backlog" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG must be numeric"
+  fi
+fi
 skip_postgres_local_check="false"
 skip_kafka_local_check="false"
 skip_ipfs_local_check="false"
@@ -246,18 +260,23 @@ if [[ -n "$aws_region" ]]; then
 fi
 
 postgres_status="passed"
+queue_status="skipped"
 kafka_status="passed"
 ipfs_status="passed"
 artifacts_status="skipped"
 shared_proof_role_status="skipped"
 wireguard_role_status="skipped"
 postgres_detail="reachable"
+queue_detail="postgres queue inspection not configured"
 kafka_detail="all brokers reachable"
 ipfs_detail="api reachable"
 artifacts_detail="no artifact bucket configured"
 shared_proof_role_detail="legacy ecs path"
 wireguard_role_detail="legacy singleton path"
 ipfs_auth_header=()
+if [[ "$queue_driver" == "kafka" ]]; then
+  queue_detail="kafka queue driver selected"
+fi
 if [[ "$queue_driver" == "postgres" ]]; then
   kafka_status="skipped"
   kafka_detail="postgres queue driver selected; kafka checks skipped"
@@ -267,12 +286,14 @@ if [[ "$dry_run" == "true" ]]; then
   aws_auth_status="skipped"
   aws_auth_detail="dry run"
   postgres_status="skipped"
+  queue_status="skipped"
   kafka_status="skipped"
   ipfs_status="skipped"
   artifacts_status="skipped"
   shared_proof_role_status="skipped"
   wireguard_role_status="skipped"
   postgres_detail="dry run"
+  queue_detail="dry run"
   kafka_detail="dry run"
   ipfs_detail="dry run"
   artifacts_detail="dry run"
@@ -291,6 +312,61 @@ else
   if [[ "$skip_postgres_local_check" != "true" ]] && ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then
     postgres_status="failed"
     postgres_detail="pg_isready failed"
+  fi
+
+  if [[ "$queue_driver" == "postgres" && -n "$queue_inspect_bin" ]]; then
+    if [[ "$postgres_status" != "passed" ]]; then
+      queue_status="failed"
+      queue_detail="queue-inspect skipped because postgres check failed"
+    elif ! [[ -x "$queue_inspect_bin" ]] && ! have_cmd "$queue_inspect_bin"; then
+      die "required command not found: $queue_inspect_bin"
+    elif [[ -z "${!queue_inspect_dsn_env:-}" ]]; then
+      queue_status="failed"
+      queue_detail="postgres queue inspect dsn env is empty: $queue_inspect_dsn_env"
+    else
+      IFS=';' read -r -a queue_inspect_target_array <<<"$queue_inspect_targets"
+      queue_inspect_target_count=0
+      queue_status="passed"
+      for queue_inspect_target in "${queue_inspect_target_array[@]}"; do
+        queue_inspect_target="$(trim "$queue_inspect_target")"
+        [[ -n "$queue_inspect_target" ]] || continue
+        queue_inspect_topics="${queue_inspect_target%%|*}"
+        queue_inspect_groups=""
+        if [[ "$queue_inspect_target" == *"|"* ]]; then
+          queue_inspect_groups="${queue_inspect_target#*|}"
+        fi
+        queue_inspect_topics="$(trim "$queue_inspect_topics")"
+        queue_inspect_groups="$(trim "$queue_inspect_groups")"
+        if [[ -z "$queue_inspect_topics" ]]; then
+          queue_status="failed"
+          queue_detail="queue-inspect target is missing topics"
+          break
+        fi
+        queue_inspect_args=(
+          --postgres-dsn-env "$queue_inspect_dsn_env"
+          --topics "$queue_inspect_topics"
+        )
+        if [[ -n "$queue_inspect_groups" ]]; then
+          queue_inspect_args+=(--groups "$queue_inspect_groups")
+        fi
+        queue_inspect_args+=(
+          --format json
+          --max-expired-leases "$queue_inspect_max_expired_leases"
+        )
+        if [[ -n "$queue_inspect_max_backlog" ]]; then
+          queue_inspect_args+=(--max-backlog "$queue_inspect_max_backlog")
+        fi
+        if ! "$queue_inspect_bin" "${queue_inspect_args[@]}" >/dev/null 2>&1; then
+          queue_status="failed"
+          queue_detail="queue-inspect failed topics=${queue_inspect_topics} groups=${queue_inspect_groups:-actual}"
+          break
+        fi
+        queue_inspect_target_count=$((queue_inspect_target_count + 1))
+      done
+      if [[ "$queue_status" == "passed" ]]; then
+        queue_detail="queue-inspect passed for ${queue_inspect_target_count} targets"
+      fi
+    fi
   fi
 
   if [[ "$queue_driver" == "kafka" && "$skip_kafka_local_check" != "true" ]]; then
@@ -460,7 +536,7 @@ else
 fi
 
 ready_for_deploy="true"
-for status in "$aws_auth_status" "$postgres_status" "$kafka_status" "$ipfs_status" "$artifacts_status" "$shared_proof_role_status" "$wireguard_role_status"; do
+for status in "$aws_auth_status" "$postgres_status" "$queue_status" "$kafka_status" "$ipfs_status" "$artifacts_status" "$shared_proof_role_status" "$wireguard_role_status"; do
   if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
     ready_for_deploy="false"
   fi
@@ -478,6 +554,8 @@ jq -n \
   --arg aws_auth_detail "$aws_auth_detail" \
   --arg postgres_status "$postgres_status" \
   --arg postgres_detail "$postgres_detail" \
+  --arg queue_status "$queue_status" \
+  --arg queue_detail "$queue_detail" \
   --arg kafka_status "$kafka_status" \
   --arg kafka_detail "$kafka_detail" \
   --arg ipfs_status "$ipfs_status" \
@@ -503,6 +581,10 @@ jq -n \
       postgres: {
         status: $postgres_status,
         detail: $postgres_detail
+      },
+      queue: {
+        status: $queue_status,
+        detail: $queue_detail
       },
       kafka: {
         status: $kafka_status,
