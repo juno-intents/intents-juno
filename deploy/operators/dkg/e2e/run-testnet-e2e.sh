@@ -116,6 +116,8 @@ Options:
                                    optional deposit-relayer/withdraw-finalizer proof request shadow queue driver during Phase 5 (postgres)
   --proof-queue-driver <driver>    optional deposit-relayer/withdraw-finalizer proof request/result primary queue driver during Phase 5 cutover (postgres)
   --operator-queue-driver <driver> optional deposit/withdraw/base-event main queue driver during Phase 5 cutover (postgres)
+  --checkpoint-queue-driver <driver>
+                                   optional checkpoint signer/aggregator queue driver during Phase 5 cutover (kafka|postgres)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
@@ -370,12 +372,23 @@ replay_latest_checkpoint_package_to_topic() {
   local checkpoint_replay_kafka_brokers="$3"
   local checkpoint_package_topic="$4"
   local checkpoint_replay_context="${5:-runtime}"
+  local checkpoint_replay_queue_driver="${6:-kafka}"
   local checkpoint_replay_status query_base64
 
+  checkpoint_replay_queue_driver="$(lower "$checkpoint_replay_queue_driver")"
   [[ -n "$checkpoint_replay_payload_file" ]] || die "checkpoint replay requires payload file path"
   [[ -n "$checkpoint_replay_postgres_dsn" ]] || die "checkpoint replay requires postgres dsn"
-  [[ -n "$checkpoint_replay_kafka_brokers" ]] || die "checkpoint replay requires kafka brokers"
   [[ -n "$checkpoint_package_topic" ]] || die "checkpoint replay requires topic"
+  case "$checkpoint_replay_queue_driver" in
+    kafka)
+      [[ -n "$checkpoint_replay_kafka_brokers" ]] || die "checkpoint replay requires kafka brokers when CHECKPOINT_QUEUE_DRIVER=kafka"
+      ;;
+    postgres)
+      ;;
+    *)
+      die "checkpoint replay supports queue driver kafka or postgres, got $checkpoint_replay_queue_driver"
+      ;;
+  esac
 
   query_base64="$(printf '%s' "
 SELECT convert_from(package_json, 'UTF8')
@@ -414,18 +427,28 @@ LIMIT 1;
 
   if [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]]; then
     set +e
-    run_remote_queue_publish_payload "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"
+    run_remote_queue_publish_payload "$checkpoint_replay_queue_driver" "$checkpoint_replay_postgres_dsn" "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"
     checkpoint_replay_status=$?
     set -e
   else
     set +e
     (
       cd "$REPO_ROOT"
-      JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
-        --queue-driver kafka \
-        --queue-brokers "$checkpoint_replay_kafka_brokers" \
-        "--topic" "$checkpoint_package_topic" \
+      queue_publish_args=(
+        --queue-driver "$checkpoint_replay_queue_driver"
+        "--topic" "$checkpoint_package_topic"
         "--payload-file" "$checkpoint_replay_payload_file"
+      )
+      case "$checkpoint_replay_queue_driver" in
+        kafka)
+          queue_publish_args+=(--queue-brokers "$checkpoint_replay_kafka_brokers")
+          JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish "${queue_publish_args[@]}"
+          ;;
+        postgres)
+          queue_publish_args+=(--queue-postgres-dsn "$checkpoint_replay_postgres_dsn")
+          go run ./cmd/queue-publish "${queue_publish_args[@]}"
+          ;;
+      esac
     )
     checkpoint_replay_status=$?
     set -e
@@ -2759,12 +2782,27 @@ run_remote_postgres_exec_base64() {
 }
 
 run_remote_queue_publish_payload() {
-  local kafka_brokers="$1"
-  local topic="$2"
-  local payload_file="$3"
-  local remote_payload_path remote_joined
+  local queue_driver="$1"
+  local postgres_dsn="$2"
+  local kafka_brokers="$3"
+  local topic="$4"
+  local payload_file="$5"
+  local remote_payload_path remote_joined remote_command
+  local -a remote_args
 
+  queue_driver="$(lower "$queue_driver")"
   [[ -f "$payload_file" ]] || return 1
+  case "$queue_driver" in
+    kafka)
+      [[ -n "$kafka_brokers" ]] || return 1
+      ;;
+    postgres)
+      [[ -n "$postgres_dsn" ]] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
   ensure_remote_queue_publish_helper_ready || return 1
 
   remote_payload_path="$(dirname "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN")/checkpoint-replay-payload.json"
@@ -2775,7 +2813,20 @@ run_remote_queue_publish_payload() {
     "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
     "$remote_payload_path"
 
-  remote_joined="$(shell_join "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN" --queue-driver kafka --queue-brokers "$kafka_brokers" --topic "$topic" --payload-file "$remote_payload_path")"
+  remote_args=("$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN" --queue-driver "$queue_driver" --topic "$topic" --payload-file "$remote_payload_path")
+  case "$queue_driver" in
+    kafka)
+      remote_args+=(--queue-brokers "$kafka_brokers")
+      ;;
+    postgres)
+      remote_args+=(--queue-postgres-dsn "$postgres_dsn")
+      ;;
+  esac
+  remote_joined="$(shell_join "${remote_args[@]}")"
+  remote_command="bash -lc $(printf '%q' "$remote_joined")"
+  if [[ "$queue_driver" == "kafka" ]]; then
+    remote_command="JUNO_QUEUE_KAFKA_TLS=true $remote_command"
+  fi
   ssh \
     -i "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
     -o StrictHostKeyChecking=no \
@@ -2784,7 +2835,7 @@ run_remote_queue_publish_payload() {
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER@$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
-    "JUNO_QUEUE_KAFKA_TLS=true bash -lc $(printf '%q' "$remote_joined")" >/dev/null
+    "$remote_command" >/dev/null
 }
 
 postgres_query_scalar_lines() {
@@ -2909,7 +2960,9 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   local shared_postgres_dsn="$9"
   local shared_kafka_brokers="${10}"
   local operator_checkpoint_ipfs_api_url="${11}"
+  local checkpoint_queue_driver="${12:-kafka}"
 
+  checkpoint_queue_driver="$(lower "$checkpoint_queue_driver")"
   operator_address="$(normalize_hex_prefixed "$operator_address" || true)"
   [[ "$operator_address" =~ ^0x[0-9a-f]{40}$ ]] || \
     die "checkpoint bridge config update requires valid operator address for host=$host"
@@ -2924,8 +2977,17 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   fi
   [[ -n "$aws_region" ]] || die "checkpoint bridge config update requires resolvable aws region for host=$host"
   [[ -n "$shared_postgres_dsn" ]] || die "checkpoint bridge config update requires shared postgres dsn for host=$host"
-  [[ -n "$shared_kafka_brokers" ]] || die "checkpoint bridge config update requires shared kafka brokers for host=$host"
   [[ -n "$operator_checkpoint_ipfs_api_url" ]] || die "checkpoint bridge config update requires operator checkpoint ipfs api url for host=$host"
+  case "$checkpoint_queue_driver" in
+    kafka)
+      [[ -n "$shared_kafka_brokers" ]] || die "checkpoint bridge config update requires shared kafka brokers when CHECKPOINT_QUEUE_DRIVER=kafka for host=$host"
+      ;;
+    postgres)
+      ;;
+    *)
+      die "checkpoint bridge config update supports CHECKPOINT_QUEUE_DRIVER kafka or postgres for host=$host"
+      ;;
+  esac
 
   local remote_script
   remote_script="$(cat <<'EOF'
@@ -2938,6 +3000,7 @@ aws_region="$5"
 shared_postgres_dsn="$6"
 shared_kafka_brokers="$7"
 operator_checkpoint_ipfs_api_url="$8"
+checkpoint_queue_driver="$9"
 
 [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
   echo "operator address must be 20-byte hex: $operator_address" >&2
@@ -2949,7 +3012,23 @@ operator_checkpoint_ipfs_api_url="$8"
 }
 operator_address="${operator_address,,}"
 operator_signer_key_hex="${operator_signer_key_hex,,}"
+checkpoint_queue_driver="${checkpoint_queue_driver,,}"
 checkpoint_signer_lease_name="checkpoint-signer-${operator_address#0x}"
+
+case "$checkpoint_queue_driver" in
+  kafka)
+    [[ -n "$shared_kafka_brokers" ]] || {
+      echo "checkpoint queue driver kafka requires shared kafka brokers" >&2
+      exit 1
+    }
+    ;;
+  postgres)
+    ;;
+  *)
+    echo "checkpoint queue driver must be kafka or postgres: $checkpoint_queue_driver" >&2
+    exit 1
+    ;;
+esac
 
 stack_env_file="/etc/intents-juno/operator-stack.env"
 hydrator_env_file="/etc/intents-juno/operator-stack-hydrator.env"
@@ -3096,11 +3175,13 @@ if sudo test -s "$config_json_path"; then
     --arg shared_postgres_dsn "$shared_postgres_dsn" \
     --arg shared_kafka_brokers "$shared_kafka_brokers" \
     --arg operator_checkpoint_ipfs_api_url "$operator_checkpoint_ipfs_api_url" \
+    --arg checkpoint_queue_driver "$checkpoint_queue_driver" \
     '
     .BRIDGE_ADDRESS = $bridge
     | .BASE_CHAIN_ID = $chain
     | .CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn
     | .CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers
+    | .CHECKPOINT_QUEUE_DRIVER = $checkpoint_queue_driver
     | .CHECKPOINT_IPFS_API_URL = $operator_checkpoint_ipfs_api_url
     | .JUNO_QUEUE_KAFKA_TLS = (
         if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
@@ -3128,6 +3209,7 @@ set_env_value "$tmp_env" AWS_REGION "$aws_region"
 set_env_value "$tmp_env" AWS_DEFAULT_REGION "$aws_region"
 set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$shared_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$shared_kafka_brokers"
+set_env_value "$tmp_env" CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$operator_checkpoint_ipfs_api_url"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "true"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
@@ -3212,7 +3294,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region") $(printf '%q' "$shared_postgres_dsn") $(printf '%q' "$shared_kafka_brokers") $(printf '%q' "$operator_checkpoint_ipfs_api_url")" <<<"$remote_script"
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region") $(printf '%q' "$shared_postgres_dsn") $(printf '%q' "$shared_kafka_brokers") $(printf '%q' "$operator_checkpoint_ipfs_api_url") $(printf '%q' "$checkpoint_queue_driver")" <<<"$remote_script"
 }
 
 endpoint_host_port() {
@@ -3436,6 +3518,7 @@ command_run() {
   local shared_output=""
   local base_event_shadow_queue_driver=""
   local operator_queue_driver=""
+  local checkpoint_queue_driver=""
   local proof_shadow_queue_driver=""
   local proof_queue_driver=""
   local relayer_runtime_mode="distributed"
@@ -3859,6 +3942,11 @@ command_run() {
         operator_queue_driver="$2"
         shift 2
         ;;
+      --checkpoint-queue-driver)
+        [[ $# -ge 2 ]] || die "missing value for --checkpoint-queue-driver"
+        checkpoint_queue_driver="$2"
+        shift 2
+        ;;
       --relayer-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
         relayer_runtime_mode="$(lower "$2")"
@@ -4108,18 +4196,33 @@ command_run() {
   [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (runner-side shared-infra checkpoint package pin/fetch verification)"
   if [[ -n "$base_event_shadow_queue_driver" ]]; then
+    base_event_shadow_queue_driver="$(lower "$base_event_shadow_queue_driver")"
     [[ "$base_event_shadow_queue_driver" == "postgres" ]] || die "--base-event-shadow-queue-driver supports only postgres during Phase 5 shadowing"
   fi
   if [[ -n "$operator_queue_driver" ]]; then
+    operator_queue_driver="$(lower "$operator_queue_driver")"
     [[ "$operator_queue_driver" == "postgres" ]] || die "--operator-queue-driver supports only postgres during Phase 5 cutover"
   fi
+  if [[ -n "$checkpoint_queue_driver" ]]; then
+    checkpoint_queue_driver="$(lower "$checkpoint_queue_driver")"
+    case "$checkpoint_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "--checkpoint-queue-driver supports kafka or postgres during Phase 5 cutover"
+        ;;
+    esac
+  fi
   if [[ -n "$proof_shadow_queue_driver" ]]; then
+    proof_shadow_queue_driver="$(lower "$proof_shadow_queue_driver")"
     [[ "$proof_shadow_queue_driver" == "postgres" ]] || die "--proof-shadow-queue-driver supports only postgres during Phase 5 shadowing"
   fi
   if [[ -n "$proof_queue_driver" ]]; then
+    proof_queue_driver="$(lower "$proof_queue_driver")"
     [[ "$proof_queue_driver" == "postgres" ]] || die "--proof-queue-driver supports only postgres during Phase 5 cutover"
     [[ -z "$proof_shadow_queue_driver" ]] || die "--proof-shadow-queue-driver must be empty when --proof-queue-driver postgres is enabled"
   fi
+  local effective_checkpoint_queue_driver="${checkpoint_queue_driver:-kafka}"
   local -a proof_queue_args=()
   local -a proof_service_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
   if [[ "$proof_queue_driver" == "postgres" ]]; then
@@ -4130,7 +4233,11 @@ command_run() {
   if [[ "$operator_queue_driver" == "postgres" ]]; then
     operator_queue_args=(--queue-driver postgres)
   fi
-  if [[ "$operator_queue_driver" == "postgres" && -z "$proof_queue_driver" ]]; then
+  local -a checkpoint_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")
+  if [[ "$effective_checkpoint_queue_driver" == "postgres" ]]; then
+    checkpoint_queue_args=(--queue-driver postgres)
+  fi
+  if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then
     proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")
   fi
   local -a proof_shadow_queue_args=()
@@ -6147,7 +6254,8 @@ command_run() {
           "$checkpoint_runtime_aws_region" \
           "$shared_postgres_dsn" \
           "$shared_kafka_brokers" \
-          "$operator_checkpoint_ipfs_api_url" || \
+          "$operator_checkpoint_ipfs_api_url" \
+          "$effective_checkpoint_queue_driver" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
@@ -6823,7 +6931,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          "${operator_queue_args[@]}" \
+          "${checkpoint_queue_args[@]}" \
           --queue-group "$deposit_relayer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --scan-enabled \
@@ -6930,7 +7038,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          "${operator_queue_args[@]}" \
+          "${checkpoint_queue_args[@]}" \
           --queue-group "$withdraw_finalizer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
@@ -6964,7 +7072,7 @@ command_run() {
             "${proof_queue_args[@]}" \
             "${proof_shadow_queue_args[@]}" \
             --submit-timeout "$relayer_submit_timeout" \
-            "${operator_queue_args[@]}" \
+            "${checkpoint_queue_args[@]}" \
             --queue-group "$deposit_relayer_group" \
             --queue-topics "$checkpoint_package_topic" \
             --health-port "$deposit_relayer_health_port" \
@@ -7045,7 +7153,7 @@ command_run() {
           "${proof_queue_args[@]}" \
           "${proof_shadow_queue_args[@]}" \
           --submit-timeout "$relayer_submit_timeout" \
-          "${operator_queue_args[@]}" \
+          "${checkpoint_queue_args[@]}" \
           --queue-group "$withdraw_finalizer_group" \
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
@@ -7316,7 +7424,8 @@ command_run() {
           "$shared_postgres_dsn" \
           "$shared_kafka_brokers" \
           "$checkpoint_package_topic" \
-          "relayer-startup-seed"; then
+          "relayer-startup-seed" \
+          "$effective_checkpoint_queue_driver"; then
           log "failed to replay latest checkpoint package onto relayer checkpoint topic after startup"
           relayer_status=1
         fi

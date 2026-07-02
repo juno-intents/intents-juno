@@ -126,10 +126,10 @@ test_distributed_runtime_replays_checkpoint_seed_from_operator_host() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" "run_remote_queue_publish_payload() {" "run-testnet-e2e defines remote kafka publish helper"
-  assert_contains "$script_text" 'if [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]]; then' "checkpoint replay can switch to operator-host kafka publish in distributed mode"
-  assert_contains "$script_text" 'run_remote_queue_publish_payload "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"' "checkpoint replay publishes from operator host when runner cannot reach private kafka"
-  assert_contains "$script_text" 'export E2E_REMOTE_QUEUE_PUBLISH_HOST="$shared_validation_host"' "distributed setup exports operator-host kafka helper target"
+  assert_contains "$script_text" "run_remote_queue_publish_payload() {" "run-testnet-e2e defines remote queue publish helper"
+  assert_contains "$script_text" 'if [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]]; then' "checkpoint replay can switch to operator-host queue publish in distributed mode"
+  assert_contains "$script_text" 'run_remote_queue_publish_payload "$checkpoint_replay_queue_driver" "$checkpoint_replay_postgres_dsn" "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"' "checkpoint replay publishes from operator host using the selected queue driver"
+  assert_contains "$script_text" 'export E2E_REMOTE_QUEUE_PUBLISH_HOST="$shared_validation_host"' "distributed setup exports operator-host queue helper target"
 }
 
 test_bridge_config_contract_reads_retry_on_malformed_rpc_responses() {
@@ -734,7 +734,7 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'resolve_aws_region "$aws_region"' "checkpoint bridge config updater resolves aws region via explicit/env/imds fallback"
   assert_contains "$script_text" 'die "checkpoint bridge config update requires resolvable aws region for host=$host"' "checkpoint bridge config updater fails fast when aws region cannot be resolved"
   assert_contains "$script_text" 'die "checkpoint bridge config update requires shared postgres dsn for host=$host"' "checkpoint bridge config updater fails fast when shared postgres dsn is missing"
-  assert_contains "$script_text" 'die "checkpoint bridge config update requires shared kafka brokers for host=$host"' "checkpoint bridge config updater fails fast when shared kafka brokers are missing"
+  assert_contains "$script_text" 'die "checkpoint bridge config update requires shared kafka brokers when CHECKPOINT_QUEUE_DRIVER=kafka for host=$host"' "checkpoint bridge config updater fails fast when kafka checkpoint mode lacks shared kafka brokers"
   assert_contains "$script_text" 'die "checkpoint bridge config update requires operator checkpoint ipfs api url for host=$host"' "checkpoint bridge config updater fails fast when operator checkpoint ipfs api url is missing"
   assert_contains "$script_text" '.CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn' "checkpoint bridge config updater rewrites checkpoint postgres dsn in operator stack config json"
   assert_contains "$script_text" '.CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers' "checkpoint bridge config updater rewrites checkpoint kafka brokers in operator stack config json"
@@ -778,7 +778,7 @@ test_relayer_runtime_seeds_checkpoint_after_startup() {
   assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_resume_min_persisted_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee -a "$relayer_checkpoint_seed_log"' "relayer runtime checkpoint seed retries with extended persisted-at window during resume runs"
   assert_contains "$script_text" "replaying latest checkpoint package onto relayer checkpoint topic after startup" "relayer runtime logs checkpoint replay step after relayer startup"
   assert_contains "$script_text" "SELECT convert_from(package_json, 'UTF8')" "relayer runtime reloads latest persisted checkpoint package payload from postgres"
-  assert_contains "$script_text" 'go run ./cmd/queue-publish \' "relayer runtime replays checkpoint payload through queue-publish"
+  assert_contains "$script_text" 'go run ./cmd/queue-publish "${queue_publish_args[@]}"' "relayer runtime replays checkpoint payload through queue-publish"
   assert_contains "$script_text" '"--topic" "$checkpoint_package_topic"' "relayer runtime publishes replayed checkpoint payload onto active checkpoint package topic"
   assert_contains "$script_text" 'replay_latest_checkpoint_package_to_topic \' "relayer runtime funnels checkpoint replay through reusable helper"
   assert_contains "$script_text" '"$relayer_checkpoint_replay_payload_file" \' "relayer runtime replay helper receives relayer startup payload file path"
@@ -1029,11 +1029,42 @@ test_operator_main_event_queues_can_cut_over_to_postgres_queue() {
   assert_contains "$script_text" '[[ "$operator_queue_driver" == "postgres" ]] || die "--operator-queue-driver supports only postgres during Phase 5 cutover"' "run-testnet-e2e rejects unsupported operator queue drivers"
   assert_contains "$script_text" 'local -a operator_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "operator main event queues default to kafka queue args"
   assert_contains "$script_text" 'operator_queue_args=(--queue-driver postgres)' "operator main event queues can cut over to postgres queue"
-  assert_contains "$script_text" 'if [[ "$operator_queue_driver" == "postgres" && -z "$proof_queue_driver" ]]; then' "operator queue cutover keeps proof queue transport explicit when proof stays on kafka"
+  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "postgres queue cutovers keep proof queue transport explicit when proof stays on kafka"
   assert_contains "$script_text" 'proof_queue_args+=(--proof-queue-driver kafka --proof-queue-brokers "$shared_kafka_brokers")' "operator queue cutover passes explicit kafka proof queue args"
   operator_queue_arg_refs="$(grep -F -c '"${operator_queue_args[@]}"' <<<"$script_text" | tr -d ' ')"
-  if (( operator_queue_arg_refs != 7 )); then
-    printf 'assert_count failed: operator queue args must be passed to distributed and runner relayers plus base-event-scanner (references=%s)\n' "$operator_queue_arg_refs" >&2
+  if (( operator_queue_arg_refs != 3 )); then
+    printf 'assert_count failed: operator queue args must be passed to distributed/runner withdraw-coordinator and base-event-scanner only (references=%s)\n' "$operator_queue_arg_refs" >&2
+    exit 1
+  fi
+}
+
+test_operator_checkpoint_queues_can_cut_over_to_postgres_queue() {
+  local script_text
+  local checkpoint_queue_arg_refs
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--checkpoint-queue-driver <driver>' "run-testnet-e2e exposes checkpoint signer/aggregator queue driver flag"
+  assert_contains "$script_text" 'local checkpoint_queue_driver=""' "run-testnet-e2e tracks checkpoint queue driver independently"
+  assert_contains "$script_text" '--checkpoint-queue-driver)' "run-testnet-e2e parses checkpoint queue driver"
+  assert_contains "$script_text" '--checkpoint-queue-driver supports kafka or postgres during Phase 5 cutover' "run-testnet-e2e rejects unsupported checkpoint queue drivers"
+  assert_contains "$script_text" 'local effective_checkpoint_queue_driver="${checkpoint_queue_driver:-kafka}"' "checkpoint queue driver defaults to kafka unless explicitly cut over"
+  assert_contains "$script_text" 'local -a checkpoint_queue_args=(--queue-driver kafka --queue-brokers "$shared_kafka_brokers")' "checkpoint package queues default to kafka queue args"
+  assert_contains "$script_text" 'checkpoint_queue_args=(--queue-driver postgres)' "checkpoint package queues can cut over to postgres queue"
+  assert_contains "$script_text" 'if [[ -z "$proof_queue_driver" && ( "$operator_queue_driver" == "postgres" || "$effective_checkpoint_queue_driver" == "postgres" ) ]]; then' "checkpoint queue cutover shares the explicit proof queue fallback"
+  assert_contains "$script_text" 'configure_remote_operator_checkpoint_services_for_bridge \' "checkpoint bridge updater is called through the reusable function"
+  assert_contains "$script_text" '"$effective_checkpoint_queue_driver" || \' "checkpoint bridge updater receives the effective queue driver"
+  assert_contains "$script_text" 'local checkpoint_queue_driver="${12:-kafka}"' "checkpoint bridge updater accepts checkpoint queue driver as explicit input"
+  assert_contains "$script_text" 'set_env_value "$tmp_env" CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver"' "checkpoint bridge updater persists checkpoint queue driver in operator stack env"
+  assert_contains "$script_text" '.CHECKPOINT_QUEUE_DRIVER = $checkpoint_queue_driver' "checkpoint bridge updater persists checkpoint queue driver in operator stack config json"
+  assert_contains "$script_text" 'replay_latest_checkpoint_package_to_topic \' "relayer runtime funnels checkpoint replay through reusable helper"
+  assert_contains "$script_text" '"relayer-startup-seed" \' "checkpoint replay call includes explicit replay context"
+  assert_contains "$script_text" '"$effective_checkpoint_queue_driver"; then' "checkpoint replay call receives the effective queue driver"
+  assert_contains "$script_text" 'local checkpoint_replay_queue_driver="${6:-kafka}"' "checkpoint replay accepts queue driver as explicit input"
+  assert_contains "$script_text" 'queue_publish_args+=(--queue-postgres-dsn "$checkpoint_replay_postgres_dsn")' "checkpoint replay can publish checkpoint packages to postgres queue"
+  assert_contains "$script_text" 'run_remote_queue_publish_payload "$checkpoint_replay_queue_driver" "$checkpoint_replay_postgres_dsn" "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"' "remote checkpoint replay can publish through selected queue driver"
+  checkpoint_queue_arg_refs="$(grep -F -c '"${checkpoint_queue_args[@]}"' <<<"$script_text" | tr -d ' ')"
+  if (( checkpoint_queue_arg_refs != 4 )); then
+    printf 'assert_count failed: checkpoint queue args must be passed to distributed and runner checkpoint-consuming relayers (references=%s)\n' "$checkpoint_queue_arg_refs" >&2
     exit 1
   fi
 }
@@ -1250,6 +1281,7 @@ main() {
   test_shared_postgres_runner_readiness_wait_precedes_shared_validation
   test_distributed_shared_validation_runs_from_operator_host
   test_distributed_runtime_routes_private_postgres_ops_through_operator_host
+  test_distributed_runtime_replays_checkpoint_seed_from_operator_host
   test_bridge_config_contract_reads_retry_on_malformed_rpc_responses
   test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
@@ -1314,6 +1346,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_proof_request_relayers_can_shadow_to_postgres_queue
   test_proof_request_relayers_can_cut_over_to_postgres_queue
   test_operator_main_event_queues_can_cut_over_to_postgres_queue
+  test_operator_checkpoint_queues_can_cut_over_to_postgres_queue
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
