@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,7 @@ type recordingProducer struct {
 	name       string
 	calls      *[]string
 	publishErr error
+	after      func()
 	closeErr   error
 	closed     bool
 }
@@ -46,12 +48,125 @@ func (p *recordingProducer) Publish(_ context.Context, topic string, payload []b
 	if p.calls != nil {
 		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
 	}
+	if p.after != nil {
+		p.after()
+	}
 	return p.publishErr
 }
 
 func (p *recordingProducer) Close() error {
 	p.closed = true
 	return p.closeErr
+}
+
+type blockingProducer struct {
+	closed bool
+}
+
+func (p *blockingProducer) Publish(ctx context.Context, _ string, _ []byte) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *blockingProducer) Close() error {
+	p.closed = true
+	return nil
+}
+
+type contextAwareTimeoutProducer struct {
+	mu     sync.Mutex
+	calls  int
+	closed bool
+}
+
+func (p *contextAwareTimeoutProducer) Publish(ctx context.Context, _ string, _ []byte) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (p *contextAwareTimeoutProducer) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	return nil
+}
+
+func (p *contextAwareTimeoutProducer) Calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *contextAwareTimeoutProducer) Closed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+type contextIgnoringProducer struct {
+	mu        sync.Mutex
+	calls     int
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+type delayedContextIgnoringProducer struct {
+	mu     sync.Mutex
+	name   string
+	calls  *[]string
+	delay  time.Duration
+	closed bool
+}
+
+func (p *delayedContextIgnoringProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	time.Sleep(p.delay)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return nil
+}
+
+func (p *delayedContextIgnoringProducer) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	return nil
+}
+
+func (p *delayedContextIgnoringProducer) Closed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+func newContextIgnoringProducer() *contextIgnoringProducer {
+	return &contextIgnoringProducer{closed: make(chan struct{})}
+}
+
+func (p *contextIgnoringProducer) Publish(_ context.Context, _ string, _ []byte) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	<-p.closed
+	return errors.New("shadow closed")
+}
+
+func (p *contextIgnoringProducer) Close() error {
+	p.closeOnce.Do(func() {
+		close(p.closed)
+	})
+	return nil
+}
+
+func (p *contextIgnoringProducer) Calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
 }
 
 func TestNewConsumerValidation(t *testing.T) {
@@ -147,9 +262,14 @@ func TestMirrorProducerPublishesPrimaryThenOptionalShadow(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
+	var shadowFailures []string
 	primary := &recordingProducer{name: "primary", calls: &calls}
 	shadow := &recordingProducer{name: "shadow", calls: &calls, publishErr: errors.New("shadow down")}
-	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{})
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{
+		ShadowErrorHandler: func(topic string, err error) {
+			shadowFailures = append(shadowFailures, topic+":"+err.Error())
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewMirrorProducer: %v", err)
 	}
@@ -159,6 +279,9 @@ func TestMirrorProducerPublishesPrimaryThenOptionalShadow(t *testing.T) {
 	}
 	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
 		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(shadowFailures, ","), "proof.requests.v1:shadow down"; got != want {
+		t.Fatalf("shadowFailures = %q, want %q", got, want)
 	}
 }
 
@@ -200,6 +323,162 @@ func TestMirrorProducerRequiredShadowFailureFailsPublish(t *testing.T) {
 		t.Fatalf("Publish error = %v, want shadow error", err)
 	}
 	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestMirrorProducerOptionalShadowUsesTimeout(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	var shadowFailures []string
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := &blockingProducer{}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{
+		ShadowTimeout: 10 * time.Millisecond,
+		ShadowErrorHandler: func(topic string, err error) {
+			shadowFailures = append(shadowFailures, topic+":"+err.Error())
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := producer.Publish(ctx, "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("Publish took %s, want optional shadow timeout to bound publish latency", elapsed)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if len(shadowFailures) != 1 {
+		t.Fatalf("shadowFailures count = %d, want 1", len(shadowFailures))
+	}
+	if !strings.Contains(shadowFailures[0], "proof.requests.v1:context deadline exceeded") {
+		t.Fatalf("shadowFailures[0] = %q, want timeout failure", shadowFailures[0])
+	}
+}
+
+func TestMirrorProducerOptionalShadowContextAwareTimeoutClosesProducer(t *testing.T) {
+	var calls []string
+	var shadowFailures []string
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := &contextAwareTimeoutProducer{}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{
+		ShadowTimeout: 10 * time.Millisecond,
+		ShadowErrorHandler: func(topic string, err error) {
+			shadowFailures = append(shadowFailures, topic+":"+err.Error())
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !shadow.Closed() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !shadow.Closed() {
+		t.Fatal("shadow producer was not closed after context-aware optional publish timeout")
+	}
+	if len(shadowFailures) != 1 {
+		t.Fatalf("shadowFailures count = %d, want 1", len(shadowFailures))
+	}
+	if !strings.Contains(shadowFailures[0], "proof.requests.v1:context deadline exceeded") {
+		t.Fatalf("shadowFailures[0] = %q, want timeout failure", shadowFailures[0])
+	}
+
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("second")); err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	if got, want := shadow.Calls(), 1; got != want {
+		t.Fatalf("shadow calls = %d, want %d after shadow disabled", got, want)
+	}
+}
+
+func TestMirrorProducerOptionalShadowHardTimeoutClosesContextIgnoringProducer(t *testing.T) {
+	var calls []string
+	var shadowFailures []string
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := newContextIgnoringProducer()
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{
+		ShadowTimeout: 10 * time.Millisecond,
+		ShadowErrorHandler: func(topic string, err error) {
+			shadowFailures = append(shadowFailures, topic+":"+err.Error())
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := producer.Publish(ctx, "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("Publish took %s, want optional shadow timeout to hard-bound publish latency", elapsed)
+	}
+	select {
+	case <-shadow.closed:
+	case <-time.After(time.Second):
+		t.Fatal("shadow producer was not closed after optional publish timeout")
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if len(shadowFailures) != 1 {
+		t.Fatalf("shadowFailures count = %d, want 1", len(shadowFailures))
+	}
+	if !strings.Contains(shadowFailures[0], "proof.requests.v1:context deadline exceeded") {
+		t.Fatalf("shadowFailures[0] = %q, want timeout failure", shadowFailures[0])
+	}
+
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("second")); err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for shadow.Calls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got, want := shadow.Calls(), 1; got != want {
+		t.Fatalf("shadow calls = %d, want %d after shadow disabled", got, want)
+	}
+}
+
+func TestMirrorProducerOptionalShadowIgnoresCallerCancellationBeforeShadowTimeout(t *testing.T) {
+	var calls []string
+	ctx, cancel := context.WithCancel(context.Background())
+	primary := &recordingProducer{name: "primary", calls: &calls, after: cancel}
+	shadow := &delayedContextIgnoringProducer{name: "shadow", calls: &calls, delay: 10 * time.Millisecond}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{ShadowTimeout: 250 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	if err := producer.Publish(ctx, "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if shadow.Closed() {
+		t.Fatal("shadow producer was closed after caller cancellation despite completing before shadow timeout")
+	}
+
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("second")); err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload,primary:proof.requests.v1:second,shadow:proof.requests.v1:second"; got != want {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }

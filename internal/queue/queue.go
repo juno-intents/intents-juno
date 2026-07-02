@@ -238,11 +238,17 @@ func NewConsumer(ctx context.Context, cfg ConsumerConfig) (Consumer, error) {
 
 // NewProducer creates a queue producer for the configured driver.
 func NewProducer(cfg ProducerConfig) (Producer, error) {
+	return NewProducerContext(context.Background(), cfg)
+}
+
+// NewProducerContext creates a queue producer using ctx for startup work such as
+// Postgres connection and schema initialization.
+func NewProducerContext(ctx context.Context, cfg ProducerConfig) (Producer, error) {
 	switch normalizeDriver(cfg.Driver) {
 	case DriverKafka:
 		return newKafkaProducer(cfg)
 	case DriverPostgres:
-		return newPostgresProducer(cfg)
+		return newPostgresProducer(ctx, cfg)
 	case DriverStdio:
 		return newStdioProducer(cfg), nil
 	default:

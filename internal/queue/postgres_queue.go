@@ -505,19 +505,28 @@ type postgresProducer struct {
 	backend postgresQueueBackend
 }
 
-func newPostgresProducer(cfg ProducerConfig) (Producer, error) {
-	backend, err := newPostgresQueueStore(context.Background(), cfg.PostgresDSN, cfg.PostgresPool)
+func newPostgresProducer(ctx context.Context, cfg ProducerConfig) (Producer, error) {
+	backend, err := newPostgresQueueStore(ctx, cfg.PostgresDSN, cfg.PostgresPool)
 	if err != nil {
 		return nil, err
 	}
-	return newPostgresProducerWithBackend(backend)
+	producer, err := newPostgresProducerWithBackendContext(ctx, backend)
+	if err != nil {
+		_ = backend.close()
+		return nil, err
+	}
+	return producer, nil
 }
 
 func newPostgresProducerWithBackend(backend postgresQueueBackend) (Producer, error) {
+	return newPostgresProducerWithBackendContext(context.Background(), backend)
+}
+
+func newPostgresProducerWithBackendContext(ctx context.Context, backend postgresQueueBackend) (Producer, error) {
 	if backend == nil {
 		return nil, errors.New("postgres producer requires backend")
 	}
-	if err := backend.ensureSchema(context.Background()); err != nil {
+	if err := backend.ensureSchema(ctx); err != nil {
 		return nil, err
 	}
 	return &postgresProducer{backend: backend}, nil

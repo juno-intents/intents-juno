@@ -107,13 +107,23 @@ func main() {
 		proofPriority      = flag.Int("proof-priority", 1, "proof request priority")
 		proofMockSeal      = flag.String("proof-mock-seal", "0x99", "mock proof seal hex used when --proof-driver=mock")
 
-		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
-		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queueGroup    = flag.String("queue-group", "withdraw-finalizer", "queue consumer group (required for kafka)")
-		queueTopics   = flag.String("queue-topics", "checkpoints.packages.v1", "comma-separated queue topics")
-		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
-		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
-		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+		queueDriver                    = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+		queueBrokers                   = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		proofShadowQueueDriver         = flag.String("proof-shadow-queue-driver", "", "optional proof request shadow queue driver: kafka|postgres|stdio")
+		proofShadowQueueBrokers        = flag.String("proof-shadow-queue-brokers", "", "comma-separated proof request shadow queue brokers")
+		proofShadowQueuePostgresDSN    = flag.String("proof-shadow-queue-postgres-dsn", "", "Postgres DSN for proof request postgres shadow queue (defaults to --postgres-dsn)")
+		proofShadowQueuePostgresDSNEnv = flag.String(
+			"proof-shadow-queue-postgres-dsn-env",
+			"",
+			"env var containing Postgres DSN for proof request postgres shadow queue",
+		)
+		proofShadowQueueRequired = flag.Bool("proof-shadow-queue-required", false, "fail proof requests when the shadow queue publish fails")
+		proofShadowQueueTimeout  = flag.Duration("proof-shadow-queue-timeout", 2*time.Second, "timeout for optional proof request shadow queue publishes")
+		queueGroup               = flag.String("queue-group", "withdraw-finalizer", "queue consumer group (required for kafka)")
+		queueTopics              = flag.String("queue-topics", "checkpoints.packages.v1", "comma-separated queue topics")
+		maxLineBytes             = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
+		queueMaxBytes            = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
+		ackTimeout               = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
 		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "blobstore driver: s3|memory")
 		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for durable withdrawal proof artifacts (required for s3)")
@@ -304,20 +314,27 @@ func main() {
 	}
 
 	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
-		driver:             *proofDriver,
-		queueDriver:        *queueDriver,
-		queueBrokers:       queue.SplitCommaList(*queueBrokers),
-		proofRequestTopic:  *proofRequestTopic,
-		proofResultTopic:   *proofResultTopic,
-		proofFailureTopic:  *proofFailureTopic,
-		proofGroup:         *proofResponseGroup,
-		maxLineBytes:       *maxLineBytes,
-		queueMaxBytes:      *queueMaxBytes,
-		ackTimeout:         *ackTimeout,
-		mockSeal:           *proofMockSeal,
-		dlqStore:           proofDLQStore,
-		log:                log,
-		defaultGroupPrefix: "withdraw-finalizer-proof-",
+		driver:               *proofDriver,
+		queueDriver:          *queueDriver,
+		queueBrokers:         queue.SplitCommaList(*queueBrokers),
+		storePostgresDSN:     *postgresDSN,
+		shadowDriver:         *proofShadowQueueDriver,
+		shadowBrokers:        queue.SplitCommaList(*proofShadowQueueBrokers),
+		shadowPostgresDSN:    *proofShadowQueuePostgresDSN,
+		shadowPostgresDSNEnv: *proofShadowQueuePostgresDSNEnv,
+		shadowRequired:       *proofShadowQueueRequired,
+		shadowTimeout:        *proofShadowQueueTimeout,
+		proofRequestTopic:    *proofRequestTopic,
+		proofResultTopic:     *proofResultTopic,
+		proofFailureTopic:    *proofFailureTopic,
+		proofGroup:           *proofResponseGroup,
+		maxLineBytes:         *maxLineBytes,
+		queueMaxBytes:        *queueMaxBytes,
+		ackTimeout:           *ackTimeout,
+		mockSeal:             *proofMockSeal,
+		dlqStore:             proofDLQStore,
+		log:                  log,
+		defaultGroupPrefix:   "withdraw-finalizer-proof-",
 	})
 	if err != nil {
 		log.Error("init proof client", "err", err)
@@ -912,20 +929,27 @@ func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
 }
 
 type initProofClientConfig struct {
-	driver             string
-	queueDriver        string
-	queueBrokers       []string
-	proofRequestTopic  string
-	proofResultTopic   string
-	proofFailureTopic  string
-	proofGroup         string
-	maxLineBytes       int
-	queueMaxBytes      int
-	ackTimeout         time.Duration
-	mockSeal           string
-	dlqStore           dlq.Store
-	log                *slog.Logger
-	defaultGroupPrefix string
+	driver               string
+	queueDriver          string
+	queueBrokers         []string
+	storePostgresDSN     string
+	shadowDriver         string
+	shadowBrokers        []string
+	shadowPostgresDSN    string
+	shadowPostgresDSNEnv string
+	shadowRequired       bool
+	shadowTimeout        time.Duration
+	proofRequestTopic    string
+	proofResultTopic     string
+	proofFailureTopic    string
+	proofGroup           string
+	maxLineBytes         int
+	queueMaxBytes        int
+	ackTimeout           time.Duration
+	mockSeal             string
+	dlqStore             dlq.Store
+	log                  *slog.Logger
+	defaultGroupPrefix   string
 }
 
 func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclient.Client, func(), error) {
@@ -950,10 +974,18 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 			group = cfg.defaultGroupPrefix + hostname
 		}
 
-		producer, err := queue.NewProducer(queue.ProducerConfig{
-			Driver:  cfg.queueDriver,
-			Brokers: cfg.queueBrokers,
-		})
+		producer, err := proofQueueProducer(ctx, proofQueueProducerOptions{
+			Driver:               cfg.queueDriver,
+			Brokers:              cfg.queueBrokers,
+			StorePostgresDSN:     cfg.storePostgresDSN,
+			ShadowDriver:         cfg.shadowDriver,
+			ShadowBrokers:        cfg.shadowBrokers,
+			ShadowPostgresDSN:    cfg.shadowPostgresDSN,
+			ShadowPostgresDSNEnv: cfg.shadowPostgresDSNEnv,
+			ShadowRequired:       cfg.shadowRequired,
+			ShadowTimeout:        cfg.shadowTimeout,
+			Log:                  cfg.log,
+		}, queue.NewProducerContext)
 		if err != nil {
 			return nil, func() {}, err
 		}
@@ -992,6 +1024,173 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 	default:
 		return nil, func() {}, fmt.Errorf("unsupported proof driver %q", cfg.driver)
 	}
+}
+
+type proofQueueProducerFactory func(context.Context, queue.ProducerConfig) (queue.Producer, error)
+
+type proofQueueProducerOptions struct {
+	Driver               string
+	Brokers              []string
+	PostgresDSN          string
+	PostgresDSNEnv       string
+	StorePostgresDSN     string
+	ShadowDriver         string
+	ShadowBrokers        []string
+	ShadowPostgresDSN    string
+	ShadowPostgresDSNEnv string
+	ShadowRequired       bool
+	ShadowTimeout        time.Duration
+	Log                  *slog.Logger
+}
+
+type proofQueueProducerInitResult struct {
+	producer queue.Producer
+	err      error
+}
+
+func proofQueueProducer(ctx context.Context, opts proofQueueProducerOptions, factory proofQueueProducerFactory) (queue.Producer, error) {
+	if factory == nil {
+		factory = queue.NewProducerContext
+	}
+	if strings.TrimSpace(opts.ShadowDriver) != "" && opts.ShadowTimeout <= 0 {
+		return nil, errors.New("--proof-shadow-queue-timeout must be > 0 when --proof-shadow-queue-driver is set")
+	}
+	primaryCfg, err := proofQueueProducerConfig(opts.Driver, opts.Brokers, opts.PostgresDSN, opts.PostgresDSNEnv, opts.StorePostgresDSN)
+	if err != nil {
+		return nil, err
+	}
+	primary, err := factory(ctx, primaryCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(opts.ShadowDriver) == "" {
+		if opts.ShadowRequired {
+			_ = primary.Close()
+			return nil, errors.New("--proof-shadow-queue-required requires --proof-shadow-queue-driver")
+		}
+		return primary, nil
+	}
+	if !proofQueueDriverSupported(opts.ShadowDriver) {
+		err := fmt.Errorf("unsupported proof shadow queue driver %q", opts.ShadowDriver)
+		if !opts.ShadowRequired {
+			opts.warnProofShadowQueue("configure", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, err
+	}
+	shadowCfg, err := proofQueueProducerConfig(opts.ShadowDriver, opts.ShadowBrokers, opts.ShadowPostgresDSN, opts.ShadowPostgresDSNEnv, opts.StorePostgresDSN)
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnProofShadowQueue("configure", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("configure proof shadow queue producer: %w", err)
+	}
+	var shadow queue.Producer
+	if opts.ShadowRequired {
+		shadow, err = factory(ctx, shadowCfg)
+	} else {
+		shadow, err = initOptionalProofShadowProducer(ctx, shadowCfg, opts.ShadowTimeout, factory)
+	}
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnProofShadowQueue("init", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("init proof shadow queue producer: %w", err)
+	}
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{
+		RequireShadow: opts.ShadowRequired,
+		ShadowTimeout: opts.ShadowTimeout,
+		ShadowErrorHandler: func(topic string, err error) {
+			opts.warnProofShadowQueue("publish", topic, err)
+		},
+	})
+	if err != nil {
+		_ = primary.Close()
+		_ = shadow.Close()
+		return nil, err
+	}
+	return producer, nil
+}
+
+func (opts proofQueueProducerOptions) warnProofShadowQueue(stage string, topic string, err error) {
+	if opts.Log == nil || err == nil {
+		return
+	}
+	attrs := []any{"stage", stage, "err", err}
+	if strings.TrimSpace(topic) != "" {
+		attrs = append(attrs, "topic", topic)
+	}
+	opts.Log.Warn("proof shadow queue failed open", attrs...)
+}
+
+func initOptionalProofShadowProducer(ctx context.Context, cfg queue.ProducerConfig, timeout time.Duration, factory proofQueueProducerFactory) (queue.Producer, error) {
+	if timeout <= 0 {
+		return factory(ctx, cfg)
+	}
+	initCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resultCh := make(chan proofQueueProducerInitResult, 1)
+	go func() {
+		producer, err := factory(initCtx, cfg)
+		resultCh <- proofQueueProducerInitResult{producer: producer, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		return result.producer, result.err
+	case <-initCtx.Done():
+		go func() {
+			result := <-resultCh
+			if result.producer != nil {
+				_ = result.producer.Close()
+			}
+		}()
+		return nil, initCtx.Err()
+	}
+}
+
+func proofQueueDriverSupported(driver string) bool {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case queue.DriverKafka, queue.DriverPostgres, queue.DriverStdio:
+		return true
+	default:
+		return false
+	}
+}
+
+func proofQueueProducerConfig(driver string, brokers []string, postgresDSN, postgresDSNEnv, storePostgresDSN string) (queue.ProducerConfig, error) {
+	cfg := queue.ProducerConfig{Driver: strings.TrimSpace(driver)}
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = brokers
+	case queue.DriverPostgres:
+		dsn, err := proofQueuePostgresDSN(postgresDSN, postgresDSNEnv, storePostgresDSN)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", driver)
+	}
+	return cfg, nil
+}
+
+func proofQueuePostgresDSN(postgresDSN, postgresDSNEnv, storePostgresDSN string) (string, error) {
+	if strings.TrimSpace(postgresDSN) != "" || strings.TrimSpace(postgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(postgresDSN, postgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(storePostgresDSN, "")
 }
 
 func decodeHexBytes(s string) ([]byte, error) {
