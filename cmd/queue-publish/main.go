@@ -65,6 +65,11 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 	queuePostgresDSN := fs.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver")
 	queuePostgresDSNEnv := fs.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+	shadowQueueDriver := fs.String("shadow-queue-driver", "", "optional shadow queue driver: kafka|postgres|stdio")
+	shadowQueueBrokers := fs.String("shadow-queue-brokers", "", "comma-separated shadow queue brokers (required for kafka shadow)")
+	shadowQueuePostgresDSN := fs.String("shadow-queue-postgres-dsn", "", "Postgres DSN for postgres shadow queue driver")
+	shadowQueuePostgresDSNEnv := fs.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres shadow queue driver")
+	shadowQueueRequired := fs.Bool("shadow-queue-required", false, "fail publish when the shadow queue publish fails")
 	topic := fs.String("topic", "", "queue topic (required)")
 	payload := fs.String("payload", "", "inline payload body")
 	fs.Var(&payloadFiles, "payload-file", "payload file path (repeatable)")
@@ -90,6 +95,9 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		return err
 	}
 	if err := validateQueuePublishConfig(*queueDriver, *queueBrokers, *queuePostgresDSN, *queuePostgresDSNEnv, *dryRun); err != nil {
+		return err
+	}
+	if err := validateShadowQueuePublishConfig(*shadowQueueDriver, *shadowQueueBrokers, *shadowQueuePostgresDSN, *shadowQueuePostgresDSNEnv, *shadowQueueRequired); err != nil {
 		return err
 	}
 
@@ -122,11 +130,17 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 			continue
 		}
 		if producer == nil {
-			cfg, err := producerConfigForQueueDriver(*queueDriver, *queueBrokers, *queuePostgresDSN, *queuePostgresDSNEnv, stdout)
-			if err != nil {
-				return err
-			}
-			producer, err = queue.NewProducer(cfg)
+			producer, err = queuePublishProducer(queuePublishProducerOptions{
+				Driver:               *queueDriver,
+				Brokers:              *queueBrokers,
+				PostgresDSN:          *queuePostgresDSN,
+				PostgresDSNEnv:       *queuePostgresDSNEnv,
+				ShadowDriver:         *shadowQueueDriver,
+				ShadowBrokers:        *shadowQueueBrokers,
+				ShadowPostgresDSN:    *shadowQueuePostgresDSN,
+				ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
+				ShadowRequired:       *shadowQueueRequired,
+			}, stdout, queue.NewProducer)
 			if err != nil {
 				return err
 			}
@@ -142,6 +156,20 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 		writeAuditRecord(stderr, rec)
 	}
 	return nil
+}
+
+type queueProducerFactory func(queue.ProducerConfig) (queue.Producer, error)
+
+type queuePublishProducerOptions struct {
+	Driver               string
+	Brokers              string
+	PostgresDSN          string
+	PostgresDSNEnv       string
+	ShadowDriver         string
+	ShadowBrokers        string
+	ShadowPostgresDSN    string
+	ShadowPostgresDSNEnv string
+	ShadowRequired       bool
 }
 
 func validateQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv string, dryRun bool) error {
@@ -163,6 +191,70 @@ func validateQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv str
 		return fmt.Errorf("unsupported queue driver %q", driver)
 	}
 	return nil
+}
+
+func validateShadowQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv string, required bool) error {
+	normalizedDriver := strings.ToLower(strings.TrimSpace(driver))
+	if normalizedDriver == "" {
+		if required {
+			return errors.New("--shadow-queue-required requires --shadow-queue-driver")
+		}
+		return nil
+	}
+	switch normalizedDriver {
+	case queue.DriverKafka, queue.DriverPostgres, queue.DriverStdio:
+	default:
+		return fmt.Errorf("unsupported shadow queue driver %q", driver)
+	}
+	if !required {
+		return nil
+	}
+	if err := validateQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv, false); err != nil {
+		return fmt.Errorf("shadow queue: %w", err)
+	}
+	return nil
+}
+
+func queuePublishProducer(opts queuePublishProducerOptions, stdout io.Writer, factory queueProducerFactory) (queue.Producer, error) {
+	if factory == nil {
+		factory = queue.NewProducer
+	}
+	primaryCfg, err := producerConfigForQueueDriver(opts.Driver, opts.Brokers, opts.PostgresDSN, opts.PostgresDSNEnv, stdout)
+	if err != nil {
+		return nil, err
+	}
+	primary, err := factory(primaryCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(opts.ShadowDriver) == "" {
+		return primary, nil
+	}
+
+	shadowCfg, err := producerConfigForQueueDriver(opts.ShadowDriver, opts.ShadowBrokers, opts.ShadowPostgresDSN, opts.ShadowPostgresDSNEnv, stdout)
+	if err != nil {
+		if !opts.ShadowRequired {
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("configure shadow queue producer: %w", err)
+	}
+	shadow, err := factory(shadowCfg)
+	if err != nil {
+		if !opts.ShadowRequired {
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("init shadow queue producer: %w", err)
+	}
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{RequireShadow: opts.ShadowRequired})
+	if err != nil {
+		_ = primary.Close()
+		_ = shadow.Close()
+		return nil, err
+	}
+	return producer, nil
 }
 
 func producerConfigForQueueDriver(driver, brokers, postgresDSN, postgresDSNEnv string, stdout io.Writer) (queue.ProducerConfig, error) {

@@ -34,6 +34,26 @@ func (s *stubKafkaAdminClient) CreateTopics(ctx context.Context, req *kafka.Crea
 	return s.createTopicsFunc(ctx, req)
 }
 
+type recordingProducer struct {
+	name       string
+	calls      *[]string
+	publishErr error
+	closeErr   error
+	closed     bool
+}
+
+func (p *recordingProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return p.publishErr
+}
+
+func (p *recordingProducer) Close() error {
+	p.closed = true
+	return p.closeErr
+}
+
 func TestNewConsumerValidation(t *testing.T) {
 	t.Parallel()
 
@@ -120,6 +140,91 @@ func TestNewProducerValidation(t *testing.T) {
 				t.Fatalf("expected nil producer on error")
 			}
 		})
+	}
+}
+
+func TestMirrorProducerPublishesPrimaryThenOptionalShadow(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := &recordingProducer{name: "shadow", calls: &calls, publishErr: errors.New("shadow down")}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestMirrorProducerDoesNotPublishShadowWhenPrimaryFails(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	primaryErr := errors.New("primary down")
+	primary := &recordingProducer{name: "primary", calls: &calls, publishErr: primaryErr}
+	shadow := &recordingProducer{name: "shadow", calls: &calls}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	err = producer.Publish(context.Background(), "proof.requests.v1", []byte("payload"))
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("Publish error = %v, want primary error", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestMirrorProducerRequiredShadowFailureFailsPublish(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	shadowErr := errors.New("shadow down")
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := &recordingProducer{name: "shadow", calls: &calls, publishErr: shadowErr}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{RequireShadow: true})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	err = producer.Publish(context.Background(), "proof.requests.v1", []byte("payload"))
+	if !errors.Is(err, shadowErr) {
+		t.Fatalf("Publish error = %v, want shadow error", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestMirrorProducerCloseClosesBoth(t *testing.T) {
+	t.Parallel()
+
+	primaryErr := errors.New("primary close")
+	shadowErr := errors.New("shadow close")
+	primary := &recordingProducer{name: "primary", closeErr: primaryErr}
+	shadow := &recordingProducer{name: "shadow", closeErr: shadowErr}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+
+	err = producer.Close()
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("Close error = %v, want primary close error", err)
+	}
+	if !errors.Is(err, shadowErr) {
+		t.Fatalf("Close error = %v, want shadow close error", err)
+	}
+	if !primary.closed || !shadow.closed {
+		t.Fatalf("Close did not close both producers: primary=%t shadow=%t", primary.closed, shadow.closed)
 	}
 }
 

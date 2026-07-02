@@ -2,12 +2,36 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
+
+type recordingQueuePublishProducer struct {
+	name       string
+	calls      *[]string
+	publishErr error
+	closed     bool
+}
+
+func (p *recordingQueuePublishProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return p.publishErr
+}
+
+func (p *recordingQueuePublishProducer) Close() error {
+	p.closed = true
+	return nil
+}
 
 func TestLoadPayloads_Inline(t *testing.T) {
 	t.Parallel()
@@ -225,6 +249,149 @@ func TestRunMain_DryRunRejectsUnsupportedQueueDriver(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestRunMain_ToleratesOptionalBadShadowConfig(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runMain(
+		[]string{
+			"--queue-driver", "stdio",
+			"--shadow-queue-driver", "postgres",
+			"--topic", "example.topic",
+			"--payload", `{"version":"v1"}`,
+		},
+		bytes.NewBuffer(nil),
+		&out,
+		&errOut,
+	)
+	if err != nil {
+		t.Fatalf("runMain: %v", err)
+	}
+	if got := out.String(); got != "{\"version\":\"v1\"}\n" {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+}
+
+func TestRunMain_DryRunRequiredPostgresShadowRequiresDSN(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := runMain(
+		[]string{
+			"--queue-driver", "stdio",
+			"--shadow-queue-driver", "postgres",
+			"--shadow-queue-required",
+			"--topic", "example.topic",
+			"--payload", `{"version":"v1"}`,
+			"--dry-run",
+		},
+		bytes.NewBuffer(nil),
+		&out,
+		&errOut,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestQueuePublishProducerConfiguresShadow(t *testing.T) {
+	t.Setenv("QUEUE_POSTGRES_DSN", "postgres://user:pass@127.0.0.1:5432/db")
+
+	var configs []queue.ProducerConfig
+	var calls []string
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		name := cfg.Driver
+		if len(configs) == 2 {
+			name = "shadow-" + cfg.Driver
+		}
+		return &recordingQueuePublishProducer{name: name, calls: &calls}, nil
+	}
+
+	producer, err := queuePublishProducer(queuePublishProducerOptions{
+		Driver:               queue.DriverKafka,
+		Brokers:              "b-1.example:9098,b-2.example:9098",
+		ShadowDriver:         queue.DriverPostgres,
+		ShadowPostgresDSNEnv: "QUEUE_POSTGRES_DSN",
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("queuePublishProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("config count = %d, want 2", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverKafka; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(configs[0].Brokers, ","), "b-1.example:9098,b-2.example:9098"; got != want {
+		t.Fatalf("primary brokers = %q, want %q", got, want)
+	}
+	if got, want := configs[1].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("shadow driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].PostgresDSN, "postgres://user:pass@127.0.0.1:5432/db"; got != want {
+		t.Fatalf("shadow PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:proof.requests.v1:payload,shadow-postgres:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestQueuePublishProducerCanRequireShadow(t *testing.T) {
+	shadowErr := errors.New("shadow down")
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		producer := &recordingQueuePublishProducer{name: cfg.Driver}
+		if cfg.Driver == queue.DriverStdio {
+			producer.publishErr = shadowErr
+		}
+		return producer, nil
+	}
+
+	producer, err := queuePublishProducer(queuePublishProducerOptions{
+		Driver:         queue.DriverKafka,
+		Brokers:        "b-1.example:9098",
+		ShadowDriver:   queue.DriverStdio,
+		ShadowRequired: true,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("queuePublishProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); !errors.Is(err, shadowErr) {
+		t.Fatalf("Publish error = %v, want shadow error", err)
+	}
+}
+
+func TestQueuePublishProducerToleratesOptionalShadowInitFailure(t *testing.T) {
+	shadowErr := errors.New("shadow init down")
+	var calls []string
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		if cfg.Driver == queue.DriverStdio {
+			return nil, shadowErr
+		}
+		return &recordingQueuePublishProducer{name: cfg.Driver, calls: &calls}, nil
+	}
+
+	producer, err := queuePublishProducer(queuePublishProducerOptions{
+		Driver:       queue.DriverKafka,
+		Brokers:      "b-1.example:9098",
+		ShadowDriver: queue.DriverStdio,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("queuePublishProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }
 
