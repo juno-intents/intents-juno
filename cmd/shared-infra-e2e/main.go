@@ -24,12 +24,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/envutil"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/segmentio/kafka-go"
 )
 
 type config struct {
 	PostgresDSN                  string
+	QueueDriver                  string
+	QueuePostgresDSN             string
 	KafkaBrokers                 []string
 	RequiredKafkaTopics          []string
 	CheckpointIPFSAPIURL         string
@@ -52,6 +55,7 @@ type report struct {
 	DurationMS     int64            `json:"duration_ms"`
 	Postgres       postgresReport   `json:"postgres"`
 	Kafka          kafkaReport      `json:"kafka"`
+	Queue          queueReport      `json:"queue"`
 	Checkpoint     checkpointReport `json:"checkpoint"`
 }
 
@@ -62,6 +66,14 @@ type postgresReport struct {
 }
 
 type kafkaReport struct {
+	Topic        string `json:"topic"`
+	Group        string `json:"group"`
+	PayloadBytes int    `json:"payload_bytes"`
+	RoundTripMS  int64  `json:"round_trip_ms"`
+}
+
+type queueReport struct {
+	Driver       string `json:"driver"`
 	Topic        string `json:"topic"`
 	Group        string `json:"group"`
 	PayloadBytes int    `json:"payload_bytes"`
@@ -161,18 +173,26 @@ func runMain(args []string, stdout io.Writer) error {
 	}
 	rep.Postgres = pgRep
 
-	var kRep kafkaReport
+	var qRep queueReport
 	if err := runWithRetry(ctx, 2*time.Second, func(stepCtx context.Context) error {
-		out, err := checkKafka(stepCtx, cfg)
+		out, err := checkQueue(stepCtx, cfg)
 		if err != nil {
 			return err
 		}
-		kRep = out
+		qRep = out
 		return nil
 	}); err != nil {
-		return fmt.Errorf("kafka check: %w", err)
+		return fmt.Errorf("queue check: %w", err)
 	}
-	rep.Kafka = kRep
+	rep.Queue = qRep
+	if qRep.Driver == queue.DriverKafka {
+		rep.Kafka = kafkaReport{
+			Topic:        qRep.Topic,
+			Group:        qRep.Group,
+			PayloadBytes: qRep.PayloadBytes,
+			RoundTripMS:  qRep.RoundTripMS,
+		}
+	}
 
 	var cpRep checkpointReport
 	if err := runWithRetry(ctx, 2*time.Second, func(stepCtx context.Context) error {
@@ -213,6 +233,8 @@ func parseArgs(args []string) (config, error) {
 	var cfg config
 	var brokersRaw string
 	var requiredTopicsRaw string
+	var queuePostgresDSNRaw string
+	var queuePostgresDSNEnv string
 	var checkpointOperatorsRaw string
 	var checkpointMinPersistedAtRaw string
 	var checkpointIPFSAPIBearerTokenRaw string
@@ -222,7 +244,10 @@ func parseArgs(args []string) (config, error) {
 	fs.SetOutput(io.Discard)
 
 	fs.StringVar(&cfg.PostgresDSN, "postgres-dsn", "", "Postgres DSN (required)")
-	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required)")
+	fs.StringVar(&cfg.QueueDriver, "queue-driver", queue.DriverKafka, "queue driver: kafka|postgres")
+	fs.StringVar(&queuePostgresDSNRaw, "queue-postgres-dsn", "", "Postgres DSN for postgres queue driver")
+	fs.StringVar(&queuePostgresDSNEnv, "queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required when --queue-driver=kafka)")
 	fs.StringVar(&requiredTopicsRaw, "required-kafka-topics", "", "comma-separated Kafka topics to create before validation")
 	fs.StringVar(&cfg.CheckpointIPFSAPIURL, "checkpoint-ipfs-api-url", "", "IPFS API URL for persisted checkpoint package pin/fetch validation (required)")
 	fs.StringVar(&checkpointIPFSAPIBearerTokenRaw, "checkpoint-ipfs-api-bearer-token", "", "optional IPFS API bearer token for checkpoint validation")
@@ -248,10 +273,25 @@ func parseArgs(args []string) (config, error) {
 	}
 
 	cfg.KafkaBrokers = parseBrokers(brokersRaw)
-	if len(cfg.KafkaBrokers) == 0 {
-		return cfg, errors.New("--kafka-brokers is required")
-	}
 	cfg.RequiredKafkaTopics = parseBrokers(requiredTopicsRaw)
+	cfg.QueueDriver = normalizeSharedInfraQueueDriver(cfg.QueueDriver)
+	switch cfg.QueueDriver {
+	case queue.DriverKafka:
+		if len(cfg.KafkaBrokers) == 0 {
+			return cfg, errors.New("--kafka-brokers is required when --queue-driver=kafka")
+		}
+	case queue.DriverPostgres:
+		if len(cfg.RequiredKafkaTopics) > 0 {
+			return cfg, errors.New("--required-kafka-topics requires --queue-driver=kafka")
+		}
+		queueDSN, err := sharedInfraQueuePostgresDSN(cfg.PostgresDSN, queuePostgresDSNRaw, queuePostgresDSNEnv)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.QueuePostgresDSN = queueDSN
+	default:
+		return cfg, fmt.Errorf("unsupported queue driver %q", cfg.QueueDriver)
+	}
 	cfg.CheckpointIPFSAPIURL = strings.TrimSpace(cfg.CheckpointIPFSAPIURL)
 	if cfg.CheckpointIPFSAPIURL == "" {
 		return cfg, errors.New("--checkpoint-ipfs-api-url is required")
@@ -324,6 +364,24 @@ func parseBrokers(raw string) []string {
 	return out
 }
 
+func normalizeSharedInfraQueueDriver(driver string) string {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver == "" {
+		return queue.DriverKafka
+	}
+	return driver
+}
+
+func sharedInfraQueuePostgresDSN(storeDSN, queueDSN, queueDSNEnv string) (string, error) {
+	if strings.TrimSpace(queueDSN) != "" || strings.TrimSpace(queueDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(queueDSN, queueDSNEnv)
+	}
+	if strings.TrimSpace(storeDSN) == "" {
+		return "", errors.New("--postgres-dsn is required")
+	}
+	return strings.TrimSpace(storeDSN), nil
+}
+
 func runWithRetry(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -393,6 +451,109 @@ func checkPostgres(ctx context.Context, cfg config) (postgresReport, error) {
 		ProbeID:     probeID,
 		RoundTripMS: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func checkQueue(ctx context.Context, cfg config) (queueReport, error) {
+	switch normalizeSharedInfraQueueDriver(cfg.QueueDriver) {
+	case queue.DriverKafka:
+		kRep, err := checkKafka(ctx, cfg)
+		if err != nil {
+			return queueReport{}, err
+		}
+		return queueReport{
+			Driver:       queue.DriverKafka,
+			Topic:        kRep.Topic,
+			Group:        kRep.Group,
+			PayloadBytes: kRep.PayloadBytes,
+			RoundTripMS:  kRep.RoundTripMS,
+		}, nil
+	case queue.DriverPostgres:
+		return checkPostgresQueue(ctx, cfg)
+	default:
+		return queueReport{}, fmt.Errorf("unsupported queue driver %q", cfg.QueueDriver)
+	}
+}
+
+func checkPostgresQueue(ctx context.Context, cfg config) (queueReport, error) {
+	if cfg.AckTimeout <= 0 {
+		cfg.AckTimeout = 5 * time.Second
+	}
+	topic := fmt.Sprintf("%s.%d", cfg.TopicPrefix, time.Now().UTC().UnixNano())
+	group := fmt.Sprintf("%s.group.%s", cfg.TopicPrefix, uuid.NewString())
+	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.postgres_queue.v1","time":"%s"}`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	))
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver:      queue.DriverPostgres,
+		PostgresDSN: cfg.QueuePostgresDSN,
+	})
+	if err != nil {
+		return queueReport{}, fmt.Errorf("new producer: %w", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	start := time.Now()
+	if err := producer.Publish(ctx, topic, payload); err != nil {
+		return queueReport{}, fmt.Errorf("publish: %w", err)
+	}
+
+	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
+		Driver:                   queue.DriverPostgres,
+		PostgresDSN:              cfg.QueuePostgresDSN,
+		Group:                    group,
+		Topics:                   []string{topic},
+		PostgresInitialPosition:  queue.PostgresInitialPositionEarliest,
+		PostgresPollInterval:     100 * time.Millisecond,
+		PostgresMaterializeLimit: 64,
+	})
+	if err != nil {
+		return queueReport{}, fmt.Errorf("new consumer: %w", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	msgCh := consumer.Messages()
+	errCh := consumer.Errors()
+	for {
+		select {
+		case <-ctx.Done():
+			return queueReport{}, ctx.Err()
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if err != nil {
+				return queueReport{}, fmt.Errorf("consume error: %w", err)
+			}
+		case msg, ok := <-msgCh:
+			if !ok {
+				return queueReport{}, errors.New("consumer closed before receiving probe payload")
+			}
+			if msg.Topic != topic {
+				ackCtx, ackCancel := context.WithTimeout(context.Background(), cfg.AckTimeout)
+				_ = msg.Ack(ackCtx)
+				ackCancel()
+				continue
+			}
+			if string(msg.Value) != string(payload) {
+				return queueReport{}, fmt.Errorf("payload mismatch on topic %s", topic)
+			}
+			ackCtx, ackCancel := context.WithTimeout(context.Background(), cfg.AckTimeout)
+			err = msg.Ack(ackCtx)
+			ackCancel()
+			if err != nil {
+				return queueReport{}, fmt.Errorf("ack: %w", err)
+			}
+
+			return queueReport{
+				Driver:       queue.DriverPostgres,
+				Topic:        topic,
+				Group:        group,
+				PayloadBytes: len(payload),
+				RoundTripMS:  time.Since(start).Milliseconds(),
+			}, nil
+		}
+	}
 }
 
 func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {

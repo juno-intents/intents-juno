@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -160,6 +161,78 @@ func TestParseArgs_RequiresKafkaBrokers(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 	if !strings.Contains(err.Error(), "--kafka-brokers") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseArgs_PostgresQueueDoesNotRequireKafkaBrokers(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/store?sslmode=disable",
+		"--queue-driver", "postgres",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.QueueDriver != queue.DriverPostgres {
+		t.Fatalf("queue driver = %q, want %q", cfg.QueueDriver, queue.DriverPostgres)
+	}
+	if cfg.QueuePostgresDSN != cfg.PostgresDSN {
+		t.Fatalf("queue postgres dsn = %q, want fallback store dsn %q", cfg.QueuePostgresDSN, cfg.PostgresDSN)
+	}
+	if len(cfg.KafkaBrokers) != 0 {
+		t.Fatalf("kafka brokers: got %#v want empty", cfg.KafkaBrokers)
+	}
+}
+
+func TestParseArgs_PostgresQueueResolvesQueueDSNFromEnv(t *testing.T) {
+	t.Setenv("TEST_SHARED_QUEUE_DSN", "  postgres://postgres:postgres@127.0.0.1:5432/queue?sslmode=disable  ")
+
+	cfg, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/store?sslmode=disable",
+		"--queue-driver", "postgres",
+		"--queue-postgres-dsn-env", "TEST_SHARED_QUEUE_DSN",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.QueuePostgresDSN != "postgres://postgres:postgres@127.0.0.1:5432/queue?sslmode=disable" {
+		t.Fatalf("queue postgres dsn = %q", cfg.QueuePostgresDSN)
+	}
+}
+
+func TestParseArgs_PostgresQueueRejectsRequiredKafkaTopics(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/store?sslmode=disable",
+		"--queue-driver", "postgres",
+		"--required-kafka-topics", "proof.requests.v1",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--required-kafka-topics requires --queue-driver=kafka") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseArgs_RejectsUnsupportedQueueDriver(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+		"--queue-driver", "typo",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported queue driver") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
