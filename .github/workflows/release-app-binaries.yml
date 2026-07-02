@@ -88,6 +88,7 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/withdraw-coordinator_linux_amd64 ./cmd/withdraw-coordinator
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/withdraw-finalizer_linux_amd64 ./cmd/withdraw-finalizer
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/base-event-scanner_linux_amd64 ./cmd/base-event-scanner
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/queue-inspect_linux_amd64 ./cmd/queue-inspect
 
           (
             cd .ci/out
@@ -100,6 +101,7 @@ jobs:
             sha256sum withdraw-coordinator_linux_amd64 > withdraw-coordinator_linux_amd64.sha256
             sha256sum withdraw-finalizer_linux_amd64 > withdraw-finalizer_linux_amd64.sha256
             sha256sum base-event-scanner_linux_amd64 > base-event-scanner_linux_amd64.sha256
+            sha256sum queue-inspect_linux_amd64 > queue-inspect_linux_amd64.sha256
           )
 
       - name: Create or update release
@@ -130,6 +132,8 @@ jobs:
               .ci/out/withdraw-finalizer_linux_amd64.sha256 \
               .ci/out/base-event-scanner_linux_amd64 \
               .ci/out/base-event-scanner_linux_amd64.sha256 \
+              .ci/out/queue-inspect_linux_amd64 \
+              .ci/out/queue-inspect_linux_amd64.sha256 \
               --clobber
           else
             gh release create "$tag" \
@@ -151,6 +155,8 @@ jobs:
               .ci/out/withdraw-finalizer_linux_amd64.sha256 \
               .ci/out/base-event-scanner_linux_amd64 \
               .ci/out/base-event-scanner_linux_amd64.sha256 \
+              .ci/out/queue-inspect_linux_amd64 \
+              .ci/out/queue-inspect_linux_amd64.sha256 \
               --title "$tag" \
               --notes "Release ${tag}"
           fi

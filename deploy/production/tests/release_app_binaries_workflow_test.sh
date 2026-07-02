@@ -8,8 +8,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
 main() {
-  local workflow_text
+  local create_block upload_block workflow_text
   workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-app-binaries.yml")"
+  upload_block="$(awk '/gh release upload/,/--clobber/' <<<"$workflow_text")"
+  create_block="$(awk '/gh release create/,/--title/' <<<"$workflow_text")"
 
   assert_contains "$workflow_text" 'go build -o .ci/out/bridge-deploy_linux_amd64 ./cmd/bridge-deploy' "release workflow builds bridge-deploy"
   assert_contains "$workflow_text" 'go build -o .ci/out/checkpoint-aggregator_linux_amd64 ./cmd/checkpoint-aggregator' "release workflow builds checkpoint-aggregator"
@@ -17,18 +19,25 @@ main() {
   assert_contains "$workflow_text" 'go build -o .ci/out/withdraw-coordinator_linux_amd64 ./cmd/withdraw-coordinator' "release workflow builds withdraw-coordinator"
   assert_contains "$workflow_text" 'go build -o .ci/out/withdraw-finalizer_linux_amd64 ./cmd/withdraw-finalizer' "release workflow builds withdraw-finalizer"
   assert_contains "$workflow_text" 'go build -o .ci/out/base-event-scanner_linux_amd64 ./cmd/base-event-scanner' "release workflow builds base-event-scanner"
+  assert_contains "$workflow_text" 'go build -o .ci/out/queue-inspect_linux_amd64 ./cmd/queue-inspect' "release workflow builds queue-inspect"
   assert_contains "$workflow_text" 'sha256sum bridge-deploy_linux_amd64 > bridge-deploy_linux_amd64.sha256' "release workflow hashes bridge-deploy"
   assert_contains "$workflow_text" 'sha256sum checkpoint-aggregator_linux_amd64 > checkpoint-aggregator_linux_amd64.sha256' "release workflow hashes checkpoint-aggregator"
   assert_contains "$workflow_text" 'sha256sum deposit-relayer_linux_amd64 > deposit-relayer_linux_amd64.sha256' "release workflow hashes deposit-relayer"
   assert_contains "$workflow_text" 'sha256sum withdraw-coordinator_linux_amd64 > withdraw-coordinator_linux_amd64.sha256' "release workflow hashes withdraw-coordinator"
   assert_contains "$workflow_text" 'sha256sum withdraw-finalizer_linux_amd64 > withdraw-finalizer_linux_amd64.sha256' "release workflow hashes withdraw-finalizer"
   assert_contains "$workflow_text" 'sha256sum base-event-scanner_linux_amd64 > base-event-scanner_linux_amd64.sha256' "release workflow hashes base-event-scanner"
+  assert_contains "$workflow_text" 'sha256sum queue-inspect_linux_amd64 > queue-inspect_linux_amd64.sha256' "release workflow hashes queue-inspect"
   assert_contains "$workflow_text" '.ci/out/bridge-deploy_linux_amd64' "release workflow uploads bridge-deploy"
   assert_contains "$workflow_text" '.ci/out/checkpoint-aggregator_linux_amd64' "release workflow uploads checkpoint-aggregator"
   assert_contains "$workflow_text" '.ci/out/deposit-relayer_linux_amd64' "release workflow uploads deposit-relayer"
   assert_contains "$workflow_text" '.ci/out/withdraw-coordinator_linux_amd64' "release workflow uploads withdraw-coordinator"
   assert_contains "$workflow_text" '.ci/out/withdraw-finalizer_linux_amd64' "release workflow uploads withdraw-finalizer"
   assert_contains "$workflow_text" '.ci/out/base-event-scanner_linux_amd64' "release workflow uploads base-event-scanner"
+  assert_contains "$workflow_text" '.ci/out/queue-inspect_linux_amd64' "release workflow uploads queue-inspect"
+  assert_contains "$upload_block" '.ci/out/queue-inspect_linux_amd64 \' "release workflow uploads queue-inspect binary when updating a release"
+  assert_contains "$upload_block" '.ci/out/queue-inspect_linux_amd64.sha256 \' "release workflow uploads queue-inspect checksum when updating a release"
+  assert_contains "$create_block" '.ci/out/queue-inspect_linux_amd64 \' "release workflow uploads queue-inspect binary when creating a release"
+  assert_contains "$create_block" '.ci/out/queue-inspect_linux_amd64.sha256 \' "release workflow uploads queue-inspect checksum when creating a release"
   assert_contains "$workflow_text" 'FRONTEND_WALLETCONNECT_PROJECT_ID' "release workflow requires walletconnect build input"
   assert_contains "$workflow_text" 'VITE_BASE_CHAIN_ID=' "release workflow sets frontend base chain id by release tier"
 }
