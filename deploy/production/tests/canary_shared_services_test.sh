@@ -524,6 +524,82 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_allows_instance_profile_without_local_profile() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432,
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared"
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"rds describe-db-clusters"*)
+    printf '{"DBClusters":[{"Status":"available","AvailabilityZones":["us-east-1a","us-east-1b"]}]}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE=true \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "aws --region us-east-1 sts get-caller-identity" "instance-profile canary uses region without a local profile"
+  assert_not_contains "$(cat "$log_file")" "--profile" "instance-profile canary does not require workstation profile names"
+  assert_eq "$(jq -r '.checks.aws_auth.status' "$output_json")" "passed" "instance-profile canary aws auth status"
+  assert_eq "$(jq -r '.checks.postgres.status' "$output_json")" "passed" "instance-profile canary postgres status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "instance-profile canary ready flag"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -1197,6 +1273,7 @@ main() {
   test_shared_services_canary_accepts_postgres_queue_without_kafka
   test_shared_services_canary_runs_postgres_queue_inspection_when_configured
   test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow
+  test_shared_services_canary_allows_instance_profile_without_local_profile
   test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue
   test_shared_services_canary_checks_roles_for_postgres_queue
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present

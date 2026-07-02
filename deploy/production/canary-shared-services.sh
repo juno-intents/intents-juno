@@ -173,6 +173,14 @@ fi
 
 aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
 aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
+aws_use_instance_profile="${PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE:-false}"
+case "$aws_use_instance_profile" in
+  true|false) ;;
+  *) die "PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE must be true or false" ;;
+esac
+if [[ "$aws_use_instance_profile" == "true" ]]; then
+  aws_profile=""
+fi
 postgres_endpoint="$(production_json_required "$shared_manifest" '.shared_services.postgres.endpoint | select(type == "string" and length > 0)')"
 postgres_cluster_arn="$(production_json_optional "$shared_manifest" '.shared_services.postgres.cluster_arn | select(type == "string" and length > 0)')"
 postgres_port="$(production_json_required "$shared_manifest" '.shared_services.postgres.port')"
@@ -428,9 +436,12 @@ else
   fi
   if [[ "$aws_auth_required" == "true" ]]; then
     have_cmd aws || die "required command not found: aws"
-    if [[ -z "$aws_profile" || -z "$aws_region" ]]; then
+    if [[ -z "$aws_region" ]]; then
       aws_auth_status="failed"
-      aws_auth_detail="shared manifest is missing shared_services.aws_profile or shared_services.aws_region"
+      aws_auth_detail="shared manifest is missing shared_services.aws_region"
+    elif [[ -z "$aws_profile" && "$aws_use_instance_profile" != "true" ]]; then
+      aws_auth_status="failed"
+      aws_auth_detail="shared manifest is missing shared_services.aws_profile"
     elif ! AWS_PAGER="" "${aws_args[@]}" sts get-caller-identity >/dev/null 2>&1; then
       aws_auth_status="failed"
       aws_auth_detail="aws sts get-caller-identity failed"

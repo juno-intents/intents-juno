@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+source "$SCRIPT_DIR/common_test.sh"
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
+write_shared_manifest_for_ssm_canary() {
+  local target="$1"
+  local proof_asg="${2:-alpha-proof-role}"
+  jq -n \
+    --arg proof_asg "$proof_asg" \
+    '{
+      environment: "alpha",
+      shared_services: {
+        aws_profile: "juno",
+        aws_region: "us-east-1",
+        proof_queue: {
+          shadow: {
+            driver: "postgres"
+          }
+        },
+        postgres: {
+          endpoint: "postgres.alpha.internal",
+          port: 5432
+        },
+        kafka: {
+          bootstrap_brokers: "broker-1.alpha.internal:9098",
+          auth: {
+            mode: "aws-msk-iam",
+            aws_region: "us-east-1"
+          }
+        },
+        ipfs: {
+          api_url: "https://ipfs.alpha.internal"
+        }
+      },
+      shared_roles: {
+        proof: {
+          asg: $proof_asg
+        }
+      }
+    }' >"$target"
+}
+
+write_fake_aws_for_shared_ssm() {
+  local target="$1"
+  local log_dir="$2"
+  local asg_instance_id="${3:-i-proof001}"
+  local instance_name="${4:-alpha-proof-role}"
+  local instance_state="${5:-running}"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+
+extract_arg() {
+  local key="\$1"
+  shift
+  local args=( "\$@" )
+  local i
+  for ((i=0; i<\${#args[@]}; i++)); do
+    if [[ "\${args[\$i]}" == "\$key" && \$((i + 1)) -lt \${#args[@]} ]]; then
+      printf '%s\n' "\${args[\$((i + 1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_parameters() {
+  local raw
+  raw="\$(extract_arg --parameters "\$@" || true)"
+  if [[ "\$raw" == file://* ]]; then
+    cat "\${raw#file://}"
+    return 0
+  fi
+  printf '%s' "\$raw"
+}
+
+decode_ssm_command() {
+  local wrapped="\$1"
+  awk '
+    /__INTENTS_JUNO_SSM_COMMAND__/ && !seen {
+      seen = 1
+      next
+    }
+    /^__INTENTS_JUNO_SSM_COMMAND__\$/ && seen {
+      exit
+    }
+    seen {
+      print
+    }
+  ' <<<"\$wrapped" | base64 --decode
+}
+
+case "\$*" in
+  *"autoscaling describe-auto-scaling-groups"*"alpha-proof-role"*)
+    printf '{"AutoScalingGroups":[{"Instances":[{"InstanceId":"$asg_instance_id","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"ec2 describe-instances"*"--instance-ids $asg_instance_id"*)
+    printf '{"Reservations":[{"Instances":[{"InstanceId":"$asg_instance_id","State":{"Name":"$instance_state"},"Tags":[{"Key":"Name","Value":"$instance_name"}]}]}]}\n'
+    ;;
+  *"ssm send-command"*)
+    params="\$(resolve_parameters "\$@" || true)"
+    command_text="\$(jq -r '.commands[0] // empty' <<<"\$params" 2>/dev/null || true)"
+    if [[ -n "\$command_text" ]]; then
+      if decoded="\$(decode_ssm_command "\$command_text" 2>/dev/null)" && [[ -n "\$decoded" ]]; then
+        printf '%s\n' "\$decoded" >>"$log_dir/commands.log"
+      else
+        printf '%s\n' "\$command_text" >>"$log_dir/commands.log"
+      fi
+    else
+      printf '%s\n' "\$params" >>"$log_dir/commands.log"
+    fi
+    counter_file="$log_dir/command-counter"
+    counter=0
+    if [[ -f "\$counter_file" ]]; then
+      counter="\$(cat "\$counter_file")"
+    fi
+    counter=\$((counter + 1))
+    printf '%s' "\$counter" >"\$counter_file"
+    printf '{"Command":{"CommandId":"cmd-%s"}}\n' "\$counter"
+    ;;
+  *"ssm get-command-invocation"*)
+    printf '%s\n' '{"Status":"Success","StandardOutputContent":"{\"ready_for_deploy\":true,\"checks\":{\"queue\":{\"status\":\"passed\",\"detail\":\"queue-inspect passed for 5 targets\"}}}","StandardErrorContent":""}'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$target"
+}
+
+test_shared_services_ssm_canary_dry_run_validates_manifest_without_aws() {
+  local tmp manifest output_json fake_bin log_file
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  output_json="$tmp/output.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/local-probes.log"
+  mkdir -p "$fake_bin"
+  write_shared_manifest_for_ssm_canary "$manifest"
+
+  for cmd in aws pg_isready nc curl; do
+    cat >"$fake_bin/$cmd" <<EOF
+#!/usr/bin/env bash
+printf '$cmd %s\n' "\$*" >>"$log_file"
+exit 1
+EOF
+    chmod 0755 "$fake_bin/$cmd"
+  done
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --dry-run >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "false" "dry-run output is not deploy-ready"
+  assert_eq "$(jq -r '.checks.ssm.status' "$output_json")" "skipped" "dry-run skips ssm"
+  if [[ -f "$log_file" ]]; then
+    printf 'dry run should not call aws or private endpoint probes\n' >&2
+    exit 1
+  fi
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_ssm_canary_runs_remote_shared_canary() {
+  local tmp manifest fake_bin log_dir output_json queue_inspect_bin local_probe_log
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_dir="$tmp/logs"
+  output_json="$tmp/output.json"
+  queue_inspect_bin="$tmp/queue-inspect"
+  local_probe_log="$log_dir/local-probes.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  write_fake_aws_for_shared_ssm "$fake_bin/aws" "$log_dir"
+
+  cat >"$queue_inspect_bin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$queue_inspect_bin"
+  for cmd in pg_isready nc curl; do
+    cat >"$fake_bin/$cmd" <<EOF
+#!/usr/bin/env bash
+printf '$cmd %s\n' "\$*" >>"$local_probe_log"
+exit 99
+EOF
+    chmod 0755 "$fake_bin/$cmd"
+  done
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-bin "$queue_inspect_bin" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_dir/aws.log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-proof-role" "ssm canary resolves proof role asg"
+  assert_contains "$(cat "$log_dir/aws.log")" "ec2 describe-instances --instance-ids i-proof001" "ssm canary validates candidate instance metadata"
+  assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-proof001" "ssm canary runs against proof role instance"
+  assert_contains "$(cat "$log_dir/commands.log")" "deploy/production/canary-shared-services.sh" "ssm canary stages the shared canary script"
+  assert_contains "$(cat "$log_dir/commands.log")" "deploy/production/lib.sh" "ssm canary stages production lib dependency"
+  assert_contains "$(cat "$log_dir/commands.log")" "deploy/operators/dkg/common.sh" "ssm canary stages dkg common dependency"
+  assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE=true" "remote canary uses instance profile credentials"
+  assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_QUEUE_INSPECT_BIN=" "remote canary receives staged queue-inspect binary"
+  assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV=POSTGRES_DSN" "remote canary reads proof role postgres dsn env"
+  assert_contains "$(cat "$log_dir/commands.log")" "source /etc/intents-juno/proof-requestor.env" "remote canary sources proof requestor env"
+  assert_contains "$(cat "$log_dir/commands.log")" "trap cleanup EXIT" "remote canary cleans up stage dir on exit"
+  assert_not_contains "$(cat "$log_dir/commands.log")" "postgres://queue.example.invalid" "remote canary does not expose dsn in command text"
+  if [[ -f "$local_probe_log" ]]; then
+    printf 'ssm wrapper should not run private endpoint probes locally\n' >&2
+    exit 1
+  fi
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "ssm canary returns remote ready flag"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "ssm canary returns remote queue status"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_ssm_canary_requires_proof_asg() {
+  local tmp manifest output_json stderr
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  output_json="$tmp/output.json"
+  stderr="$tmp/stderr"
+  write_shared_manifest_for_ssm_canary "$manifest" ""
+  jq 'del(.shared_roles.proof.asg)' "$manifest" >"$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject missing proof asg\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr")" "shared manifest is missing shared_roles.proof.asg" "missing proof asg is rejected"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_ssm_canary_rejects_protected_instance_id_before_ssm() {
+  local tmp manifest fake_bin log_dir output_json stderr
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_dir="$tmp/logs"
+  output_json="$tmp/output.json"
+  stderr="$tmp/stderr"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  write_fake_aws_for_shared_ssm "$fake_bin/aws" "$log_dir" "i-0a886419721b81020" "alpha-proof-role"
+
+  if (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject protected instance id\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr")" "protected instance id selected by shared proof asg" "protected instance id is rejected"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "ec2 describe-instances" "protected ids are rejected before ec2 metadata lookup"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "ssm send-command" "protected ids are rejected before ssm"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_ssm_canary_rejects_protected_instance_name_before_ssm() {
+  local tmp manifest fake_bin log_dir output_json stderr
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_dir="$tmp/logs"
+  output_json="$tmp/output.json"
+  stderr="$tmp/stderr"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  write_fake_aws_for_shared_ssm "$fake_bin/aws" "$log_dir" "i-proof001" "nn"
+
+  if (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject protected instance name\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr")" "protected instance name selected by shared proof asg" "protected instance name is rejected"
+  assert_contains "$(cat "$log_dir/aws.log")" "ec2 describe-instances --instance-ids i-proof001" "name denylist uses candidate metadata"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "ssm send-command" "protected names are rejected before ssm"
+
+  rm -rf "$tmp"
+}
+
+main() {
+  test_shared_services_ssm_canary_dry_run_validates_manifest_without_aws
+  test_shared_services_ssm_canary_runs_remote_shared_canary
+  test_shared_services_ssm_canary_requires_proof_asg
+  test_shared_services_ssm_canary_rejects_protected_instance_id_before_ssm
+  test_shared_services_ssm_canary_rejects_protected_instance_name_before_ssm
+}
+
+main "$@"
