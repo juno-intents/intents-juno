@@ -79,7 +79,7 @@ main() {
   assert_contains "$main_tf" 'check "shared_ecs_private_subnets_when_no_public_ip"' "shared ecs subnet/public-ip compatibility guard"
   assert_contains "$main_tf" 'shared_proof_service_image_ecr_repository_arn must be set when shared_proof_service_image points at an explicit ECR repository.' "explicit ECR image scope message"
   assert_contains "$main_tf" 'shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false.' "production-shared fails closed on public shared subnets without public IPs"
-  assert_contains "$main_tf" 'shared_kafka_cluster_arn                     = coalesce(aws_msk_cluster.shared.arn, "")' "production-shared guards the shared kafka cluster arn when Terraform has not populated it yet"
+  assert_contains "$main_tf" 'shared_kafka_cluster_arn                     = try(aws_msk_cluster.shared[0].arn, "")' "production-shared guards the optional shared kafka cluster arn when Terraform has not populated it yet"
   assert_contains "$main_tf" 'shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")' "production-shared derives kafka topic arns from the guarded cluster arn"
   assert_contains "$main_tf" 'shared_kafka_group_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":group/")' "production-shared derives kafka group arns from the guarded cluster arn"
 
@@ -163,6 +163,7 @@ main() {
   assert_contains "$outputs_tf" 'output "shared_ipfs_api_url"' "production-shared exports the shared IPFS api url"
   assert_contains "$outputs_tf" 'output "shared_ipfs_api_auth_secret_arn"' "production-shared exports the shared IPFS bearer token secret ARN"
   assert_contains "$outputs_tf" 'output "shared_queue_driver"' "production-shared exports the selected shared queue transport"
+  assert_contains "$outputs_tf" 'value       = local.shared_queue_uses_kafka ? var.shared_kafka_port : null' "production-shared leaves the Kafka port output empty when the shared queue uses Postgres"
   assert_contains "$outputs_tf" 'output "shared_kafka_critical_hmac_secret_arn"' "production-shared exports the Kafka critical-topic HMAC secret ARN"
   assert_contains "$outputs_tf" 'output "shared_proof_role_asg_name"' "production-shared exports the proof-role autoscaling group name"
   assert_contains "$outputs_tf" 'output "shared_proof_role_launch_template_id"' "production-shared exports the proof-role launch template id"

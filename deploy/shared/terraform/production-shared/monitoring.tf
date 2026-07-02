@@ -110,6 +110,7 @@ resource "aws_cloudwatch_metric_alarm" "shared_postgres_instance_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "shared_kafka_offline_partitions" {
+  count               = local.shared_queue_uses_kafka ? 1 : 0
   alarm_name          = "${local.resource_name}-msk-offline-partitions"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
@@ -123,7 +124,7 @@ resource "aws_cloudwatch_metric_alarm" "shared_kafka_offline_partitions" {
   ok_actions          = var.alarm_actions
 
   dimensions = {
-    "Cluster Name" = aws_msk_cluster.shared.cluster_name
+    "Cluster Name" = aws_msk_cluster.shared[0].cluster_name
   }
 }
 

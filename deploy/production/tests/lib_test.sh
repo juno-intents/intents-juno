@@ -1147,6 +1147,39 @@ test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue() {
   rm -rf "$workdir"
 }
 
+test_production_shared_postgres_queue_gates_msk_resources() {
+  local main_tf monitoring_tf outputs_tf
+  main_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
+  monitoring_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/monitoring.tf")"
+  outputs_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/production-shared/outputs.tf")"
+
+  assert_contains "$main_tf" 'shared_queue_uses_kafka' "production shared terraform derives kafka queue enablement from shared_queue_driver"
+  assert_contains "$main_tf" 'count = local.shared_queue_uses_kafka ? 1 : 0' "production shared terraform gates msk resources behind kafka queue mode"
+  assert_contains "$main_tf" 'aws_msk_cluster.shared[0]' "production shared terraform indexes optional msk cluster resources"
+  assert_contains "$main_tf" 'from = aws_msk_configuration.shared' "production shared terraform preserves msk configuration state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_msk_configuration.shared[0]' "production shared terraform preserves indexed msk configuration state address during count migration"
+  assert_contains "$main_tf" 'from = aws_msk_cluster.shared' "production shared terraform preserves msk cluster state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_msk_cluster.shared[0]' "production shared terraform preserves indexed msk cluster state address during count migration"
+  assert_contains "$main_tf" 'from = random_password.shared_kafka_critical_hmac_key' "production shared terraform preserves kafka critical hmac random state address during count migration"
+  assert_contains "$main_tf" 'to   = random_password.shared_kafka_critical_hmac_key[0]' "production shared terraform preserves indexed kafka critical hmac random state address during count migration"
+  assert_contains "$main_tf" 'from = aws_secretsmanager_secret.shared_kafka_critical_hmac_key' "production shared terraform preserves kafka critical hmac secret state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0]' "production shared terraform preserves indexed kafka critical hmac secret state address during count migration"
+  assert_contains "$main_tf" 'from = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key' "production shared terraform preserves kafka critical hmac secret version state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key[0]' "production shared terraform preserves indexed kafka critical hmac secret version state address during count migration"
+  assert_contains "$main_tf" 'from = aws_iam_role_policy.proof_requestor_task_access' "production shared terraform preserves kafka task policy state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_iam_role_policy.proof_requestor_task_access[0]' "production shared terraform preserves indexed kafka requestor task policy state address during count migration"
+  assert_contains "$main_tf" 'from = aws_iam_role_policy.proof_funder_task_access' "production shared terraform preserves kafka funder task policy state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_iam_role_policy.proof_funder_task_access[0]' "production shared terraform preserves indexed kafka funder task policy state address during count migration"
+  assert_contains "$main_tf" 'from = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions' "production shared terraform preserves msk alarm state address during count migration"
+  assert_contains "$main_tf" 'to   = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions[0]' "production shared terraform preserves indexed msk alarm state address during count migration"
+  assert_contains "$main_tf" 'local.shared_queue_uses_kafka ? [' "production shared terraform gates kafka iam statements behind kafka queue mode"
+  assert_contains "$monitoring_tf" 'count               = local.shared_queue_uses_kafka ? 1 : 0' "production shared monitoring gates msk alarm behind kafka queue mode"
+  assert_contains "$outputs_tf" 'value       = local.shared_queue_uses_kafka ? var.shared_kafka_port : null' "production shared kafka port output is empty in postgres queue mode"
+  assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")' "production shared kafka broker output is empty in postgres queue mode"
+  assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].arn, "")' "production shared kafka cluster output is empty in postgres queue mode"
+  assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].bootstrap_brokers_tls, "")' "production shared kafka tls broker output is empty in postgres queue mode"
+}
+
 test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard() {
   local workdir shared_manifest app_manifest tf_json
   workdir="$(mktemp -d)"
@@ -4289,6 +4322,7 @@ main() {
   test_render_shared_manifest_and_handoffs
   test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers
   test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue
+  test_production_shared_postgres_queue_gates_msk_resources
   test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard
   test_render_shared_manifest_synthesizes_legacy_wireguard_peer_roster_from_client_config_secret
   test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions

@@ -20,22 +20,22 @@ output "shared_postgres_port" {
 
 output "shared_kafka_port" {
   description = "MSK SASL/IAM Kafka port."
-  value       = var.shared_kafka_port
+  value       = local.shared_queue_uses_kafka ? var.shared_kafka_port : null
 }
 
 output "shared_kafka_bootstrap_brokers" {
   description = "MSK bootstrap brokers for SASL/IAM clients."
-  value       = aws_msk_cluster.shared.bootstrap_brokers_sasl_iam
+  value       = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")
 }
 
 output "shared_kafka_cluster_arn" {
   description = "MSK cluster ARN."
-  value       = aws_msk_cluster.shared.arn
+  value       = try(aws_msk_cluster.shared[0].arn, "")
 }
 
 output "shared_kafka_bootstrap_brokers_tls" {
   description = "MSK bootstrap brokers for TLS-only clients."
-  value       = aws_msk_cluster.shared.bootstrap_brokers_tls
+  value       = try(aws_msk_cluster.shared[0].bootstrap_brokers_tls, "")
 }
 
 output "shared_queue_driver" {
@@ -117,7 +117,7 @@ output "shared_ipfs_api_auth_secret_arn" {
 
 output "shared_kafka_critical_hmac_secret_arn" {
   description = "Secrets Manager ARN containing the shared Kafka critical-topic HMAC key."
-  value       = aws_secretsmanager_secret.shared_kafka_critical_hmac_key.arn
+  value       = try(aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0].arn, "")
   sensitive   = true
 }
 
@@ -152,13 +152,13 @@ output "shared_wireguard_role" {
     peer_roster_secret_arns         = [for secret in values(aws_secretsmanager_secret.shared_wireguard_peer_config) : secret.arn]
     peer_config_secret_arns         = { for name, secret in aws_secretsmanager_secret.shared_wireguard_peer_config : name => secret.arn }
     backoffice_private_endpoint_ips = local.shared_wireguard_backoffice_private_endpoint_ips
-  } : {
-    asg               = null
-    launch_template   = { id = null, version = null }
-    endpoint_host     = null
-    listen_port       = null
-    network_cidr      = null
-    source_cidrs      = []
+    } : {
+    asg                             = null
+    launch_template                 = { id = null, version = null }
+    endpoint_host                   = null
+    listen_port                     = null
+    network_cidr                    = null
+    source_cidrs                    = []
     server_key_secret_arn           = null
     peer_roster_secret_arns         = []
     peer_config_secret_arns         = {}

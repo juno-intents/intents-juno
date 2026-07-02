@@ -7,6 +7,46 @@ provider "aws" {
   region = var.shared_postgres_dr_region
 }
 
+moved {
+  from = aws_msk_configuration.shared
+  to   = aws_msk_configuration.shared[0]
+}
+
+moved {
+  from = aws_msk_cluster.shared
+  to   = aws_msk_cluster.shared[0]
+}
+
+moved {
+  from = random_password.shared_kafka_critical_hmac_key
+  to   = random_password.shared_kafka_critical_hmac_key[0]
+}
+
+moved {
+  from = aws_secretsmanager_secret.shared_kafka_critical_hmac_key
+  to   = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0]
+}
+
+moved {
+  from = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key
+  to   = aws_secretsmanager_secret_version.shared_kafka_critical_hmac_key[0]
+}
+
+moved {
+  from = aws_iam_role_policy.proof_requestor_task_access
+  to   = aws_iam_role_policy.proof_requestor_task_access[0]
+}
+
+moved {
+  from = aws_iam_role_policy.proof_funder_task_access
+  to   = aws_iam_role_policy.proof_funder_task_access[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions
+  to   = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions[0]
+}
+
 locals {
   resource_name = "${var.name_prefix}-${var.deployment_id}"
   resource_slug = trim(replace(lower(local.resource_name), "_", "-"), "-")
@@ -86,8 +126,9 @@ locals {
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
   shared_queue_driver                          = lower(trimspace(var.shared_queue_driver))
-  shared_kafka_cluster_arn                     = coalesce(aws_msk_cluster.shared.arn, "")
-  shared_kafka_bootstrap_brokers               = coalesce(aws_msk_cluster.shared.bootstrap_brokers_sasl_iam, "")
+  shared_queue_uses_kafka                      = local.shared_queue_driver == "kafka"
+  shared_kafka_cluster_arn                     = try(aws_msk_cluster.shared[0].arn, "")
+  shared_kafka_bootstrap_brokers               = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")
   shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
   shared_kafka_group_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":group/")
   shared_proof_request_topic                   = "proof.requests.v1"
@@ -379,16 +420,19 @@ resource "aws_security_group" "shared" {
     }
   }
 
-  ingress {
-    description     = "MSK IAM bootstrap from shared ECS tasks"
-    from_port       = var.shared_kafka_port
-    to_port         = var.shared_kafka_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.ecs.id]
+  dynamic "ingress" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      description     = "MSK IAM bootstrap from shared ECS tasks"
+      from_port       = var.shared_kafka_port
+      to_port         = var.shared_kafka_port
+      protocol        = "tcp"
+      security_groups = [aws_security_group.ecs.id]
+    }
   }
 
   dynamic "ingress" {
-    for_each = toset(var.shared_service_client_cidr_blocks)
+    for_each = local.shared_queue_uses_kafka ? toset(var.shared_service_client_cidr_blocks) : toset([])
     content {
       description = "MSK IAM bootstrap from shared-service clients"
       from_port   = var.shared_kafka_port
@@ -399,7 +443,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = toset(var.shared_service_client_security_group_ids)
+    for_each = local.shared_queue_uses_kafka ? toset(var.shared_service_client_security_group_ids) : toset([])
     content {
       description     = "MSK IAM bootstrap from shared-service client security groups"
       from_port       = var.shared_kafka_port
@@ -409,12 +453,15 @@ resource "aws_security_group" "shared" {
     }
   }
 
-  ingress {
-    description = "MSK broker mesh"
-    from_port   = 9092
-    to_port     = 9094
-    protocol    = "tcp"
-    self        = true
+  dynamic "ingress" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      description = "MSK broker mesh"
+      from_port   = 9092
+      to_port     = 9094
+      protocol    = "tcp"
+      self        = true
+    }
   }
 
   egress {
@@ -626,6 +673,7 @@ resource "aws_backup_selection" "shared_postgres" {
 }
 
 resource "aws_msk_configuration" "shared" {
+  count          = local.shared_queue_uses_kafka ? 1 : 0
   kafka_versions = [var.shared_msk_kafka_version]
   name           = "${local.resource_slug}-shared-msk-config"
 
@@ -637,13 +685,14 @@ resource "aws_msk_configuration" "shared" {
 }
 
 resource "aws_msk_cluster" "shared" {
+  count                  = local.shared_queue_uses_kafka ? 1 : 0
   cluster_name           = "${local.resource_name}-shared-msk"
   kafka_version          = var.shared_msk_kafka_version
   number_of_broker_nodes = length(local.shared_subnets)
 
   configuration_info {
-    arn      = aws_msk_configuration.shared.arn
-    revision = aws_msk_configuration.shared.latest_revision
+    arn      = aws_msk_configuration.shared[0].arn
+    revision = aws_msk_configuration.shared[0].latest_revision
   }
 
   broker_node_group_info {
@@ -746,18 +795,21 @@ resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
 }
 
 resource "random_password" "shared_kafka_critical_hmac_key" {
+  count   = local.shared_queue_uses_kafka ? 1 : 0
   length  = 48
   special = false
 }
 
 resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" {
-  name = "${local.resource_name}-shared-kafka-critical-hmac-key"
-  tags = local.common_tags
+  count = local.shared_queue_uses_kafka ? 1 : 0
+  name  = "${local.resource_name}-shared-kafka-critical-hmac-key"
+  tags  = local.common_tags
 }
 
 resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" {
-  secret_id     = aws_secretsmanager_secret.shared_kafka_critical_hmac_key.id
-  secret_string = random_password.shared_kafka_critical_hmac_key.result
+  count         = local.shared_queue_uses_kafka ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0].id
+  secret_string = random_password.shared_kafka_critical_hmac_key[0].result
 }
 
 data "aws_iam_policy_document" "proof_requestor_execution_access" {
@@ -875,94 +927,121 @@ data "aws_iam_policy_document" "proof_funder_execution_access" {
 }
 
 data "aws_iam_policy_document" "proof_requestor_task_access" {
-  statement {
-    sid = "AllowMSKConnect"
-    actions = [
-      "kafka-cluster:Connect",
-      "kafka-cluster:DescribeCluster",
-      "kafka-cluster:DescribeClusterDynamicConfiguration",
-    ]
-    resources = [aws_msk_cluster.shared.arn]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowMSKConnect"
+      actions = [
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeCluster",
+        "kafka-cluster:DescribeClusterDynamicConfiguration",
+      ]
+      resources = [local.shared_kafka_cluster_arn]
+    }
   }
 
-  statement {
-    sid = "AllowMSKTopicAccess"
-    actions = [
-      "kafka-cluster:CreateTopic",
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:DescribeTopicDynamicConfiguration",
-      "kafka-cluster:AlterTopic",
-      "kafka-cluster:ReadData",
-      "kafka-cluster:WriteData",
-      "kafka-cluster:WriteDataIdempotently",
-    ]
-    resources = ["${local.shared_kafka_topic_arn_prefix}/*"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowMSKTopicAccess"
+      actions = [
+        "kafka-cluster:CreateTopic",
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:DescribeTopicDynamicConfiguration",
+        "kafka-cluster:AlterTopic",
+        "kafka-cluster:ReadData",
+        "kafka-cluster:WriteData",
+        "kafka-cluster:WriteDataIdempotently",
+      ]
+      resources = ["${local.shared_kafka_topic_arn_prefix}/*"]
+    }
   }
 
-  statement {
-    sid = "AllowMSKGroupAccess"
-    actions = [
-      "kafka-cluster:AlterGroup",
-      "kafka-cluster:DescribeGroup",
-    ]
-    resources = ["${local.shared_kafka_group_arn_prefix}/*"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowMSKGroupAccess"
+      actions = [
+        "kafka-cluster:AlterGroup",
+        "kafka-cluster:DescribeGroup",
+      ]
+      resources = ["${local.shared_kafka_group_arn_prefix}/*"]
+    }
   }
 
-  statement {
-    sid = "AllowReadProofRequestsTopic"
-    actions = [
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:ReadData",
-    ]
-    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_request_topic}"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowReadProofRequestsTopic"
+      actions = [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:ReadData",
+      ]
+      resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_request_topic}"]
+    }
   }
 
-  statement {
-    sid = "AllowWriteProofResultsTopic"
-    actions = [
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:WriteData",
-    ]
-    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_result_topic}"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowWriteProofResultsTopic"
+      actions = [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:WriteData",
+      ]
+      resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_result_topic}"]
+    }
   }
 
-  statement {
-    sid = "AllowWriteProofFailuresTopic"
-    actions = [
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:WriteData",
-    ]
-    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_failure_topic}"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowWriteProofFailuresTopic"
+      actions = [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:WriteData",
+      ]
+      resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_failure_topic}"]
+    }
   }
 
-  statement {
-    sid = "AllowReadProofRequestorGroup"
-    actions = [
-      "kafka-cluster:AlterGroup",
-      "kafka-cluster:DescribeGroup",
-    ]
-    resources = ["${local.shared_kafka_group_arn_prefix}/${local.shared_proof_requestor_group}"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowReadProofRequestorGroup"
+      actions = [
+        "kafka-cluster:AlterGroup",
+        "kafka-cluster:DescribeGroup",
+      ]
+      resources = ["${local.shared_kafka_group_arn_prefix}/${local.shared_proof_requestor_group}"]
+    }
   }
 }
 
 data "aws_iam_policy_document" "proof_funder_task_access" {
-  statement {
-    sid = "AllowMSKConnect"
-    actions = [
-      "kafka-cluster:Connect",
-      "kafka-cluster:DescribeCluster",
-      "kafka-cluster:DescribeClusterDynamicConfiguration",
-    ]
-    resources = [aws_msk_cluster.shared.arn]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowMSKConnect"
+      actions = [
+        "kafka-cluster:Connect",
+        "kafka-cluster:DescribeCluster",
+        "kafka-cluster:DescribeClusterDynamicConfiguration",
+      ]
+      resources = [local.shared_kafka_cluster_arn]
+    }
   }
 
-  statement {
-    sid = "AllowWriteOpsAlertsTopic"
-    actions = [
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:WriteData",
-    ]
-    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_ops_alert_topic}"]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowWriteOpsAlertsTopic"
+      actions = [
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:WriteData",
+      ]
+      resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_ops_alert_topic}"]
+    }
   }
 }
 
@@ -979,12 +1058,14 @@ resource "aws_iam_role_policy" "proof_funder_execution_access" {
 }
 
 resource "aws_iam_role_policy" "proof_requestor_task_access" {
+  count  = local.shared_queue_uses_kafka ? 1 : 0
   name   = "${local.resource_name}-proof-requestor-task"
   role   = aws_iam_role.proof_requestor_task.id
   policy = data.aws_iam_policy_document.proof_requestor_task_access.json
 }
 
 resource "aws_iam_role_policy" "proof_funder_task_access" {
+  count  = local.shared_queue_uses_kafka ? 1 : 0
   name   = "${local.resource_name}-proof-funder-task"
   role   = aws_iam_role.proof_funder_task.id
   policy = data.aws_iam_policy_document.proof_funder_task_access.json
@@ -1364,22 +1445,25 @@ data "aws_iam_policy_document" "proof_role_access" {
     ]
   }
 
-  statement {
-    sid = "AllowProofRoleKafkaAccess"
-    actions = [
-      "kafka-cluster:Connect",
-      "kafka-cluster:AlterGroup",
-      "kafka-cluster:DescribeCluster",
-      "kafka-cluster:DescribeGroup",
-      "kafka-cluster:DescribeTopic",
-      "kafka-cluster:ReadData",
-      "kafka-cluster:WriteData",
-    ]
-    resources = [
-      local.shared_kafka_cluster_arn,
-      "${local.shared_kafka_topic_arn_prefix}/*",
-      "${local.shared_kafka_group_arn_prefix}/*",
-    ]
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowProofRoleKafkaAccess"
+      actions = [
+        "kafka-cluster:Connect",
+        "kafka-cluster:AlterGroup",
+        "kafka-cluster:DescribeCluster",
+        "kafka-cluster:DescribeGroup",
+        "kafka-cluster:DescribeTopic",
+        "kafka-cluster:ReadData",
+        "kafka-cluster:WriteData",
+      ]
+      resources = [
+        local.shared_kafka_cluster_arn,
+        "${local.shared_kafka_topic_arn_prefix}/*",
+        "${local.shared_kafka_group_arn_prefix}/*",
+      ]
+    }
   }
 }
 
