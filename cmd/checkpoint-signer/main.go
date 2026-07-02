@@ -95,9 +95,11 @@ func main() {
 		leaseName   = flag.String("lease-name", "checkpoint-signer", "lease name used for active signer selection")
 		leaseTTL    = flag.Duration("lease-ttl", 15*time.Second, "lease TTL for active signer selection")
 
-		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
-		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queueOutTopic = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
+		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
+		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+		queueOutTopic       = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
@@ -197,10 +199,18 @@ func main() {
 		_ = leaseStore.Release(context.Background(), strings.TrimSpace(*leaseName), strings.TrimSpace(*ownerID))
 	}()
 
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  *queueDriver,
-		Brokers: queue.SplitCommaList(*queueBrokers),
+	producerCfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
+		Driver:           *queueDriver,
+		Brokers:          queue.SplitCommaList(*queueBrokers),
+		PostgresDSN:      *queuePostgresDSN,
+		PostgresDSNEnv:   *queuePostgresDSNEnv,
+		StorePostgresDSN: *postgresDSN,
 	})
+	if err != nil {
+		log.Error("configure queue producer", "err", err)
+		os.Exit(2)
+	}
+	producer, err := queue.NewProducerContext(ctx, producerCfg)
 	if err != nil {
 		log.Error("init queue producer", "err", err)
 		os.Exit(2)
@@ -391,4 +401,40 @@ func pgxpoolReadinessCheck(pool *pgxpool.Pool) func(context.Context) error {
 		return nil
 	}
 	return pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+}
+
+type checkpointSignerQueueOptions struct {
+	Driver           string
+	Brokers          []string
+	PostgresDSN      string
+	PostgresDSNEnv   string
+	StorePostgresDSN string
+}
+
+func checkpointSignerQueueProducerConfig(opts checkpointSignerQueueOptions) (queue.ProducerConfig, error) {
+	cfg := queue.ProducerConfig{Driver: strings.TrimSpace(opts.Driver)}
+	switch strings.ToLower(strings.TrimSpace(opts.Driver)) {
+	case "", queue.DriverKafka:
+		cfg.Driver = queue.DriverKafka
+		cfg.Brokers = opts.Brokers
+	case queue.DriverPostgres:
+		dsn, err := checkpointSignerQueuePostgresDSN(opts)
+		if err != nil {
+			return queue.ProducerConfig{}, err
+		}
+		cfg.Driver = queue.DriverPostgres
+		cfg.PostgresDSN = dsn
+	case queue.DriverStdio:
+		cfg.Driver = queue.DriverStdio
+	default:
+		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
+	}
+	return cfg, nil
+}
+
+func checkpointSignerQueuePostgresDSN(opts checkpointSignerQueueOptions) (string, error) {
+	if strings.TrimSpace(opts.PostgresDSN) != "" || strings.TrimSpace(opts.PostgresDSNEnv) != "" {
+		return pgxpoolutil.ResolveDSN(opts.PostgresDSN, opts.PostgresDSNEnv)
+	}
+	return pgxpoolutil.ResolveDSN(opts.StorePostgresDSN, "")
 }

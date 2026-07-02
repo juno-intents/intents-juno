@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
 
@@ -172,6 +173,72 @@ func TestPublishCheckpointPackage_SignsCriticalQueuePayload(t *testing.T) {
 	}
 	if got := string(raw); !strings.Contains(got, `"version":"checkpoints.package.v1"`) {
 		t.Fatalf("unexpected raw payload %s", got)
+	}
+}
+
+func TestCheckpointAggregatorQueueConfigs_PostgresFallsBackToStoreDSN(t *testing.T) {
+	t.Parallel()
+
+	opts := checkpointAggregatorQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "checkpoint-aggregator",
+		Topics:           []string{"checkpoints.signatures.v1"},
+		QueueMaxBytes:    123,
+		MaxLineBytes:     456,
+	}
+	consumerCfg, err := checkpointAggregatorConsumerConfig(opts)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorConsumerConfig: %v", err)
+	}
+	if got, want := consumerCfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("consumer Driver = %q, want %q", got, want)
+	}
+	if got, want := consumerCfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("consumer PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := consumerCfg.Group, "checkpoint-aggregator"; got != want {
+		t.Fatalf("consumer Group = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(consumerCfg.Topics, ","), "checkpoints.signatures.v1"; got != want {
+		t.Fatalf("consumer Topics = %q, want %q", got, want)
+	}
+
+	producerCfg, err := checkpointAggregatorProducerConfig(opts)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorProducerConfig: %v", err)
+	}
+	if got, want := producerCfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("producer Driver = %q, want %q", got, want)
+	}
+	if got, want := producerCfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("producer PostgresDSN = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointAggregatorQueueConfigs_PostgresDSNEnvOverridesStoreDSN(t *testing.T) {
+	t.Setenv("CHECKPOINT_AGGREGATOR_QUEUE_DSN", "postgres://queue-db")
+
+	opts := checkpointAggregatorQueueOptions{
+		Driver:           queue.DriverPostgres,
+		PostgresDSNEnv:   "CHECKPOINT_AGGREGATOR_QUEUE_DSN",
+		StorePostgresDSN: "postgres://state-db",
+		Group:            "checkpoint-aggregator",
+		Topics:           []string{"checkpoints.signatures.v1"},
+	}
+	consumerCfg, err := checkpointAggregatorConsumerConfig(opts)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorConsumerConfig: %v", err)
+	}
+	if got, want := consumerCfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("consumer PostgresDSN = %q, want %q", got, want)
+	}
+	producerCfg, err := checkpointAggregatorProducerConfig(opts)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorProducerConfig: %v", err)
+	}
+	if got, want := producerCfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("producer PostgresDSN = %q, want %q", got, want)
 	}
 }
 

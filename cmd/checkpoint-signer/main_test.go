@@ -9,6 +9,7 @@ import (
 
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
 func TestLoadDigestSigner_AWSKMSRequiresOperatorAddress(t *testing.T) {
@@ -175,5 +176,42 @@ func TestSignerReadinessCheck_RequiresDBAndRPC(t *testing.T) {
 	}
 	if rpcCalls != 0 {
 		t.Fatalf("expected rpc check to be skipped after db failure, got %d calls", rpcCalls)
+	}
+}
+
+func TestCheckpointSignerQueueProducerConfig_PostgresFallsBackToStoreDSN(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+	})
+	if err != nil {
+		t.Fatalf("checkpointSignerQueueProducerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://state-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointSignerQueueProducerConfig_PostgresDSNEnvOverridesStoreDSN(t *testing.T) {
+	t.Setenv("CHECKPOINT_SIGNER_QUEUE_DSN", "postgres://queue-db")
+
+	cfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
+		Driver:           queue.DriverPostgres,
+		PostgresDSNEnv:   "CHECKPOINT_SIGNER_QUEUE_DSN",
+		StorePostgresDSN: "postgres://state-db",
+	})
+	if err != nil {
+		t.Fatalf("checkpointSignerQueueProducerConfig: %v", err)
+	}
+	if got, want := cfg.Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("Driver = %q, want %q", got, want)
+	}
+	if got, want := cfg.PostgresDSN, "postgres://queue-db"; got != want {
+		t.Fatalf("PostgresDSN = %q, want %q", got, want)
 	}
 }
