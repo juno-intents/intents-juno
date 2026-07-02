@@ -538,6 +538,8 @@ CHECKPOINT_OPERATORS=
 CHECKPOINT_THRESHOLD=1
 CHECKPOINT_POSTGRES_DSN=
 CHECKPOINT_KAFKA_BROKERS=
+OPERATOR_QUEUE_DRIVER=kafka
+CHECKPOINT_QUEUE_DRIVER=
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
 CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
 CHECKPOINT_BLOB_BUCKET=
@@ -564,12 +566,14 @@ DEPOSIT_RELAYER_BASE_RPC_URL=
 PROOF_REQUEST_TOPIC=proof.requests.v1
 PROOF_RESULT_TOPIC=proof.fulfillments.v1
 PROOF_FAILURE_TOPIC=proof.failures.v1
+PROOF_QUEUE_DRIVER=kafka
 DEPOSIT_IMAGE_ID=
 DEPOSIT_OWALLET_IVK=
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=200
 RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=200
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=200
 DEPOSIT_RELAYER_OWNER=
+DEPOSIT_RELAYER_QUEUE_DRIVER=
 DEPOSIT_RELAYER_QUEUE_GROUP=deposit-relayer
 DEPOSIT_RELAYER_QUEUE_TOPICS=deposits.event.v2,checkpoints.packages.v1
 DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP=
@@ -582,6 +586,7 @@ DEPOSIT_SCAN_JUNO_RPC_USER_ENV=JUNO_RPC_USER
 DEPOSIT_SCAN_JUNO_RPC_PASS_ENV=JUNO_RPC_PASS
 DEPOSIT_SCAN_POLL_INTERVAL=15s
 BASE_EVENT_SCANNER_ENABLED=false
+BASE_EVENT_SCANNER_QUEUE_DRIVER=
 BASE_EVENT_SCANNER_BASE_RPC_URL=
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
@@ -599,6 +604,7 @@ WITHDRAW_BLOB_PREFIX=withdraw-live
 WITHDRAW_IMAGE_ID=
 WITHDRAW_OWALLET_OVK=
 WITHDRAW_COORDINATOR_OWNER=
+WITHDRAW_COORDINATOR_QUEUE_DRIVER=
 WITHDRAW_COORDINATOR_QUEUE_GROUP=withdraw-coordinator
 WITHDRAW_COORDINATOR_QUEUE_TOPIC=withdrawals.requested.v2
 WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h
@@ -617,6 +623,7 @@ WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-exte
 WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=
 WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_FINALIZER_OWNER=
+WITHDRAW_FINALIZER_QUEUE_DRIVER=
 WITHDRAW_FINALIZER_QUEUE_GROUP=withdraw-finalizer
 WITHDRAW_FINALIZER_QUEUE_TOPICS=checkpoints.packages.v1
 WITHDRAW_FINALIZER_PROOF_RESPONSE_GROUP=
@@ -860,6 +867,42 @@ normalize_pcr() {
   printf '%s' "${raw,,}"
 }
 
+normalize_required_queue_driver() {
+  local key="$1"
+  local raw="${2:-}"
+  local fallback="${3:-kafka}"
+  local value
+  value="$(printf '%s' "${raw:-$fallback}" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    kafka|postgres)
+      printf '%s' "$value"
+      ;;
+    *)
+      fail "requires $key to be kafka or postgres"
+      ;;
+  esac
+}
+
+normalize_optional_queue_driver() {
+  local key="$1"
+  local raw="${2:-}"
+  local value
+  [[ -n "$raw" ]] || return 0
+  value="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    kafka|postgres)
+      printf '%s' "$value"
+      ;;
+    *)
+      fail "requires $key to be kafka or postgres"
+      ;;
+  esac
+}
+
+queue_driver_uses_kafka() {
+  [[ "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" == "kafka" ]]
+}
+
 required_key() {
   local key="$1"
   local value="$2"
@@ -871,6 +914,13 @@ load_secret_source "${OPERATOR_STACK_CONFIG_SECRET_ID:-}"
 
 checkpoint_postgres_dsn="$(resolve_value "CHECKPOINT_POSTGRES_DSN" "$(read_env_value CHECKPOINT_POSTGRES_DSN || true)" || true)"
 checkpoint_kafka_brokers="$(resolve_value "CHECKPOINT_KAFKA_BROKERS" "$(read_env_value CHECKPOINT_KAFKA_BROKERS || true)" || true)"
+operator_queue_driver="$(resolve_value "OPERATOR_QUEUE_DRIVER" "$(read_env_value OPERATOR_QUEUE_DRIVER || printf 'kafka')" || printf 'kafka')"
+checkpoint_queue_driver="$(resolve_value "CHECKPOINT_QUEUE_DRIVER" "$(read_env_value CHECKPOINT_QUEUE_DRIVER || true)" || true)"
+deposit_relayer_queue_driver="$(resolve_value "DEPOSIT_RELAYER_QUEUE_DRIVER" "$(read_env_value DEPOSIT_RELAYER_QUEUE_DRIVER || true)" || true)"
+withdraw_coordinator_queue_driver="$(resolve_value "WITHDRAW_COORDINATOR_QUEUE_DRIVER" "$(read_env_value WITHDRAW_COORDINATOR_QUEUE_DRIVER || true)" || true)"
+withdraw_finalizer_queue_driver="$(resolve_value "WITHDRAW_FINALIZER_QUEUE_DRIVER" "$(read_env_value WITHDRAW_FINALIZER_QUEUE_DRIVER || true)" || true)"
+base_event_scanner_queue_driver="$(resolve_value "BASE_EVENT_SCANNER_QUEUE_DRIVER" "$(read_env_value BASE_EVENT_SCANNER_QUEUE_DRIVER || true)" || true)"
+proof_queue_driver="$(resolve_value "PROOF_QUEUE_DRIVER" "$(read_env_value PROOF_QUEUE_DRIVER || printf 'kafka')" || printf 'kafka')"
 checkpoint_blob_bucket="$(resolve_value "CHECKPOINT_BLOB_BUCKET" "$(read_env_value CHECKPOINT_BLOB_BUCKET || true)" || true)"
 checkpoint_blob_prefix="$(resolve_value "CHECKPOINT_BLOB_PREFIX" "$(read_env_value CHECKPOINT_BLOB_PREFIX || true)" || true)"
 checkpoint_blob_sse_kms_key_id="$(resolve_value "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$(read_env_value CHECKPOINT_BLOB_SSE_KMS_KEY_ID || true)" || true)"
@@ -903,8 +953,37 @@ pcr0="$(resolve_value "TSS_NITRO_EXPECTED_PCR0" "$(read_env_value TSS_NITRO_EXPE
 pcr1="$(resolve_value "TSS_NITRO_EXPECTED_PCR1" "$(read_env_value TSS_NITRO_EXPECTED_PCR1 || true)" || true)"
 pcr2="$(resolve_value "TSS_NITRO_EXPECTED_PCR2" "$(read_env_value TSS_NITRO_EXPECTED_PCR2 || true)" || true)"
 
+operator_queue_driver="$(normalize_required_queue_driver OPERATOR_QUEUE_DRIVER "$operator_queue_driver" kafka)"
+checkpoint_queue_driver="$(normalize_optional_queue_driver CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver")"
+deposit_relayer_queue_driver="$(normalize_optional_queue_driver DEPOSIT_RELAYER_QUEUE_DRIVER "$deposit_relayer_queue_driver")"
+withdraw_coordinator_queue_driver="$(normalize_optional_queue_driver WITHDRAW_COORDINATOR_QUEUE_DRIVER "$withdraw_coordinator_queue_driver")"
+withdraw_finalizer_queue_driver="$(normalize_optional_queue_driver WITHDRAW_FINALIZER_QUEUE_DRIVER "$withdraw_finalizer_queue_driver")"
+base_event_scanner_queue_driver="$(normalize_optional_queue_driver BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver")"
+proof_queue_driver="$(normalize_required_queue_driver PROOF_QUEUE_DRIVER "$proof_queue_driver" kafka)"
+
+effective_checkpoint_queue_driver="${checkpoint_queue_driver:-$operator_queue_driver}"
+effective_deposit_relayer_queue_driver="${deposit_relayer_queue_driver:-$operator_queue_driver}"
+effective_withdraw_coordinator_queue_driver="${withdraw_coordinator_queue_driver:-$operator_queue_driver}"
+effective_withdraw_finalizer_queue_driver="${withdraw_finalizer_queue_driver:-$operator_queue_driver}"
+effective_base_event_scanner_queue_driver="${base_event_scanner_queue_driver:-$operator_queue_driver}"
+queue_uses_kafka=false
+for effective_queue_driver in \
+  "$effective_checkpoint_queue_driver" \
+  "$effective_deposit_relayer_queue_driver" \
+  "$effective_withdraw_coordinator_queue_driver" \
+  "$effective_withdraw_finalizer_queue_driver" \
+  "$effective_base_event_scanner_queue_driver" \
+  "$proof_queue_driver"
+do
+  if queue_driver_uses_kafka "$effective_queue_driver"; then
+    queue_uses_kafka=true
+  fi
+done
+
 required_key "CHECKPOINT_POSTGRES_DSN" "$checkpoint_postgres_dsn"
-required_key "CHECKPOINT_KAFKA_BROKERS" "$checkpoint_kafka_brokers"
+if [[ "$queue_uses_kafka" == true ]]; then
+  required_key "CHECKPOINT_KAFKA_BROKERS when an effective queue driver uses kafka" "$checkpoint_kafka_brokers"
+fi
 required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
 required_key "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$checkpoint_blob_sse_kms_key_id"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
@@ -927,29 +1006,31 @@ case "$checkpoint_postgres_dsn" in
     ;;
 esac
 
-case "${kafka_tls,,}" in
-  1|true|yes|on)
-    kafka_tls="true"
-    ;;
-  *)
-    fail "requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport"
-    ;;
-esac
-case "$(printf '%s' "${kafka_auth_mode:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    kafka_auth_mode="aws-msk-iam"
-    ;;
-  *)
-    fail "requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport"
-    ;;
-esac
-if [[ -z "$kafka_aws_region" ]]; then
-  kafka_aws_region="$(read_env_value AWS_REGION || true)"
+if [[ "$queue_uses_kafka" == true ]]; then
+  case "${kafka_tls,,}" in
+    1|true|yes|on)
+      kafka_tls="true"
+      ;;
+    *)
+      fail "requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport"
+      ;;
+  esac
+  case "$(printf '%s' "${kafka_auth_mode:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      kafka_auth_mode="aws-msk-iam"
+      ;;
+    *)
+      fail "requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport"
+      ;;
+  esac
+  if [[ -z "$kafka_aws_region" ]]; then
+    kafka_aws_region="$(read_env_value AWS_REGION || true)"
+  fi
+  if [[ -z "$kafka_aws_region" ]]; then
+    kafka_aws_region="$(read_env_value AWS_DEFAULT_REGION || true)"
+  fi
+  required_key "JUNO_QUEUE_KAFKA_AWS_REGION when JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" "$kafka_aws_region"
 fi
-if [[ -z "$kafka_aws_region" ]]; then
-  kafka_aws_region="$(read_env_value AWS_DEFAULT_REGION || true)"
-fi
-required_key "JUNO_QUEUE_KAFKA_AWS_REGION when JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" "$kafka_aws_region"
 
 checkpoint_signer_driver="$(printf '%s' "${checkpoint_signer_driver:-}" | tr '[:upper:]' '[:lower:]')"
 case "$checkpoint_signer_driver" in
@@ -992,6 +1073,13 @@ chmod 0600 "$tmp_env"
 
 set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
+set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"
+set_env_value "$tmp_env" CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver"
+set_env_value "$tmp_env" DEPOSIT_RELAYER_QUEUE_DRIVER "$deposit_relayer_queue_driver"
+set_env_value "$tmp_env" WITHDRAW_COORDINATOR_QUEUE_DRIVER "$withdraw_coordinator_queue_driver"
+set_env_value "$tmp_env" WITHDRAW_FINALIZER_QUEUE_DRIVER "$withdraw_finalizer_queue_driver"
+set_env_value "$tmp_env" BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver"
+set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
@@ -1282,10 +1370,6 @@ set +a
   echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "checkpoint-signer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
 [[ -n "${CHECKPOINT_SIGNATURE_TOPIC:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_SIGNATURE_TOPIC in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1310,36 +1394,60 @@ if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTG
   echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "${kafka_tls_value,,}" in
-  1|true|yes|on)
-    export JUNO_QUEUE_KAFKA_TLS=true
+checkpoint_queue_driver="$(printf '%s' "${CHECKPOINT_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_queue_args=(--queue-driver "${checkpoint_queue_driver}")
+checkpoint_requires_kafka_auth=false
+case "${checkpoint_queue_driver}" in
+  kafka)
+    [[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+      echo "checkpoint-signer requires CHECKPOINT_KAFKA_BROKERS when CHECKPOINT_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    checkpoint_queue_args+=(--queue-brokers "${CHECKPOINT_KAFKA_BROKERS}")
+    checkpoint_requires_kafka_auth=true
+    ;;
+  postgres)
+    checkpoint_queue_args+=(--queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN)
     ;;
   *)
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    echo "checkpoint-signer supports CHECKPOINT_QUEUE_DRIVER kafka or postgres, got ${checkpoint_queue_driver}" >&2
     exit 1
     ;;
 esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
-    ;;
-  *)
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
-    exit 1
-    ;;
-esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
+if [[ "$checkpoint_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+      ;;
+    *)
+      echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
   fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
-export JUNO_QUEUE_KAFKA_AWS_REGION
 signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
@@ -1382,8 +1490,7 @@ exec /usr/local/bin/checkpoint-signer \
   --lease-name "${checkpoint_signer_lease_name}" \
   --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
   --lease-driver postgres \
-  --queue-driver kafka \
-  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  "${checkpoint_queue_args[@]}" \
   --queue-output-topic "$CHECKPOINT_SIGNATURE_TOPIC" \
   --health-port "${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
 EOF_SIGNER
@@ -1398,10 +1505,6 @@ source /etc/intents-juno/operator-stack.env
 set +a
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "checkpoint-aggregator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
 [[ -n "${CHECKPOINT_BLOB_BUCKET:-}" ]] || {
@@ -1436,36 +1539,60 @@ if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTG
   echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "${kafka_tls_value,,}" in
-  1|true|yes|on)
-    export JUNO_QUEUE_KAFKA_TLS=true
+checkpoint_queue_driver="$(printf '%s' "${CHECKPOINT_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_queue_args=(--queue-driver "${checkpoint_queue_driver}")
+checkpoint_requires_kafka_auth=false
+case "${checkpoint_queue_driver}" in
+  kafka)
+    [[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+      echo "checkpoint-aggregator requires CHECKPOINT_KAFKA_BROKERS when CHECKPOINT_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    checkpoint_queue_args+=(--queue-brokers "${CHECKPOINT_KAFKA_BROKERS}")
+    checkpoint_requires_kafka_auth=true
+    ;;
+  postgres)
+    checkpoint_queue_args+=(--queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN)
     ;;
   *)
-    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    echo "checkpoint-aggregator supports CHECKPOINT_QUEUE_DRIVER kafka or postgres, got ${checkpoint_queue_driver}" >&2
     exit 1
     ;;
 esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
-    ;;
-  *)
-    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
-    exit 1
-    ;;
-esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
+if [[ "$checkpoint_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+      ;;
+    *)
+      echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
   fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
-export JUNO_QUEUE_KAFKA_AWS_REGION
 checkpoint_aggregator_queue_group="${CHECKPOINT_AGGREGATOR_QUEUE_GROUP:-checkpoint-aggregator-${OPERATOR_ADDRESS}}"
 exec /usr/local/bin/checkpoint-aggregator \
   --base-chain-id "${BASE_CHAIN_ID}" \
@@ -1480,8 +1607,7 @@ exec /usr/local/bin/checkpoint-aggregator \
   --ipfs-enabled=true \
   --ipfs-api-url "$CHECKPOINT_IPFS_API_URL" \
   ${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"} \
-  --queue-driver kafka \
-  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  "${checkpoint_queue_args[@]}" \
   --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
   --queue-output-topic "${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
   --queue-group "${checkpoint_aggregator_queue_group}" \
@@ -1890,10 +2016,6 @@ export_optional_env_vars JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGI
   echo "deposit-relayer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "deposit-relayer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
 [[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
   echo "deposit-relayer requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1926,36 +2048,82 @@ if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTG
   echo "deposit-relayer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "${kafka_tls_value,,}" in
-  1|true|yes|on)
-    export JUNO_QUEUE_KAFKA_TLS=true
+deposit_queue_driver="$(printf '%s' "${DEPOSIT_RELAYER_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+deposit_queue_args=(--queue-driver "${deposit_queue_driver}")
+deposit_requires_kafka_auth=false
+case "${deposit_queue_driver}" in
+  kafka)
+    deposit_queue_brokers="${DEPOSIT_RELAYER_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${deposit_queue_brokers}" ]] || {
+      echo "deposit-relayer requires DEPOSIT_RELAYER_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when DEPOSIT_RELAYER_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    deposit_queue_args+=(--queue-brokers "${deposit_queue_brokers}")
+    deposit_requires_kafka_auth=true
+    ;;
+  postgres)
+    deposit_queue_args+=(--queue-postgres-dsn-env "${DEPOSIT_RELAYER_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
     ;;
   *)
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    echo "deposit-relayer supports DEPOSIT_RELAYER_QUEUE_DRIVER kafka or postgres, got ${deposit_queue_driver}" >&2
     exit 1
     ;;
 esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+deposit_proof_queue_driver="$(printf '%s' "${PROOF_QUEUE_DRIVER:-kafka}" | tr '[:upper:]' '[:lower:]')"
+deposit_proof_queue_args=(--proof-queue-driver "${deposit_proof_queue_driver}")
+case "${deposit_proof_queue_driver}" in
+  kafka)
+    deposit_proof_queue_brokers="${PROOF_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${deposit_proof_queue_brokers}" ]] || {
+      echo "deposit-relayer requires PROOF_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when PROOF_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    deposit_proof_queue_args+=(--proof-queue-brokers "${deposit_proof_queue_brokers}")
+    deposit_requires_kafka_auth=true
+    ;;
+  postgres)
+    deposit_proof_queue_args+=(--proof-queue-postgres-dsn-env "${PROOF_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
     ;;
   *)
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "deposit-relayer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${deposit_proof_queue_driver}" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
+if [[ "$deposit_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "deposit-relayer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+      ;;
+    *)
+      echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
   fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
-export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
 deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-25}"
@@ -2008,8 +2176,8 @@ args=(
   --proof-result-topic "${PROOF_RESULT_TOPIC:-proof.fulfillments.v1}"
   --proof-failure-topic "${PROOF_FAILURE_TOPIC:-proof.failures.v1}"
   --proof-response-group "${deposit_proof_response_group}"
-  --queue-driver kafka
-  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  "${deposit_proof_queue_args[@]}"
+  "${deposit_queue_args[@]}"
   --queue-group "${deposit_queue_group}"
   --queue-topics "${deposit_queue_topics}"
   --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-200}"
@@ -2065,10 +2233,6 @@ export_optional_env_vars() {
 export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "withdraw-coordinator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
 [[ -n "${BASE_CHAIN_ID:-}" ]] || {
@@ -2151,36 +2315,61 @@ if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTG
   echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "${kafka_tls_value,,}" in
-  1|true|yes|on)
-    export JUNO_QUEUE_KAFKA_TLS=true
+withdraw_coord_queue_driver="$(printf '%s' "${WITHDRAW_COORDINATOR_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+withdraw_coord_queue_args=(--queue-driver "${withdraw_coord_queue_driver}")
+withdraw_coord_requires_kafka_auth=false
+case "${withdraw_coord_queue_driver}" in
+  kafka)
+    withdraw_coord_queue_brokers="${WITHDRAW_COORDINATOR_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${withdraw_coord_queue_brokers}" ]] || {
+      echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when WITHDRAW_COORDINATOR_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    withdraw_coord_queue_args+=(--queue-brokers "${withdraw_coord_queue_brokers}")
+    withdraw_coord_requires_kafka_auth=true
+    ;;
+  postgres)
+    withdraw_coord_queue_args+=(--queue-postgres-dsn-env "${WITHDRAW_COORDINATOR_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
     ;;
   *)
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    echo "withdraw-coordinator supports WITHDRAW_COORDINATOR_QUEUE_DRIVER kafka or postgres, got ${withdraw_coord_queue_driver}" >&2
     exit 1
     ;;
 esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
-    ;;
-  *)
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
-    exit 1
-    ;;
-esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
+if [[ "$withdraw_coord_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+      ;;
+    *)
+      echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
   fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
-export JUNO_QUEUE_KAFKA_AWS_REGION
 txbuild_bin="${WITHDRAW_COORDINATOR_TXBUILD_BIN:-juno-txbuild}"
 command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
@@ -2208,8 +2397,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --owner "${withdraw_coord_owner}" \
   --claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}" \
   --max-items "${withdraw_coord_max_items}" \
-  --queue-driver kafka \
-  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}" \
+  "${withdraw_coord_queue_args[@]}" \
   --queue-group "${withdraw_coord_queue_group}" \
   --queue-topics "${withdraw_coord_queue_topics}" \
   --juno-txbuild-bin "${txbuild_bin}" \
@@ -2300,10 +2488,6 @@ export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FI
   echo "withdraw-finalizer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "withdraw-finalizer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
 [[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
   echo "withdraw-finalizer requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -2365,37 +2549,82 @@ if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTG
   echo "withdraw-finalizer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "${kafka_tls_value,,}" in
-  1|true|yes|on)
-    export JUNO_QUEUE_KAFKA_TLS=true
+withdraw_finalizer_queue_driver="$(printf '%s' "${WITHDRAW_FINALIZER_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+withdraw_finalizer_queue_args=(--queue-driver "${withdraw_finalizer_queue_driver}")
+withdraw_finalizer_requires_kafka_auth=false
+case "${withdraw_finalizer_queue_driver}" in
+  kafka)
+    withdraw_finalizer_queue_brokers="${WITHDRAW_FINALIZER_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${withdraw_finalizer_queue_brokers}" ]] || {
+      echo "withdraw-finalizer requires WITHDRAW_FINALIZER_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when WITHDRAW_FINALIZER_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    withdraw_finalizer_queue_args+=(--queue-brokers "${withdraw_finalizer_queue_brokers}")
+    withdraw_finalizer_requires_kafka_auth=true
+    ;;
+  postgres)
+    withdraw_finalizer_queue_args+=(--queue-postgres-dsn-env "${WITHDRAW_FINALIZER_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
     ;;
   *)
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    echo "withdraw-finalizer supports WITHDRAW_FINALIZER_QUEUE_DRIVER kafka or postgres, got ${withdraw_finalizer_queue_driver}" >&2
     exit 1
     ;;
 esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+withdraw_finalizer_proof_queue_driver="$(printf '%s' "${PROOF_QUEUE_DRIVER:-kafka}" | tr '[:upper:]' '[:lower:]')"
+withdraw_finalizer_proof_queue_args=(--proof-queue-driver "${withdraw_finalizer_proof_queue_driver}")
+case "${withdraw_finalizer_proof_queue_driver}" in
+  kafka)
+    withdraw_finalizer_proof_queue_brokers="${PROOF_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${withdraw_finalizer_proof_queue_brokers}" ]] || {
+      echo "withdraw-finalizer requires PROOF_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when PROOF_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    withdraw_finalizer_proof_queue_args+=(--proof-queue-brokers "${withdraw_finalizer_proof_queue_brokers}")
+    withdraw_finalizer_requires_kafka_auth=true
+    ;;
+  postgres)
+    withdraw_finalizer_proof_queue_args+=(--proof-queue-postgres-dsn-env "${PROOF_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
     ;;
   *)
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "withdraw-finalizer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${withdraw_finalizer_proof_queue_driver}" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
+if [[ "$withdraw_finalizer_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam)
+      export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+      ;;
+    *)
+      echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
   fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
-export JUNO_QUEUE_KAFKA_AWS_REGION
-export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
 
 withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
 withdraw_finalizer_queue_group="${WITHDRAW_FINALIZER_QUEUE_GROUP:-withdraw-finalizer}"
@@ -2425,8 +2654,8 @@ args=(
   --proof-result-topic "${PROOF_RESULT_TOPIC:-proof.fulfillments.v1}"
   --proof-failure-topic "${PROOF_FAILURE_TOPIC:-proof.failures.v1}"
   --proof-response-group "${withdraw_finalizer_proof_response_group}"
-  --queue-driver kafka
-  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  "${withdraw_finalizer_proof_queue_args[@]}"
+  "${withdraw_finalizer_queue_args[@]}"
   --queue-group "${withdraw_finalizer_queue_group}"
   --queue-topics "${withdraw_finalizer_queue_topics}"
   --blob-driver s3
@@ -2468,14 +2697,64 @@ export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY
   echo "base-event-scanner requires BASE_EVENT_SCANNER_BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
-  echo "base-event-scanner requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
 [[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {
   echo "base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+
+base_event_queue_driver="$(printf '%s' "${BASE_EVENT_SCANNER_QUEUE_DRIVER:-${OPERATOR_QUEUE_DRIVER:-kafka}}" | tr '[:upper:]' '[:lower:]')"
+base_event_queue_args=(--queue-driver "${base_event_queue_driver}")
+base_event_requires_kafka_auth=false
+case "${base_event_queue_driver}" in
+  kafka)
+    base_event_queue_brokers="${BASE_EVENT_SCANNER_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+    [[ -n "${base_event_queue_brokers}" ]] || {
+      echo "base-event-scanner requires BASE_EVENT_SCANNER_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when BASE_EVENT_SCANNER_QUEUE_DRIVER=kafka" >&2
+      exit 1
+    }
+    base_event_queue_args+=(--queue-brokers "${base_event_queue_brokers}")
+    base_event_requires_kafka_auth=true
+    ;;
+  postgres)
+    base_event_queue_args+=(--queue-postgres-dsn-env "${BASE_EVENT_SCANNER_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+    ;;
+  *)
+    echo "base-event-scanner supports BASE_EVENT_SCANNER_QUEUE_DRIVER kafka or postgres, got ${base_event_queue_driver}" >&2
+    exit 1
+    ;;
+esac
+if [[ "$base_event_requires_kafka_auth" == true ]]; then
+  kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+  case "${kafka_tls_value,,}" in
+    1|true|yes|on)
+      export JUNO_QUEUE_KAFKA_TLS=true
+      ;;
+    *)
+      echo "base-event-scanner requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+    aws-msk-iam) export JUNO_QUEUE_KAFKA_AUTH_MODE="aws-msk-iam" ;;
+    *)
+      echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+    if [[ -n "${AWS_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+    elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+    else
+      echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+      exit 1
+    fi
+  fi
+  export JUNO_QUEUE_KAFKA_AWS_REGION
+else
+  [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
+fi
 
 args=(
   --base-rpc-url "${BASE_EVENT_SCANNER_BASE_RPC_URL}"
@@ -2483,34 +2762,12 @@ args=(
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
   --start-block "${BASE_EVENT_SCANNER_START_BLOCK}"
   --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
-  --queue-driver kafka
-  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  "${base_event_queue_args[@]}"
   --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v2}"
   --health-port "${BASE_EVENT_SCANNER_HEALTH_PORT:-18306}"
 )
 
-case "${JUNO_QUEUE_KAFKA_TLS:-}" in
-  true|1|yes) export JUNO_QUEUE_KAFKA_TLS="true" ;;
-esac
-case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam) export JUNO_QUEUE_KAFKA_AUTH_MODE="aws-msk-iam" ;;
-  *)
-    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
-    exit 1
-    ;;
-esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
-export JUNO_QUEUE_KAFKA_AWS_REGION
-
+export CHECKPOINT_POSTGRES_DSN
 exec /usr/local/bin/base-event-scanner "${args[@]}"
 EOF_BASE_EVENT_SCANNER
   sudo install -m 0755 /tmp/intents-juno-base-event-scanner.sh /usr/local/bin/intents-juno-base-event-scanner.sh

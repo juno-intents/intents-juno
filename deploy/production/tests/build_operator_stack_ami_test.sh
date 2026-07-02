@@ -60,6 +60,21 @@ render_wrapper() {
   chmod 0755 "$target"
 }
 
+render_hydrator() {
+  local target="$1"
+  local stack_env_file="$2"
+  local hydrator_env_file="$3"
+  local junocashd_conf_file="$4"
+  local text
+
+  text="$(extract_block "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" "EOF_CONFIG_HYDRATOR")"
+  text="${text//\/etc\/intents-juno\/operator-stack.env/$stack_env_file}"
+  text="${text//\/etc\/intents-juno\/operator-stack-hydrator.env/$hydrator_env_file}"
+  text="${text//\/etc\/intents-juno\/junocashd.conf/$junocashd_conf_file}"
+  printf '%s\n' "$text" >"$target"
+  chmod 0755 "$target"
+}
+
 assert_standard_hardening() {
   local unit_text="$1"
   local unit_name="$2"
@@ -280,6 +295,10 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"' "config hydrator persists checkpoint signer driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"' "config hydrator persists checkpoint signer kms key id"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"' "config hydrator persists checkpoint blob sse kms key id"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"' "config hydrator persists the operator queue driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"' "config hydrator persists the proof queue driver"
+  assert_contains "$hydrator_script" 'for effective_queue_driver in \' "config hydrator evaluates effective queue drivers"
+  assert_contains "$hydrator_script" 'if [[ "$queue_uses_kafka" == true ]]; then' "config hydrator validates kafka auth only when an effective queue driver uses kafka"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" JUNO_SCAN_BEARER_TOKEN "$juno_scan_bearer_token"' "config hydrator persists optional juno scan bearer token when present"
   assert_contains "$hydrator_script" 'delete_env_value "$tmp_env" JUNO_SCAN_BEARER_TOKEN' "config hydrator clears optional juno scan bearer token when absent"
@@ -396,7 +415,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   local deposit_relayer_wrapper
   deposit_relayer_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
   assert_contains "$deposit_relayer_wrapper" 'export_optional_env_vars JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "deposit relayer exports AWS SDK env when present"
-  assert_contains "$deposit_relayer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "deposit relayer exports queueauth env to the binary"
+  assert_contains "$deposit_relayer_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "deposit relayer exports queue and queueauth env to the binary"
 
   local withdraw_wrapper
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
@@ -404,7 +423,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   local withdraw_finalizer_wrapper
   withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
-  assert_contains "$withdraw_finalizer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "withdraw finalizer exports queueauth env to the binary"
+  assert_contains "$withdraw_finalizer_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "withdraw finalizer exports queue and queueauth env to the binary"
 
   local juno_scan_backfill_wrapper
   juno_scan_backfill_wrapper="$(extract_block "cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'" "EOF_SCAN_BACKFILL")"
@@ -429,6 +448,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_not_contains "$script_text" 'rpc_user: $junocash_rpc_user' "bootstrap metadata does not publish RPC username"
   assert_not_contains "$script_text" 'rpc_password: $junocash_rpc_pass' "bootstrap metadata does not publish RPC password"
   assert_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=' "bootstrap env leaves base-event-scanner start block unset until deploy"
+  assert_contains "$script_text" 'OPERATOR_QUEUE_DRIVER=kafka' "bootstrap env defaults operator main queues to kafka"
+  assert_contains "$script_text" 'PROOF_QUEUE_DRIVER=kafka' "bootstrap env defaults proof queues to kafka"
   assert_contains "$script_text" 'DEPOSIT_RELAYER_BASE_RPC_URL=' "bootstrap env leaves the dedicated deposit relayer rpc url unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
   assert_contains "$script_text" 'JUNO_SCAN_BACKFILL_FROM_HEIGHT=0' "bootstrap env pins the scanner backfill floor"
@@ -550,6 +571,90 @@ EOF
 
   output="$("$wrapper")"
   assert_eq "$output" "archive-bytes" "digest fallback continues when SHA256SUMS omits the asset entry"
+
+  rm -rf "$tmp"
+}
+
+test_build_operator_stack_ami_hydrator_supports_full_postgres_queue_mode() {
+  local tmp fake_bin env_file hydrator_env_file junocashd_conf_file hydrator stderr_file
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  env_file="$tmp/operator-stack.env"
+  hydrator_env_file="$tmp/operator-stack-hydrator.env"
+  junocashd_conf_file="$tmp/junocashd.conf"
+  hydrator="$tmp/intents-juno-config-hydrator.sh"
+  stderr_file="$tmp/hydrator.stderr"
+  mkdir -p "$fake_bin"
+
+  cat >"$fake_bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$fake_bin/chown"
+  : >"$hydrator_env_file"
+  render_hydrator "$hydrator" "$env_file" "$hydrator_env_file" "$junocashd_conf_file"
+
+  cat >"$env_file" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+OPERATOR_QUEUE_DRIVER=postgres
+PROOF_QUEUE_DRIVER=postgres
+CHECKPOINT_BLOB_BUCKET=checkpoint-bucket
+CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/blob
+CHECKPOINT_IPFS_API_URL=http://127.0.0.1:5001
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/signer
+OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+BASE_RELAYER_PRIVATE_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BASE_RELAYER_AUTH_TOKEN=base-relayer-token
+TSS_AUTH_TOKEN=tss-token
+TSS_SIGNER_RUNTIME_MODE=host-process
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=wallet-coordinator
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-finalizer
+WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x2222222222222222222222222222222222222222=10.0.0.11:18443,0x3333333333333333333333333333333333333333=10.0.0.12:18444
+JUNO_RPC_USER=rpc-user
+JUNO_RPC_PASS=rpc-pass
+JUNO_RPC_BIND=127.0.0.1
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CHECKPOINT_OPERATORS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
+CHECKPOINT_THRESHOLD=1
+EOF
+
+  PATH="$fake_bin:$PATH" "$hydrator" 2>"$stderr_file"
+  assert_contains "$(cat "$env_file")" 'OPERATOR_QUEUE_DRIVER=postgres' "hydrator preserves full-postgres operator queue mode"
+  assert_contains "$(cat "$env_file")" 'PROOF_QUEUE_DRIVER=postgres' "hydrator preserves explicit proof queue postgres mode"
+  assert_contains "$(cat "$env_file")" 'CHECKPOINT_KAFKA_BROKERS=' "hydrator can leave kafka brokers empty in full-postgres mode"
+  assert_contains "$(cat "$junocashd_conf_file")" 'rpcbind=127.0.0.1' "hydrator still rewrites junocashd config in full-postgres mode"
+  assert_contains "$(cat "$stderr_file")" 'hydrated operator stack config from existing' "hydrator succeeds without kafka env in full-postgres mode"
+
+  cat >"$env_file" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+OPERATOR_QUEUE_DRIVER=postgres
+CHECKPOINT_BLOB_BUCKET=checkpoint-bucket
+CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/blob
+CHECKPOINT_IPFS_API_URL=http://127.0.0.1:5001
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/signer
+OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+BASE_RELAYER_PRIVATE_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BASE_RELAYER_AUTH_TOKEN=base-relayer-token
+TSS_AUTH_TOKEN=tss-token
+TSS_SIGNER_RUNTIME_MODE=host-process
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=wallet-coordinator
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-finalizer
+WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x2222222222222222222222222222222222222222=10.0.0.11:18443,0x3333333333333333333333333333333333333333=10.0.0.12:18444
+JUNO_RPC_USER=rpc-user
+JUNO_RPC_PASS=rpc-pass
+JUNO_RPC_BIND=127.0.0.1
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CHECKPOINT_OPERATORS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
+CHECKPOINT_THRESHOLD=1
+EOF
+
+  if PATH="$fake_bin:$PATH" "$hydrator" >"$tmp/hydrator.stdout" 2>"$stderr_file"; then
+    printf 'expected hydrator to require kafka brokers when proof queues default to kafka\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr_file")" "requires CHECKPOINT_KAFKA_BROKERS when an effective queue driver uses kafka" "hydrator still fails closed when proof queues default to kafka"
 
   rm -rf "$tmp"
 }
@@ -1225,6 +1330,164 @@ EOF
   rm -rf "$tmp"
 }
 
+test_build_operator_stack_ami_wrappers_support_postgres_main_queues() {
+  local tmp env_file fake_bin cert_file key_file signer_key output_prefix
+  tmp="$(mktemp -d)"
+  env_file="$tmp/operator-stack.env"
+  fake_bin="$tmp/bin"
+  output_prefix="$tmp/out"
+  mkdir -p "$fake_bin"
+
+  replace_bin() {
+    local wrapper="$1"
+    local binary_name="$2"
+    local replacement="$3"
+    python3 - "$wrapper" "$binary_name" "$replacement" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+binary_name = sys.argv[2]
+replacement = sys.argv[3]
+path.write_text(path.read_text().replace(f"/usr/local/bin/{binary_name}", replacement))
+EOF
+  }
+
+  write_fake_binary() {
+    local name="$1"
+    local output_file="$2"
+    cat >"$fake_bin/$name" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--help" && "$name" == "checkpoint-signer" ]]; then
+  cat <<'EOF_HELP'
+Usage of /usr/local/bin/checkpoint-signer:
+  -lease-name string
+  -signer-driver string
+  -kms-key-id string
+EOF_HELP
+  exit 0
+fi
+printf '%s\n' "\$*" >"$output_file"
+env | sort >"${output_file%.args}.env"
+exit 0
+EOF
+    chmod 0755 "$fake_bin/$name"
+  }
+
+  for name in checkpoint-signer checkpoint-aggregator deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+    write_fake_binary "$name" "$output_prefix.$name.args"
+  done
+  cat >"$fake_bin/juno-txbuild" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$fake_bin/juno-txbuild"
+
+  cert_file="$tmp/cert.pem"
+  key_file="$tmp/key.pem"
+  signer_key="$tmp/extend-signer"
+  printf 'cert' >"$cert_file"
+  printf 'key' >"$key_file"
+  cat >"$signer_key" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$signer_key"
+
+  cat >"$env_file" <<EOF
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+OPERATOR_QUEUE_DRIVER=postgres
+PROOF_QUEUE_DRIVER=postgres
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
+CHECKPOINT_BLOB_BUCKET=checkpoint-bucket
+CHECKPOINT_IPFS_API_URL=http://127.0.0.1:5001
+CHECKPOINT_OPERATORS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
+CHECKPOINT_THRESHOLD=2
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+DEPOSIT_IMAGE_ID=deposit-image
+WITHDRAW_IMAGE_ID=withdraw-image
+BASE_RELAYER_URL=https://127.0.0.1:18081
+BASE_RPC_URL=https://127.0.0.1:8545
+BASE_RELAYER_AUTH_TOKEN=base-relayer-token
+WITHDRAW_BLOB_BUCKET=withdraw-bucket
+WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-finalizer
+WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
+JUNO_RPC_USER=rpc-user
+JUNO_RPC_PASS=rpc-pass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=wallet-coordinator
+WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=utest1changeaddress
+WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
+TSS_AUTH_TOKEN=tss-token
+WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=$cert_file
+WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$cert_file
+WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$key_file
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$signer_key
+WITHDRAW_BLOB_PREFIX=withdraw-live
+JUNO_SCAN_BEARER_TOKEN=scan-token
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BASE_EVENT_SCANNER_BASE_RPC_URL=https://127.0.0.1:8545
+BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+BASE_EVENT_SCANNER_START_BLOCK=12345
+EOF
+
+  render_wrapper "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER" "$tmp/checkpoint-signer.sh" "$env_file"
+  render_wrapper "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "EOF_AGG" "$tmp/checkpoint-aggregator.sh" "$env_file"
+  render_wrapper "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER" "$tmp/deposit-relayer.sh" "$env_file"
+  render_wrapper "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR" "$tmp/withdraw-coordinator.sh" "$env_file"
+  render_wrapper "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER" "$tmp/withdraw-finalizer.sh" "$env_file"
+  render_wrapper "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER" "$tmp/base-event-scanner.sh" "$env_file"
+
+  replace_bin "$tmp/checkpoint-aggregator.sh" checkpoint-aggregator "$fake_bin/checkpoint-aggregator"
+  replace_bin "$tmp/deposit-relayer.sh" deposit-relayer "$fake_bin/deposit-relayer"
+  replace_bin "$tmp/withdraw-finalizer.sh" withdraw-finalizer "$fake_bin/withdraw-finalizer"
+  replace_bin "$tmp/base-event-scanner.sh" base-event-scanner "$fake_bin/base-event-scanner"
+
+  PATH="$fake_bin:$PATH" "$tmp/checkpoint-signer.sh"
+  PATH="$fake_bin:$PATH" "$tmp/checkpoint-aggregator.sh"
+  PATH="$fake_bin:$PATH" "$tmp/deposit-relayer.sh"
+  PATH="$fake_bin:$PATH" "$tmp/withdraw-coordinator.sh"
+  PATH="$fake_bin:$PATH" "$tmp/withdraw-finalizer.sh"
+  PATH="$fake_bin:$PATH" "$tmp/base-event-scanner.sh"
+
+  for name in checkpoint-signer checkpoint-aggregator deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+    assert_contains "$(cat "$output_prefix.$name.args")" '--queue-driver postgres' "$name wrapper selects postgres for the main queue"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name wrapper passes queue DSN by env indirection"
+    assert_not_contains "$(cat "$output_prefix.$name.args")" '--queue-brokers' "$name wrapper does not pass kafka brokers for postgres queue mode"
+    assert_contains "$(cat "$output_prefix.$name.env")" 'CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require' "$name wrapper exports the queue DSN env value"
+  done
+  for name in deposit-relayer withdraw-finalizer; do
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-driver postgres' "$name wrapper can cut proof queues over explicitly"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name wrapper passes proof queue DSN by env indirection"
+    assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-brokers' "$name wrapper does not pass proof kafka brokers for postgres proof queue mode"
+  done
+
+  cat >"$env_file" <<EOF
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+BASE_EVENT_SCANNER_BASE_RPC_URL=https://127.0.0.1:8545
+BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+BASE_EVENT_SCANNER_START_BLOCK=12345
+JUNO_QUEUE_KAFKA_TLS=false
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+AWS_REGION=us-east-1
+EOF
+  if PATH="$fake_bin:$PATH" "$tmp/base-event-scanner.sh" >"$tmp/base-event-scanner.stdout" 2>"$tmp/base-event-scanner.stderr"; then
+    printf 'expected base-event-scanner wrapper to reject kafka mode without TLS\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$tmp/base-event-scanner.stderr")" "base-event-scanner requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" "base-event-scanner fails closed when kafka TLS is disabled"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
   test_build_operator_stack_ami_pins_hardfork_juno_toolchain
@@ -1233,10 +1496,12 @@ main() {
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_supports_builder_only_junocashd_reindex
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
+  test_build_operator_stack_ami_hydrator_supports_full_postgres_queue_mode
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
   test_build_operator_stack_ami_waits_for_juno_scan_catchup_before_imaging
   test_build_operator_stack_ami_juno_scan_backfill_wrapper_resumes_progress
   test_build_operator_stack_ami_wrapper_smoke
+  test_build_operator_stack_ami_wrappers_support_postgres_main_queues
 }
 
 main "$@"
