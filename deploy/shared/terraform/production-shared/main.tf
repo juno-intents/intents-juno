@@ -1440,7 +1440,43 @@ data "aws_iam_policy_document" "proof_role_access" {
       var.shared_sp1_requestor_secret_arn,
       var.shared_sp1_funder_secret_arn,
       aws_secretsmanager_secret.shared_postgres_dsn.arn,
+      aws_secretsmanager_secret.shared_ipfs_api_bearer_token.arn,
     ]
+  }
+
+  statement {
+    sid = "AllowProofRoleCanaryRDSRead"
+    actions = [
+      "rds:DescribeDBClusters",
+    ]
+    resources = [aws_rds_cluster.shared.arn]
+  }
+
+  dynamic "statement" {
+    for_each = local.shared_queue_uses_kafka ? [1] : []
+    content {
+      sid = "AllowProofRoleCanaryKafkaRead"
+      actions = [
+        "kafka:DescribeClusterV2",
+      ]
+      resources = [local.shared_kafka_cluster_arn]
+    }
+  }
+
+  statement {
+    sid = "AllowProofRoleCanaryELBRead"
+    actions = [
+      "elasticloadbalancing:DescribeTargetHealth",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "AllowProofRoleCanaryASGRead"
+    actions = [
+      "autoscaling:DescribeAutoScalingGroups",
+    ]
+    resources = ["*"]
   }
 
   statement {

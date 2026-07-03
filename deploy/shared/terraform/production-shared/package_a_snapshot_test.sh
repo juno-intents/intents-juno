@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block critical_hmac_random critical_hmac_secret critical_hmac_version key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block critical_hmac_random critical_hmac_secret critical_hmac_version key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg proof_role_access wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
@@ -31,6 +31,11 @@ main() {
   ' "$SCRIPT_DIR/main.tf")"
   proof_role_launch_template="$(awk '
     /resource "aws_launch_template" "proof_role" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  proof_role_access="$(awk '
+    /data "aws_iam_policy_document" "proof_role_access" \{/ { in_block = 1 }
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/main.tf")"
@@ -131,6 +136,13 @@ main() {
   assert_contains "$main_tf" 'resource "aws_iam_instance_profile" "proof_role"' "production-shared provisions a proof-role instance profile"
   assert_contains "$main_tf" 'resource "aws_iam_role_policy_attachment" "proof_role_ssm_managed_instance_core"' "production-shared attaches SSM managed instance core to the proof-role instance role"
   assert_contains "$main_tf" 'policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"' "production-shared uses the AWS-managed SSM instance core policy for proof-role canaries"
+  assert_contains "$proof_role_access" 'aws_secretsmanager_secret.shared_ipfs_api_bearer_token.arn' "production-shared proof-role canary can read the scoped IPFS bearer token secret"
+  assert_contains "$proof_role_access" '"rds:DescribeDBClusters"' "production-shared proof-role canary can verify Aurora cluster metadata"
+  assert_contains "$proof_role_access" 'resources = [aws_rds_cluster.shared.arn]' "production-shared proof-role canary scopes Aurora metadata reads to the shared cluster"
+  assert_contains "$proof_role_access" '"kafka:DescribeClusterV2"' "production-shared proof-role canary can verify MSK cluster metadata"
+  assert_contains "$proof_role_access" 'resources = [local.shared_kafka_cluster_arn]' "production-shared proof-role canary scopes MSK metadata reads to the shared cluster"
+  assert_contains "$proof_role_access" '"elasticloadbalancing:DescribeTargetHealth"' "production-shared proof-role canary can verify IPFS target-group health"
+  assert_contains "$proof_role_access" '"autoscaling:DescribeAutoScalingGroups"' "production-shared proof-role canary can verify shared role capacity"
   assert_contains "$proof_role_launch_template" 'run_with_retry apt-get install -y ca-certificates curl jq netcat-openbsd postgresql-client unzip' "production-shared proof-role bootstrap installs shared canary network dependencies"
   assert_contains "$proof_role_launch_template" 'snap list amazon-ssm-agent' "production-shared proof-role bootstrap prefers the preinstalled snap SSM agent when present"
   assert_contains "$proof_role_launch_template" 'snap.amazon-ssm-agent.amazon-ssm-agent.service' "production-shared proof-role bootstrap enables and starts the snap SSM agent service"
