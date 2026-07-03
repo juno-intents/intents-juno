@@ -70,6 +70,8 @@ RUNNER_PUBLIC_IP=""
 RUNNER_SSH_USER="ubuntu"
 SHARED_POSTGRES_ENDPOINT=""
 SHARED_POSTGRES_DSN=""
+SHARED_QUEUE_DRIVER="kafka"
+SHARED_PROOF_QUEUE_DRIVER=""
 SHARED_KAFKA_BROKERS=""
 SHARED_IPFS_API_URL=""
 SHARED_ECS_CLUSTER_ARN=""
@@ -148,6 +150,10 @@ Options:
   --base-funder-key-file <p>   Override Base funder key file
   --sp1-requestor-key-file <p> Override SP1 requestor key file
   --sp1-funder-key-file <p>    Override SP1 proof-funder key file
+  --shared-queue-driver <driver>
+                              Shared queue driver for operator/checkpoint paths (kafka|postgres, default: kafka)
+  --shared-proof-queue-driver <driver>
+                              Proof-service queue driver override (kafka|postgres, default: follows shared queue driver)
 
 Auto-discovered secrets (override with flags if needed):
   Base funder key:       tmp/funders/base-funder.key
@@ -185,6 +191,8 @@ parse_args() {
       --base-funder-key-file)   BASE_FUNDER_KEY_FILE="$2"; shift 2 ;;
       --sp1-requestor-key-file) SP1_REQUESTOR_KEY_FILE="$2"; shift 2 ;;
       --sp1-funder-key-file)    SP1_FUNDER_KEY_FILE="$2"; shift 2 ;;
+      --shared-queue-driver)    SHARED_QUEUE_DRIVER="$2"; shift 2 ;;
+      --shared-proof-queue-driver) SHARED_PROOF_QUEUE_DRIVER="$2"; shift 2 ;;
       --keep-infra)             KEEP_INFRA=true; shift ;;
       --min-deposit-amount)     MIN_DEPOSIT_AMOUNT="$2"; shift 2 ;;
       --min-withdraw-amount)    MIN_WITHDRAW_AMOUNT="$2"; shift 2 ;;
@@ -195,6 +203,22 @@ parse_args() {
 
   WORKDIR="${WORKDIR:-$REPO_ROOT/tmp/e2e-local}"
   CHECKPOINT_DIR="$WORKDIR/.checkpoints"
+
+  SHARED_QUEUE_DRIVER="$(tr '[:upper:]' '[:lower:]' <<<"$SHARED_QUEUE_DRIVER")"
+  case "$SHARED_QUEUE_DRIVER" in
+    kafka|postgres) ;;
+    *) die "--shared-queue-driver must be kafka or postgres" ;;
+  esac
+  SHARED_PROOF_QUEUE_DRIVER="$(tr '[:upper:]' '[:lower:]' <<<"$SHARED_PROOF_QUEUE_DRIVER")"
+  if [[ -n "$SHARED_PROOF_QUEUE_DRIVER" ]]; then
+    case "$SHARED_PROOF_QUEUE_DRIVER" in
+      kafka|postgres) ;;
+      *) die "--shared-proof-queue-driver must be kafka or postgres" ;;
+    esac
+    if [[ "$SHARED_QUEUE_DRIVER" == "postgres" && "$SHARED_PROOF_QUEUE_DRIVER" == "kafka" ]]; then
+      die "--shared-proof-queue-driver kafka is invalid when --shared-queue-driver postgres removes MSK"
+    fi
+  fi
 }
 
 # ── Auto-discovery ───────────────────────────────────────────────────────────
@@ -424,8 +448,8 @@ generate_tfvars() {
     --arg shared_sp1_funder_secret_arn "$sp1_funder_secret_arn" \
     --argjson shared_postgres_port 5432 \
     --argjson shared_kafka_port 9098 \
-    --arg shared_queue_driver "kafka" \
-    --arg shared_proof_queue_driver "kafka" \
+    --arg shared_queue_driver "$SHARED_QUEUE_DRIVER" \
+    --arg shared_proof_queue_driver "$SHARED_PROOF_QUEUE_DRIVER" \
     --argjson runner_associate_public_ip_address true \
     --argjson operator_associate_public_ip_address true \
     --argjson shared_ecs_assign_public_ip true \
@@ -593,8 +617,19 @@ read_tf_outputs() {
   SHARED_POSTGRES_DSN="postgres://postgres:${pg_password}@${SHARED_POSTGRES_ENDPOINT}:${pg_port:-5432}/intents_e2e?sslmode=require"
   ok "Postgres: $SHARED_POSTGRES_ENDPOINT"
 
+  SHARED_QUEUE_DRIVER="$(_tf_out shared_queue_driver)"
+  [[ -n "$SHARED_QUEUE_DRIVER" ]] || SHARED_QUEUE_DRIVER="kafka"
+  SHARED_PROOF_QUEUE_DRIVER="$(_tf_out shared_proof_queue_driver)"
+  [[ -n "$SHARED_PROOF_QUEUE_DRIVER" ]] || SHARED_PROOF_QUEUE_DRIVER="$SHARED_QUEUE_DRIVER"
+  ok "Queue drivers: shared=$SHARED_QUEUE_DRIVER proof=$SHARED_PROOF_QUEUE_DRIVER"
+
   SHARED_KAFKA_BROKERS="$(_tf_out shared_kafka_bootstrap_brokers)"
-  ok "Kafka: ${SHARED_KAFKA_BROKERS:0:60}..."
+  if [[ "$SHARED_QUEUE_DRIVER" == "kafka" || "$SHARED_PROOF_QUEUE_DRIVER" == "kafka" ]]; then
+    [[ -n "$SHARED_KAFKA_BROKERS" ]] || die "shared kafka brokers are required while any active queue path uses kafka"
+    ok "Kafka: ${SHARED_KAFKA_BROKERS:0:60}..."
+  else
+    ok "Kafka: skipped (all active queue paths use postgres)"
+  fi
 
   SHARED_IPFS_NLB_URL="$(_tf_out shared_ipfs_api_url)"
   # IPFS runs in a separate ASG behind the NLB, not on the runner.
@@ -1191,6 +1226,8 @@ provision_operator_stack_config() {
   config_json="$(jq -n \
     --arg checkpoint_postgres_dsn "$SHARED_POSTGRES_DSN" \
     --arg checkpoint_kafka_brokers "$SHARED_KAFKA_BROKERS" \
+    --arg shared_queue_driver "$SHARED_QUEUE_DRIVER" \
+    --arg shared_proof_queue_driver "$SHARED_PROOF_QUEUE_DRIVER" \
     --arg checkpoint_ipfs_api_url "$SHARED_IPFS_API_URL" \
     --arg checkpoint_blob_bucket "$DKG_S3_BUCKET" \
     --arg checkpoint_blob_prefix "checkpoint-packages" \
@@ -1199,6 +1236,9 @@ provision_operator_stack_config() {
     '{
       CHECKPOINT_POSTGRES_DSN: $checkpoint_postgres_dsn,
       CHECKPOINT_KAFKA_BROKERS: $checkpoint_kafka_brokers,
+      OPERATOR_QUEUE_DRIVER: $shared_queue_driver,
+      CHECKPOINT_QUEUE_DRIVER: $shared_queue_driver,
+      PROOF_QUEUE_DRIVER: $shared_proof_queue_driver,
       CHECKPOINT_IPFS_API_URL: $checkpoint_ipfs_api_url,
       CHECKPOINT_BLOB_BUCKET: $checkpoint_blob_bucket,
       CHECKPOINT_BLOB_PREFIX: $checkpoint_blob_prefix,
@@ -1241,6 +1281,24 @@ CFGSCRIPT
   done
 
   ok "operator-stack-config.json deployed to all ${#OPERATOR_PUBLIC_IPS[@]} operators"
+}
+
+build_run_testnet_queue_args_block() {
+  local block=""
+
+  if [[ "$SHARED_QUEUE_DRIVER" == "kafka" || "$SHARED_PROOF_QUEUE_DRIVER" == "kafka" ]]; then
+    [[ -n "$SHARED_KAFKA_BROKERS" ]] || die "shared kafka brokers are required while any active queue path uses kafka"
+    block+="  --shared-kafka-brokers $(printf '%q' "$SHARED_KAFKA_BROKERS") \\"$'\n'
+  fi
+  if [[ "$SHARED_QUEUE_DRIVER" == "postgres" ]]; then
+    block+="  --operator-queue-driver postgres \\"$'\n'
+    block+="  --checkpoint-queue-driver postgres \\"$'\n'
+  fi
+  if [[ "$SHARED_PROOF_QUEUE_DRIVER" == "postgres" ]]; then
+    block+="  --proof-queue-driver postgres \\"$'\n'
+  fi
+
+  printf '%s' "$block"
 }
 
 # ── Scale ECS proof services ─────────────────────────────────────────────────
@@ -1590,7 +1648,8 @@ run_e2e_test() {
     warn "could not extract TSS CA PEM; withdraw-coordinator TLS may fail"
 
   # Build the remote run script
-  local remote_run_script
+  local remote_run_script run_testnet_queue_args_block
+  run_testnet_queue_args_block="$(build_run_testnet_queue_args_block)"
   remote_run_script="$(cat <<REMOTESCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1645,8 +1704,7 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --sp1-witness-recipient-ufvk "$witness_ufvk" \\
   --sp1-input-s3-bucket "$DKG_S3_BUCKET" \\
   --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
-  --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
-  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+$run_testnet_queue_args_block  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
   --operator-checkpoint-ipfs-api-url "$SHARED_IPFS_NLB_URL" \\
   --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
   --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\
@@ -2172,7 +2230,8 @@ run_deploy_on_runner() {
     warn "could not extract TSS CA PEM; withdraw-coordinator TLS may fail"
 
   # Build the remote deploy script
-  local remote_run_script
+  local remote_run_script run_testnet_queue_args_block
+  run_testnet_queue_args_block="$(build_run_testnet_queue_args_block)"
   remote_run_script="$(cat <<REMOTESCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2223,8 +2282,7 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh deploy \\
   --sp1-witness-recipient-ufvk "$witness_ufvk" \\
   --sp1-input-s3-bucket "$DKG_S3_BUCKET" \\
   --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
-  --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
-  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+$run_testnet_queue_args_block  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
   --operator-checkpoint-ipfs-api-url "$SHARED_IPFS_NLB_URL" \\
   --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
   --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\

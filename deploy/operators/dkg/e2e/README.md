@@ -25,7 +25,7 @@ Current behavior:
 - `run-testnet-e2e.sh`:
   - Orchestrates DKG backup/restore plus Base testnet deploy and bridge smoke transactions.
   - Supports `--dkg-summary-path` to reuse a precomputed distributed DKG result.
-  - Requires shared Postgres/Kafka/IPFS (`--shared-postgres-dsn`, `--shared-kafka-brokers`, `--shared-ipfs-api-url`), validates them via `cmd/shared-infra-e2e`, then runs centralized `proof-requestor` + `proof-funder` services (ECS-managed when shared ECS options are provided) and submits proof jobs through Kafka topics.
+  - Requires shared Postgres/IPFS and requires Kafka brokers only while any active queue path still uses Kafka. Full Postgres queue mode uses `--operator-queue-driver postgres --checkpoint-queue-driver postgres --proof-queue-driver postgres`, validates via `cmd/shared-infra-e2e`, then runs centralized `proof-requestor` + `proof-funder` services (ECS-managed when shared ECS options are provided).
 - `run-testnet-e2e-aws.sh`:
   - Provisions a dedicated AWS EC2 runner with Terraform, managed shared services (Aurora Postgres + MSK + ECS + IPFS pinning ASG), and one dedicated EC2 per operator.
   - Supports pre-baked AMIs (`--runner-ami-id`, `--operator-ami-id`, `--shared-ami-id`) so operators can boot from pre-synced images (`--shared-ami-id` applies to IPFS ASG instances).

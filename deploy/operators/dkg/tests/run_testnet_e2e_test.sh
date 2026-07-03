@@ -1371,6 +1371,42 @@ test_local_e2e_uses_msk_iam_port_for_managed_shared_services() {
   assert_contains "$script_text" 'SP1 requestor and funder secret ARNs must differ' "local e2e rejects identical proof secret arns"
 }
 
+test_local_e2e_can_run_all_postgres_queue_mode() {
+  local local_script script_text
+  local_script="$SCRIPT_DIR/../e2e/run-e2e-local.sh"
+  script_text="$(cat "$local_script")"
+
+  assert_contains "$script_text" 'SHARED_QUEUE_DRIVER="kafka"' "local e2e defaults the shared queue driver to kafka"
+  assert_contains "$script_text" 'SHARED_PROOF_QUEUE_DRIVER=""' "local e2e lets proof queue driver follow shared by default"
+  assert_contains "$script_text" '--shared-queue-driver <driver>' "local e2e documents shared queue driver override"
+  assert_contains "$script_text" '--shared-proof-queue-driver <driver>' "local e2e documents proof queue driver override"
+  assert_contains "$script_text" '--shared-queue-driver)' "local e2e parses shared queue driver override"
+  assert_contains "$script_text" '--shared-proof-queue-driver)' "local e2e parses proof queue driver override"
+  assert_contains "$script_text" '--arg shared_queue_driver "$SHARED_QUEUE_DRIVER"' "local e2e writes selected shared queue driver to terraform tfvars"
+  assert_contains "$script_text" '--arg shared_proof_queue_driver "$SHARED_PROOF_QUEUE_DRIVER"' "local e2e writes selected proof queue driver to terraform tfvars"
+  assert_contains "$script_text" 'SHARED_QUEUE_DRIVER="$(_tf_out shared_queue_driver)"' "local e2e reads effective shared queue driver from terraform outputs"
+  assert_contains "$script_text" 'SHARED_PROOF_QUEUE_DRIVER="$(_tf_out shared_proof_queue_driver)"' "local e2e reads effective proof queue driver from terraform outputs"
+  assert_contains "$script_text" 'OPERATOR_QUEUE_DRIVER: $shared_queue_driver' "local e2e stages operator queue driver into operator config"
+  assert_contains "$script_text" 'CHECKPOINT_QUEUE_DRIVER: $shared_queue_driver' "local e2e stages checkpoint queue driver into operator config"
+  assert_contains "$script_text" 'PROOF_QUEUE_DRIVER: $shared_proof_queue_driver' "local e2e stages proof queue driver into operator config"
+  assert_contains "$script_text" 'build_run_testnet_queue_args_block() {' "local e2e builds queue-aware run-testnet args"
+  assert_contains "$script_text" 'if [[ "$SHARED_QUEUE_DRIVER" == "kafka" || "$SHARED_PROOF_QUEUE_DRIVER" == "kafka" ]]; then' "local e2e only forwards kafka brokers while a queue path still uses kafka"
+  assert_contains "$script_text" '--operator-queue-driver postgres' "local e2e forwards postgres operator queue cutover"
+  assert_contains "$script_text" '--checkpoint-queue-driver postgres' "local e2e forwards postgres checkpoint queue cutover"
+  assert_contains "$script_text" '--proof-queue-driver postgres' "local e2e forwards postgres proof queue cutover"
+  assert_contains "$script_text" '$run_testnet_queue_args_block' "local e2e injects selected queue args into remote run/deploy scripts"
+}
+
+test_run_testnet_docs_allow_all_postgres_queue_mode() {
+  local script_text readme_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+  readme_text="$(cat "$SCRIPT_DIR/../e2e/README.md")"
+
+  assert_contains "$script_text" 'shared Kafka brokers CSV (required when any active queue path uses Kafka)' "run-testnet help documents conditional kafka broker requirement"
+  assert_contains "$readme_text" 'Requires shared Postgres/IPFS and requires Kafka brokers only while any active queue path still uses Kafka' "e2e README documents postgres queue mode"
+  assert_contains "$readme_text" '--operator-queue-driver postgres --checkpoint-queue-driver postgres --proof-queue-driver postgres' "e2e README documents full postgres queue cutover flags"
+}
+
 test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
   local workflow_text workflow_file
   workflow_file="$SCRIPT_DIR/../../../../.github/workflows/deploy-production-canaries.yml"
@@ -1469,6 +1505,8 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_aws_wrapper_defaults_operator_hosts_to_aggressive_cost_shape
   test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers
   test_local_e2e_uses_msk_iam_port_for_managed_shared_services
+  test_local_e2e_can_run_all_postgres_queue_mode
+  test_run_testnet_docs_allow_all_postgres_queue_mode
   test_deploy_production_canaries_excludes_legacy_aws_e2e_paths
 }
 

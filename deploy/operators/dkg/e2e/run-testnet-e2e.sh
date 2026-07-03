@@ -99,7 +99,7 @@ Options:
   --sp1-auction-timeout <duration> SP1 auction timeout (default: 625s)
   --sp1-request-timeout <duration> SP1 request timeout (default: 1500s)
   --shared-postgres-dsn <dsn>       shared Postgres DSN (required; proof-requestor/proof-funder store + lease backend)
-  --shared-kafka-brokers <list>     shared Kafka brokers CSV (required; centralized proof request/fulfillment topics)
+  --shared-kafka-brokers <list>     shared Kafka brokers CSV (required when any active queue path uses Kafka)
   --shared-ipfs-api-url <url>       shared IPFS API URL (required; runner-side shared-infra checkpoint pin/fetch verification)
   --operator-checkpoint-ipfs-api-url <url>
                                    optional operator checkpoint IPFS API URL override (defaults to --shared-ipfs-api-url)
