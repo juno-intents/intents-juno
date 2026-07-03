@@ -1524,19 +1524,44 @@ resource "aws_launch_template" "proof_role" {
     #!/usr/bin/env bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y ca-certificates curl jq unzip
+    run_with_retry() {
+      local attempt
+      for attempt in 1 2 3 4 5; do
+        if "$@"; then
+          return 0
+        fi
+        sleep "$((attempt * 5))"
+      done
+      "$@"
+    }
+    run_with_retry apt-get update -y
+    run_with_retry apt-get install -y ca-certificates curl jq unzip
     arch="$(uname -m)"
     case "$arch" in
       x86_64) awscli_arch="x86_64" ;;
       aarch64|arm64) awscli_arch="aarch64" ;;
       *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
     esac
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    run_with_retry curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
     rm -rf /tmp/aws
     unzip -q /tmp/awscliv2.zip -d /tmp
     /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
     rm -rf /tmp/aws /tmp/awscliv2.zip
+    case "$arch" in
+      x86_64) ssm_agent_arch="debian_amd64" ;;
+      aarch64|arm64) ssm_agent_arch="debian_arm64" ;;
+    esac
+    if snap list amazon-ssm-agent >/dev/null 2>&1; then
+      systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+      systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || snap start amazon-ssm-agent
+    else
+      ssm_agent_deb="/tmp/amazon-ssm-agent.deb"
+      run_with_retry curl -fsSL "https://s3.${var.aws_region}.amazonaws.com/amazon-ssm-${var.aws_region}/latest/$${ssm_agent_arch}/amazon-ssm-agent.deb" -o "$ssm_agent_deb"
+      run_with_retry dpkg -i "$ssm_agent_deb"
+      systemctl enable amazon-ssm-agent
+      systemctl start amazon-ssm-agent
+      rm -f "$ssm_agent_deb"
+    fi
 
     install -d -m 0755 /etc/intents-juno /var/lib/intents-juno
     requestor_secret_arn="${var.shared_sp1_requestor_secret_arn}"
@@ -1658,6 +1683,10 @@ resource "aws_autoscaling_group" "proof_role" {
   lifecycle {
     create_before_destroy = true
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.proof_role_ssm_managed_instance_core,
+  ]
 }
 
 resource "aws_lb" "ipfs" {
