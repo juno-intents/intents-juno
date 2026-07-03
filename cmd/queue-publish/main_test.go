@@ -345,6 +345,52 @@ func TestQueuePublishProducerConfiguresShadow(t *testing.T) {
 	}
 }
 
+func TestQueuePublishProducerConfiguresPostgresPrimaryKafkaShadow(t *testing.T) {
+	t.Setenv("QUEUE_POSTGRES_DSN", "postgres://user:pass@127.0.0.1:5432/db")
+
+	var configs []queue.ProducerConfig
+	var calls []string
+	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		name := cfg.Driver
+		if len(configs) == 2 {
+			name = "shadow-" + cfg.Driver
+		}
+		return &recordingQueuePublishProducer{name: name, calls: &calls}, nil
+	}
+
+	producer, err := queuePublishProducer(queuePublishProducerOptions{
+		Driver:         queue.DriverPostgres,
+		PostgresDSNEnv: "QUEUE_POSTGRES_DSN",
+		ShadowDriver:   queue.DriverKafka,
+		ShadowBrokers:  "b-1.example:9098,b-2.example:9098",
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("queuePublishProducer: %v", err)
+	}
+	if err := producer.Publish(context.Background(), "proof.requests.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("config count = %d, want 2", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := configs[0].PostgresDSN, "postgres://user:pass@127.0.0.1:5432/db"; got != want {
+		t.Fatalf("primary PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := configs[1].Driver, queue.DriverKafka; got != want {
+		t.Fatalf("shadow driver = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(configs[1].Brokers, ","), "b-1.example:9098,b-2.example:9098"; got != want {
+		t.Fatalf("shadow brokers = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(calls, ","), "postgres:proof.requests.v1:payload,shadow-kafka:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
 func TestQueuePublishProducerCanRequireShadow(t *testing.T) {
 	shadowErr := errors.New("shadow down")
 	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {

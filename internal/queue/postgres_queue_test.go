@@ -543,6 +543,7 @@ func TestPostgresQueueAcceptsProductionTopicNames(t *testing.T) {
 		"proof.failures.v1",
 		"ops.alerts.v1",
 		"checkpoints.signatures.v1",
+		"checkpoints.package.v1",
 		"checkpoints.packages.v1",
 		"deposits.event.v2",
 		"withdrawals.requested.v2",
