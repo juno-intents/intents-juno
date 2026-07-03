@@ -2480,10 +2480,12 @@ production_ssm_stage_file() {
   local source_path="$4"
   local destination_path="$5"
   local mode="${6:-0640}"
+  local destination_dir_mode="${7:-0755}"
   local chunk_size="${PRODUCTION_SSM_STAGE_CHUNK_SIZE:-12000}"
 
   [[ -f "$source_path" ]] || die "stage source file not found: $source_path"
   [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "invalid stage file mode: $mode"
+  [[ "$destination_dir_mode" =~ ^[0-7]{3,4}$ ]] || die "invalid stage destination dir mode: $destination_dir_mode"
   [[ "$chunk_size" =~ ^[0-9]+$ && "$chunk_size" -gt 0 && "$chunk_size" -le 24000 ]] \
     || die "invalid SSM stage chunk size: $chunk_size"
   have_cmd base64 || die "required command not found: base64"
@@ -2513,7 +2515,7 @@ EOF
 
   command="$(cat <<EOF
 set -euo pipefail
-sudo install -d -m 0755 $destination_dir_q
+sudo install -d -m $destination_dir_mode $destination_dir_q
 sudo rm -f $remote_tmp_b64_q $remote_tmp_file_q
 sudo install -m 0600 /dev/null $remote_tmp_b64_q
 EOF

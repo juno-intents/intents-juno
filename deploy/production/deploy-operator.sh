@@ -18,6 +18,8 @@ Options:
   --operator-deploy PATH      Operator deploy manifest (required)
   --dkg-tls-dir PATH          Override DKG coordinator TLS dir from manifest
   --force                     Redeploy even when rollout-state already marks this operator done
+  --prepare-only              Stage the remote deployment package without applying it
+  --apply-prepared            Apply an already staged remote deployment package
   --dry-run                   Print actions without mutating remote state
 EOF
 }
@@ -25,6 +27,8 @@ EOF
 operator_deploy=""
 dkg_tls_dir_override=""
 force="false"
+prepare_only="false"
+apply_prepared="false"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +36,8 @@ while [[ $# -gt 0 ]]; do
     --operator-deploy) operator_deploy="$2"; shift 2 ;;
     --dkg-tls-dir) dkg_tls_dir_override="$2"; shift 2 ;;
     --force) force="true"; shift ;;
+    --prepare-only) prepare_only="true"; shift ;;
+    --apply-prepared) apply_prepared="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -40,6 +46,9 @@ done
 
 [[ -n "$operator_deploy" ]] || die "--operator-deploy is required"
 [[ -f "$operator_deploy" ]] || die "operator deploy manifest not found: $operator_deploy"
+if [[ "$prepare_only" == "true" && "$apply_prepared" == "true" ]]; then
+  die "--prepare-only and --apply-prepared are mutually exclusive"
+fi
 
 manifest_dir="$(cd "$(dirname "$operator_deploy")" && pwd)"
 environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
@@ -92,17 +101,27 @@ fi
 [[ -n "$runtime_material_region" ]] || die "operator deploy manifest is missing runtime_material_ref.region"
 [[ -n "$runtime_material_kms_key_id" ]] || die "operator deploy manifest is missing runtime_material_ref.kms_key_id"
 [[ -n "$runtime_config_secret_region" ]] || die "operator deploy manifest is missing runtime_config_secret_region"
-dkg_tls_dir="$dkg_tls_dir_override"
-if [[ -z "$dkg_tls_dir" ]]; then
-  dkg_tls_dir="$(production_json_optional "$operator_deploy" '.dkg_tls_dir')"
+dkg_tls_dir_manifest="$(production_json_optional "$operator_deploy" '.dkg_tls_dir')"
+if [[ "$apply_prepared" == "true" && -n "$dkg_tls_dir_override" ]]; then
+  die "--dkg-tls-dir cannot be used with --apply-prepared; apply uses the prepared package"
 fi
-if [[ -n "$dkg_tls_dir" ]]; then
-  dkg_tls_dir="$(production_abs_path "$manifest_dir" "$dkg_tls_dir")"
-  [[ -d "$dkg_tls_dir" ]] || die "dkg tls dir not found: $dkg_tls_dir"
-  [[ -f "$dkg_tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $dkg_tls_dir"
-  [[ -f "$dkg_tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $dkg_tls_dir"
-  [[ -f "$dkg_tls_dir/coordinator-client.pem" ]] || die "dkg tls dir missing coordinator-client.pem: $dkg_tls_dir"
-  [[ -f "$dkg_tls_dir/coordinator-client.key" ]] || die "dkg tls dir missing coordinator-client.key: $dkg_tls_dir"
+if [[ "$prepare_only" == "true" && -n "$dkg_tls_dir_override" && -z "$dkg_tls_dir_manifest" ]]; then
+  die "--dkg-tls-dir with --prepare-only requires dkg_tls_dir in the deploy manifest so --apply-prepared can validate the package"
+fi
+dkg_tls_dir=""
+if [[ "$apply_prepared" != "true" ]]; then
+  dkg_tls_dir="$dkg_tls_dir_override"
+  if [[ -z "$dkg_tls_dir" ]]; then
+    dkg_tls_dir="$dkg_tls_dir_manifest"
+  fi
+  if [[ -n "$dkg_tls_dir" ]]; then
+    dkg_tls_dir="$(production_abs_path "$manifest_dir" "$dkg_tls_dir")"
+    [[ -d "$dkg_tls_dir" ]] || die "dkg tls dir not found: $dkg_tls_dir"
+    [[ -f "$dkg_tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $dkg_tls_dir"
+    [[ -f "$dkg_tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $dkg_tls_dir"
+    [[ -f "$dkg_tls_dir/coordinator-client.pem" ]] || die "dkg tls dir missing coordinator-client.pem: $dkg_tls_dir"
+    [[ -f "$dkg_tls_dir/coordinator-client.key" ]] || die "dkg tls dir missing coordinator-client.key: $dkg_tls_dir"
+  fi
 fi
 
 public_endpoint="$(production_json_optional "$operator_deploy" '.public_endpoint')"
@@ -115,6 +134,8 @@ current_status="$(jq -r --arg operator_id "$operator_id" '.operators[] | select(
 if [[ "$current_status" == "done" ]]; then
   if [[ "$force" == "true" ]]; then
     log "operator $operator_id already marked done in rollout state; forcing redeploy"
+  elif [[ "$apply_prepared" == "true" ]]; then
+    die "--apply-prepared requires --force when rollout state already marks operator $operator_id done"
   else
     log "operator $operator_id already marked done in rollout state"
     exit 0
@@ -131,6 +152,7 @@ config_hydrator_stage="$tmp_dir/intents-juno-config-hydrator.sh"
 operator_stack_hydrator_env="$tmp_dir/operator-stack-hydrator.env"
 signer_ufvk_file="$tmp_dir/ufvk.txt"
 dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
+stage_manifest_file="$tmp_dir/deploy-stage-manifest.json"
 run_operator_rollout_stage="$tmp_dir/run-operator-rollout.sh"
 generated_base_relayer_tls_files=()
 generated_dkg_server_tls_files=()
@@ -476,6 +498,355 @@ wait_for_remote_service_active() {
     fi
   done
   die "service $svc did not become active on $operator_host (last status: ${status:-unknown})"
+}
+
+sha256_hex_file() {
+  local path="$1"
+  if have_cmd sha256sum; then
+    sha256sum "$path" | awk '{print $1}'
+    return 0
+  fi
+  shasum -a 256 "$path" | awk '{print $1}'
+}
+
+stage_file_mode() {
+  local source_path="$1"
+  case "$(basename "$source_path")" in
+    *.sh)
+      printf '0755\n'
+      ;;
+    *.key|ufvk.txt|operator-stack-hydrator.env)
+      printf '0600\n'
+      ;;
+    *)
+      printf '0640\n'
+      ;;
+  esac
+}
+
+write_stage_manifest() {
+  local output_file="$1"
+  local entries_file source_path file_mode file_sha
+
+  entries_file="$(mktemp)"
+  for source_path in "${files_to_copy[@]}"; do
+    file_mode="$(stage_file_mode "$source_path")"
+    file_sha="$(sha256_hex_file "$source_path")"
+    jq -n \
+      --arg path "$(basename "$source_path")" \
+      --arg mode "$file_mode" \
+      --arg sha256 "$file_sha" \
+      '{path: $path, mode: $mode, sha256: $sha256}' >>"$entries_file"
+  done
+  jq -s \
+    --arg operator_id "$operator_id" \
+    --arg runtime_dir "$runtime_dir" \
+    --arg remote_stage_dir "$remote_stage_dir" \
+    '{
+      schema_version: 1,
+      operator_id: $operator_id,
+      runtime_dir: $runtime_dir,
+      remote_stage_dir: $remote_stage_dir,
+      files: sort_by(.path)
+    }' "$entries_file" >"$output_file"
+  rm -f "$entries_file"
+}
+
+require_prepared_stage_file_matches_local() {
+  local remote_manifest_json="$1"
+  local stage_path="$2"
+  local local_path="$3"
+  local remote_sha local_sha
+
+  [[ -f "$local_path" ]] || die "local deploy input missing for prepared package comparison: $local_path"
+  remote_sha="$(jq -r --arg path "$stage_path" '.files[] | select(.path == $path) | .sha256 // empty' <<<"$remote_manifest_json" | head -n 1)"
+  [[ -n "$remote_sha" && "$remote_sha" != "null" ]] || die "prepared deploy stage manifest is missing $stage_path"
+  local_sha="$(sha256_hex_file "$local_path")"
+  remote_sha="$(lower "$remote_sha")"
+  local_sha="$(lower "$local_sha")"
+  [[ "$remote_sha" == "$local_sha" ]] \
+    || die "prepared deploy stage $stage_path does not match local deploy input; rerun --prepare-only"
+}
+
+require_prepared_stage_files_match_local() {
+  local remote_manifest_json="$1"
+  local source_path stage_path
+
+  for source_path in "${files_to_copy[@]}"; do
+    stage_path="$(basename "$source_path")"
+    [[ "$stage_path" == "$(basename "$stage_manifest_file")" ]] && continue
+    require_prepared_stage_file_matches_local "$remote_manifest_json" "$stage_path" "$source_path"
+  done
+}
+
+is_optional_tls_stage_file() {
+  case "$1" in
+    base-relayer-server.pem|base-relayer-server.key|dkg-server.pem|dkg-server.key|ca.pem|coordinator-client.pem|coordinator-client.key)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+array_contains() {
+  local needle="$1"
+  shift
+  local value
+  for value in "$@"; do
+    [[ "$value" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+verify_prepared_tls_stage_policy() {
+  local remote_manifest_json="$1"
+  local expected_optional_tls_files=()
+  local dkg_tls_stage_files=(
+    dkg-server.pem
+    dkg-server.key
+    ca.pem
+    coordinator-client.pem
+    coordinator-client.key
+  )
+  local source_path stage_path
+
+  for source_path in "${files_to_copy[@]}"; do
+    stage_path="$(basename "$source_path")"
+    if is_optional_tls_stage_file "$stage_path"; then
+      expected_optional_tls_files+=("$stage_path")
+    fi
+  done
+  if [[ -n "$dkg_tls_dir_manifest" ]]; then
+    expected_optional_tls_files+=("${dkg_tls_stage_files[@]}")
+    for stage_path in "${dkg_tls_stage_files[@]}"; do
+      jq -e --arg path "$stage_path" 'any(.files[]; .path == $path)' <<<"$remote_manifest_json" >/dev/null \
+        || die "prepared deploy stage manifest is missing required DKG TLS artifact $stage_path; rerun --prepare-only"
+    done
+  fi
+
+  while IFS= read -r stage_path; do
+    if is_optional_tls_stage_file "$stage_path" && ! array_contains "$stage_path" "${expected_optional_tls_files[@]}"; then
+      die "prepared deploy stage manifest contains unexpected TLS artifact $stage_path; rerun --prepare-only"
+    fi
+  done < <(jq -r '.files[].path' <<<"$remote_manifest_json")
+}
+
+expected_prepared_stage_paths_json() {
+  local paths_file source_path stage_path
+  paths_file="$(mktemp)"
+
+  for source_path in "${files_to_copy[@]}"; do
+    stage_path="$(basename "$source_path")"
+    [[ "$stage_path" == "$(basename "$stage_manifest_file")" ]] && continue
+    printf '%s\n' "$stage_path" >>"$paths_file"
+  done
+  if [[ -n "$dkg_tls_dir_manifest" ]]; then
+    printf '%s\n' \
+      dkg-server.pem \
+      dkg-server.key \
+      ca.pem \
+      coordinator-client.pem \
+      coordinator-client.key >>"$paths_file"
+  fi
+
+  sort -u "$paths_file" | jq -R . | jq -s -c 'sort'
+  rm -f "$paths_file"
+}
+
+verify_prepared_stage_manifest_paths() {
+  local remote_manifest_json="$1"
+  local expected_paths_json
+
+  expected_paths_json="$(expected_prepared_stage_paths_json)"
+  jq -e \
+    --argjson expected_paths "$expected_paths_json" '
+      ([.files[].path] | sort) == $expected_paths
+    ' <<<"$remote_manifest_json" >/dev/null \
+    || die "prepared deploy stage manifest file set mismatch for operator $operator_id; rerun --prepare-only"
+}
+
+stage_remote_deploy_package() {
+  local target_instance_id="$1"
+  local file_mode source_path
+
+  production_ssm_run_shell_command \
+    "$aws_profile" "$aws_region" "$target_instance_id" \
+    "sudo rm -rf '$remote_stage_dir' && sudo install -d -m 0700 '$remote_stage_dir'" >/dev/null \
+    || die "failed to create remote stage dir over ssm: $remote_stage_dir"
+  for source_path in "${files_to_copy[@]}"; do
+    file_mode="$(stage_file_mode "$source_path")"
+    production_ssm_stage_file "$aws_profile" "$aws_region" "$target_instance_id" "$source_path" "$remote_stage_dir/$(basename "$source_path")" "$file_mode" "0700"
+  done
+}
+
+verify_prepared_deploy_package() {
+  local target_instance_id="$1"
+  local remote_stage_manifest_path remote_stage_manifest_path_q remote_stage_dir_q
+  local remote_stage_manifest_json remote_manifest_json
+  local verify_command
+
+  remote_stage_manifest_path="$remote_stage_dir/$(basename "$stage_manifest_file")"
+  printf -v remote_stage_manifest_path_q '%q' "$remote_stage_manifest_path"
+  remote_stage_manifest_json="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$target_instance_id" "sudo cat $remote_stage_manifest_path_q")" \
+    || die "failed to read prepared deploy stage manifest: $remote_stage_manifest_path"
+  remote_manifest_json="$(jq -S -c . <<<"$remote_stage_manifest_json")" \
+    || die "invalid prepared deploy stage manifest: $remote_stage_manifest_path"
+  jq -e \
+    --arg operator_id "$operator_id" \
+    --arg runtime_dir "$runtime_dir" \
+    --arg remote_stage_dir "$remote_stage_dir" '
+      .schema_version == 1
+      and .operator_id == $operator_id
+      and .runtime_dir == $runtime_dir
+      and .remote_stage_dir == $remote_stage_dir
+      and (.files | type == "array" and length > 0)
+      and (([.files[].path] | unique | length) == (.files | length))
+      and all(.files[];
+        (.path | type == "string" and length > 0)
+        and ((.path | startswith("/")) | not)
+        and ((.path | contains("/")) | not)
+        and ((.path | contains("..")) | not)
+        and (.mode | type == "string" and test("^[0-7]{3,4}$"))
+        and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+      )
+      and any(.files[]; .path == "operator-stack.env")
+      and any(.files[]; .path == "operator-deploy.json")
+      and any(.files[]; .path == "shared-manifest.json")
+      and any(.files[]; .path == "run-operator-rollout.sh")
+    ' <<<"$remote_manifest_json" >/dev/null \
+    || die "prepared deploy stage manifest metadata mismatch for operator $operator_id; rerun --prepare-only"
+  verify_prepared_tls_stage_policy "$remote_manifest_json"
+  verify_prepared_stage_manifest_paths "$remote_manifest_json"
+  require_prepared_stage_files_match_local "$remote_manifest_json"
+
+  printf -v remote_stage_dir_q '%q' "$remote_stage_dir"
+  verify_command="$(cat <<EOF
+set -euo pipefail
+stage_dir=$remote_stage_dir_q
+manifest="\$stage_dir/$(basename "$stage_manifest_file")"
+stage_mode="\$(stat -c '%a' "\$stage_dir")"
+[[ "\$stage_mode" == "700" ]] || {
+  echo "invalid deploy stage dir mode: \$stage_mode" >&2
+  exit 1
+}
+cd "\$stage_dir"
+actual_files="\$(find . -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+expected_files="\$(jq -r '.files[].path, "$(basename "$stage_manifest_file")"' "\$manifest" | sort)"
+if [[ "\$actual_files" != "\$expected_files" ]]; then
+  echo "prepared deploy stage directory file set mismatch" >&2
+  diff -u <(printf '%s\n' "\$expected_files") <(printf '%s\n' "\$actual_files") >&2 || true
+  exit 1
+fi
+jq -r '.files[] | [.sha256, .path, .mode] | @tsv' "\$manifest" | while IFS=\$'\t' read -r expected path expected_mode; do
+  case "\$path" in
+    ""|/*|*/*|*..*)
+      echo "invalid staged file path: \$path" >&2
+      exit 1
+      ;;
+  esac
+  expected_mode="\${expected_mode#0}"
+  actual_mode="\$(stat -c '%a' "\$path")"
+  [[ "\$actual_mode" == "\$expected_mode" ]] || {
+    echo "invalid staged file mode for \$path: got \$actual_mode want \$expected_mode" >&2
+    exit 1
+  }
+  [[ "\$expected" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "invalid staged file checksum for \$path" >&2
+    exit 1
+  }
+  printf '%s  %s\n' "\$expected" "\$path" | sha256sum -c - >/dev/null
+done
+EOF
+)"
+  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$target_instance_id" "$verify_command" >/dev/null \
+    || die "prepared deploy stage verification failed for operator $operator_id"
+}
+
+run_prepared_remote_rollout() {
+  local target_instance_id="$1"
+  local start_prepared_scan_backfill="${2:-false}"
+  local remote_stage_dir_q runtime_dir_q remote_command scan_backfill_block
+
+  printf -v remote_stage_dir_q '%q' "$remote_stage_dir"
+  printf -v runtime_dir_q '%q' "$runtime_dir"
+  scan_backfill_block=""
+  if [[ "$start_prepared_scan_backfill" == "true" ]]; then
+    scan_backfill_block="$(cat <<EOF
+env_file="\$remote_stage_dir/operator-stack.env"
+env_value() {
+  local key="\$1"
+  awk -F= -v key="\$key" 'index(\$0, key "=") == 1 { print substr(\$0, length(key) + 2); exit }' "\$env_file"
+}
+env_first_value() {
+  local key value
+  for key in "\$@"; do
+    value="\$(env_value "\$key")"
+    if [[ -n "\$value" ]]; then
+      printf '%s\n' "\$value"
+      return 0
+    fi
+  done
+  return 1
+}
+scan_wallet_id="\$(env_first_value DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
+if [[ -n "\$scan_wallet_id" ]]; then
+  scan_url="\$(env_first_value DEPOSIT_SCAN_JUNO_SCAN_URL WITHDRAW_FINALIZER_JUNO_SCAN_URL WITHDRAW_COORDINATOR_JUNO_SCAN_URL || true)"
+  [[ -n "\$scan_url" ]] || {
+    echo "prepared operator env is missing juno-scan URL for wallet \$scan_wallet_id" >&2
+    exit 1
+  }
+  bearer_token="\$(env_value JUNO_SCAN_BEARER_TOKEN || true)"
+  scan_ready="false"
+  for ((attempt = 1; attempt <= $service_active_retries; attempt++)); do
+    curl_headers=()
+    if [[ -n "\$bearer_token" ]]; then
+      curl_headers=(-H "Authorization: Bearer \$bearer_token")
+    fi
+    if health_response="\$(curl -fsS "\${curl_headers[@]}" "\${scan_url%/}/v1/health" 2>/dev/null)"; then
+      if jq -e '.status == "ok" and ((.scanned_height | type) == "number")' >/dev/null <<<"\$health_response"; then
+        scan_ready="true"
+        break
+      fi
+    fi
+    if (( attempt < $service_active_retries )); then
+      sleep "$service_active_sleep_seconds"
+    fi
+  done
+  [[ "\$scan_ready" == "true" ]] || {
+    echo "juno-scan did not report a scanned tip for prepared operator rollout" >&2
+    exit 1
+  }
+  sudo systemctl reset-failed juno-scan-backfill.service || true
+  sudo systemctl start --no-block juno-scan-backfill.service
+fi
+EOF
+)"
+  fi
+  remote_command="$(cat <<EOF
+set -euo pipefail
+remote_stage_dir=$remote_stage_dir_q
+runtime_dir=$runtime_dir_q
+cleanup() {
+  sudo rm -rf "\$remote_stage_dir"
+}
+trap cleanup EXIT
+sudo bash "\$remote_stage_dir/run-operator-rollout.sh" --stage-dir "\$remote_stage_dir" --runtime-dir "\$runtime_dir"
+$scan_backfill_block
+EOF
+)"
+  production_ssm_run_shell_command \
+    "$aws_profile" "$aws_region" "$target_instance_id" \
+    "$remote_command" >/dev/null \
+    || die "remote rollout failed over ssm for operator $operator_id"
+}
+
+wait_for_operator_services() {
+  local svc
+  for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve operator-signer-api tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+    wait_for_remote_service_active "$svc"
+  done
 }
 
 remote_juno_scan_post() {
@@ -829,7 +1200,7 @@ extract_build_runbook_block \
   "EOF_SCAN_BACKFILL_SERVICE" \
   "$juno_scan_backfill_service_stage"
 
-if [[ -n "$dkg_tls_dir" ]]; then
+if [[ -n "$dkg_tls_dir" && "$apply_prepared" != "true" ]]; then
   resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"
   [[ -n "$resolved_operator_host" && "$resolved_operator_host" != "null" ]] || die "missing resolved dkg peer host for operator_id $operator_id"
   dkg_server_cert_file="$tmp_dir/dkg-server.pem"
@@ -871,43 +1242,45 @@ done
 for wrapper_stage in "${staged_wrapper_scripts[@]}"; do
   files_to_copy+=("$wrapper_stage")
 done
+if [[ "$apply_prepared" != "true" ]]; then
+  write_stage_manifest "$stage_manifest_file"
+  files_to_copy+=("$stage_manifest_file")
+fi
 
 if [[ "$dry_run" == "true" ]]; then
-  log "[DRY RUN] would deploy operator $operator_id via ssm/$operator_host"
+  if [[ "$prepare_only" == "true" ]]; then
+    log "[DRY RUN] would stage operator $operator_id via ssm/$operator_host"
+  elif [[ "$apply_prepared" == "true" ]]; then
+    instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
+    verify_prepared_deploy_package "$instance_id"
+    log "[DRY RUN] would apply staged operator $operator_id via ssm/$operator_host"
+  else
+    log "[DRY RUN] would deploy operator $operator_id via ssm/$operator_host"
+  fi
 else
   production_require_registered_operator "$shared_manifest_path" "$operator_deploy"
+  instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
+  if [[ "$prepare_only" == "true" ]]; then
+    ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
+    stage_remote_deploy_package "$instance_id"
+    success="true"
+    log "operator deployment package staged: $operator_id -> $remote_stage_dir"
+    exit 0
+  fi
+  if [[ "$apply_prepared" == "true" ]]; then
+    verify_prepared_deploy_package "$instance_id"
+  fi
   ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
   production_rollout_reserve "$rollout_state_file" "$operator_id"
   reserved="true"
-  instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
-  production_ssm_run_shell_command \
-    "$aws_profile" "$aws_region" "$instance_id" \
-    "sudo rm -rf '$remote_stage_dir' && sudo install -d -m 0755 '$remote_stage_dir'" >/dev/null \
-    || die "failed to create remote stage dir over ssm: $remote_stage_dir"
-  for source_path in "${files_to_copy[@]}"; do
-    file_mode="0640"
-    case "$(basename "$source_path")" in
-      *.sh)
-        file_mode="0755"
-        ;;
-      *.key|ufvk.txt|operator-stack-hydrator.env)
-        file_mode="0600"
-        ;;
-    esac
-    production_ssm_stage_file "$aws_profile" "$aws_region" "$instance_id" "$source_path" "$remote_stage_dir/$(basename "$source_path")" "$file_mode"
-  done
-  production_ssm_run_shell_command \
-    "$aws_profile" "$aws_region" "$instance_id" \
-    "sudo bash -lc 'set -euo pipefail; cleanup(){ rm -rf \"$remote_stage_dir\"; }; trap cleanup EXIT; bash \"$remote_stage_dir/run-operator-rollout.sh\" --stage-dir \"$remote_stage_dir\" --runtime-dir \"$runtime_dir\"'" >/dev/null \
-    || die "remote rollout failed over ssm for operator $operator_id"
-
-
-  for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve operator-signer-api tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
-    wait_for_remote_service_active "$svc"
-  done
+  if [[ "$apply_prepared" != "true" ]]; then
+    stage_remote_deploy_package "$instance_id"
+  fi
+  run_prepared_remote_rollout "$instance_id" "$apply_prepared"
+  wait_for_operator_services
 fi
 
-if [[ "$dry_run" != "true" ]]; then
+if [[ "$dry_run" != "true" && "$apply_prepared" != "true" ]]; then
   scan_wallet_id="$(production_env_first_value "$merged_env" DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
   scan_url="$(production_env_first_value "$merged_env" DEPOSIT_SCAN_JUNO_SCAN_URL WITHDRAW_FINALIZER_JUNO_SCAN_URL WITHDRAW_COORDINATOR_JUNO_SCAN_URL || true)"
   scan_bearer_token="$(production_env_first_value "$merged_env" JUNO_SCAN_BEARER_TOKEN || true)"
@@ -927,7 +1300,13 @@ fi
 
 if [[ "$dry_run" == "true" ]]; then
   success="true"
-  log "[DRY RUN] operator deploy validated: $operator_id"
+  if [[ "$prepare_only" == "true" ]]; then
+    log "[DRY RUN] operator deploy stage validated: $operator_id"
+  elif [[ "$apply_prepared" == "true" ]]; then
+    log "[DRY RUN] operator deploy apply validated: $operator_id"
+  else
+    log "[DRY RUN] operator deploy validated: $operator_id"
+  fi
 else
   production_rollout_complete "$rollout_state_file" "$operator_id" "done" "healthy"
   success="true"

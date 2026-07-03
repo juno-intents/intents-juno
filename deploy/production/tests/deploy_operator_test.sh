@@ -21,6 +21,17 @@ assert_not_contains() {
   fi
 }
 
+assert_no_ssm_cat_operator_stack_env() {
+  local log_file="$1"
+  local msg="$2"
+
+  [[ -f "$log_file" ]] || return 0
+  if awk '/sudo cat/ && /operator-stack[.]env/ { found = 1 } END { exit found ? 0 : 1 }' "$log_file"; then
+    printf 'assert_no_ssm_cat_operator_stack_env failed: %s\n' "$msg" >&2
+    exit 1
+  fi
+}
+
 assert_line_order() {
   local haystack="$1"
   local first="$2"
@@ -242,6 +253,8 @@ if [[ "\${args[*]}" == *"ssm send-command"* ]]; then
   printf '%s' "\$count" >"\$counter_file"
   command_id="cmd-\$count"
   stdout=""
+  status="Success"
+  stderr=""
   if [[ "\$command" == *"sudo systemctl is-active juno-scan"* && -n "\${PRODUCTION_TEST_JUNO_SCAN_INACTIVE_ATTEMPTS:-}" ]]; then
     scan_counter_file="\$log_dir/ssm/juno-scan.counter"
     scan_count=0
@@ -257,8 +270,23 @@ if [[ "\${args[*]}" == *"ssm send-command"* ]]; then
     stdout="active"
   elif [[ "\$command" == *"/v1/health"* ]]; then
     stdout='{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+  elif [[ "\$command" == *"sudo cat"* && "\$command" == *"deploy-stage-manifest.json"* ]]; then
+    stdout="\$(cat "\$log_dir/deploy-stage-manifest.json" 2>/dev/null || true)"
+  elif [[ "\$command" == *"sudo cat"* && "\$command" == *"operator-stack.env"* ]]; then
+    status="Failed"
+    stderr="operator-stack.env must not be returned through SSM stdout"
+  fi
+  if [[ -n "\${PRODUCTION_TEST_FAIL_REMOTE_STAGE:-}" && "\$command" == *"sudo install -d -m 0700"* ]]; then
+    status="Failed"
+    stderr="stage failed"
+  fi
+  if [[ -n "\${PRODUCTION_TEST_UNMANIFESTED_STAGE_FILE:-}" && "\$command" == *"find . -mindepth 1 -maxdepth 1 -type f"* ]]; then
+    status="Failed"
+    stderr="prepared deploy stage directory file set mismatch"
   fi
   printf '%s' "\$stdout" >"\$log_dir/ssm/\$command_id.stdout"
+  printf '%s' "\$status" >"\$log_dir/ssm/\$command_id.status"
+  printf '%s' "\$stderr" >"\$log_dir/ssm/\$command_id.stderr"
   jq -n --arg id "\$command_id" '{Command:{CommandId:\$id}}'
   exit 0
 fi
@@ -266,7 +294,9 @@ fi
 if [[ "\${args[*]}" == *"ssm get-command-invocation"* ]]; then
   command_id="\$(arg_after --command-id "\${args[@]}")"
   stdout="\$(cat "\$log_dir/ssm/\$command_id.stdout" 2>/dev/null || true)"
-  jq -n --arg stdout "\$stdout" '{Status:"Success",StandardOutputContent:\$stdout,StandardErrorContent:""}'
+  status="\$(cat "\$log_dir/ssm/\$command_id.status" 2>/dev/null || printf 'Success')"
+  stderr="\$(cat "\$log_dir/ssm/\$command_id.stderr" 2>/dev/null || true)"
+  jq -n --arg status "\$status" --arg stdout "\$stdout" --arg stderr "\$stderr" '{Status:\$status,StandardOutputContent:\$stdout,StandardErrorContent:\$stderr}'
   exit 0
 fi
 
@@ -909,6 +939,632 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_prepare_only_stages_without_rollout() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+
+  assert_contains "$(cat "$log_dir/ssm.commands")" "sudo install -d -m 0700" "prepare-only creates a private remote stage directory"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "sudo install -d -m 0755 /tmp/intents-juno-deploy" "prepare-only keeps the remote deploy stage directory private"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "operator-stack.env" "prepare-only stages rendered operator env"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "deploy-stage-manifest.json" "prepare-only stages the package manifest last"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh" "prepare-only stages the remote rollout script"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "prepare-only does not apply the staged rollout"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active checkpoint-signer" "prepare-only does not wait on restarted services"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "prepare-only leaves rollout status pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_runs_without_restaging() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  rm -f "$log_dir/ssm.commands"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null
+
+  assert_contains "$(cat "$log_dir/ssm.commands")" "sudo cat" "apply-prepared reads the prepared stage manifest"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "deploy-stage-manifest.json" "apply-prepared validates the prepared package manifest"
+  assert_contains "$(cat "$log_dir/ssm.commands")" 'env_file="$remote_stage_dir/operator-stack.env"' "apply-prepared uses the prepared operator env remotely"
+  assert_contains "$(cat "$log_dir/ssm.commands")" 'stat -c '\''%a'\'' "$stage_dir"' "apply-prepared verifies the remote stage directory mode"
+  assert_contains "$(cat "$log_dir/ssm.commands")" 'stat -c '\''%a'\'' "$path"' "apply-prepared verifies staged file modes"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "sha256sum -c" "apply-prepared verifies staged file checksums before rollout"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "trap cleanup EXIT" "apply-prepared cleans up the staged package after rollout"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "apply-prepared points at the staged remote rollout"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active checkpoint-signer" "apply-prepared waits on restarted services"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "sudo install -d -m 0700" "apply-prepared does not recreate the remote stage directory"
+  assert_no_ssm_cat_operator_stack_env "$log_dir/ssm.commands" "apply-prepared does not read the full prepared env over ssm"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "operator-stack.env.b64" "apply-prepared does not restage operator-stack.env"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "apply-prepared completes rollout status"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_dry_run_verifies_without_rollout() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  rm -f "$log_dir/ssm.commands"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared \
+    --dry-run >/dev/null
+
+  assert_contains "$(cat "$log_dir/ssm.commands")" "deploy-stage-manifest.json" "apply-prepared dry-run validates the prepared package manifest"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "sha256sum -c" "apply-prepared dry-run verifies staged file checksums"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "apply-prepared dry-run does not run the staged remote rollout"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "systemctl is-active checkpoint-signer" "apply-prepared dry-run does not wait on services"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "apply-prepared dry-run leaves rollout pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_rejects_stale_manifest() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  jq '.deposit_relayer_release_tag = "app-binaries-drifted"' "$manifest" >"$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+  rm -f "$log_dir/ssm.commands"
+
+  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null 2>&1; then
+    printf 'expected apply-prepared to reject a stale prepared package\n' >&2
+    exit 1
+  fi
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "stale apply-prepared fails before remote rollout"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "stale apply-prepared leaves rollout pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_rejects_extra_manifest_path() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  jq '.files += [{path:"junocashd.conf",mode:"0640",sha256:"0000000000000000000000000000000000000000000000000000000000000000"}]' "$log_dir/deploy-stage-manifest.json" >"$log_dir/deploy-stage-manifest.next"
+  mv "$log_dir/deploy-stage-manifest.next" "$log_dir/deploy-stage-manifest.json"
+  rm -f "$log_dir/ssm.commands"
+
+  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null 2>&1; then
+    printf 'expected apply-prepared to reject an unexpected stage manifest path\n' >&2
+    exit 1
+  fi
+
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "extra stage manifest path fails before remote rollout"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "extra stage manifest path leaves rollout pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_accepts_dkg_tls_package() {
+  local workdir output_dir log_dir fake_bin manifest state_file
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  write_test_dkg_tls_dir "$workdir/dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/dkg-tls"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+
+  assert_file_exists "$log_dir/dkg-server.pem" "prepare-only stages generated dkg server cert"
+  assert_file_exists "$log_dir/dkg-server.key" "prepare-only stages generated dkg server key"
+  assert_contains "$(cat "$log_dir/deploy-stage-manifest.json")" "dkg-server.pem" "stage manifest records generated dkg server cert"
+  assert_contains "$(cat "$log_dir/deploy-stage-manifest.json")" "dkg-server.key" "stage manifest records generated dkg server key"
+  mv "$workdir/dkg-tls" "$workdir/dkg-tls.removed"
+  rm -f "$log_dir/ssm.commands"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null
+
+  assert_contains "$(cat "$log_dir/ssm.commands")" "deploy-stage-manifest.json" "apply-prepared validates the prepared dkg package manifest"
+  assert_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "apply-prepared rolls out the prepared dkg package"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "dkg tls dir not found" "apply-prepared uses prepared dkg tls material instead of local tls files"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "apply-prepared dkg package completes rollout"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_rejects_missing_dkg_tls_artifact() {
+  local workdir output_dir log_dir fake_bin manifest state_file
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  write_test_dkg_tls_dir "$workdir/dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/dkg-tls"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  jq '(.files) |= map(select(.path != "dkg-server.pem"))' "$log_dir/deploy-stage-manifest.json" >"$log_dir/deploy-stage-manifest.next"
+  mv "$log_dir/deploy-stage-manifest.next" "$log_dir/deploy-stage-manifest.json"
+  rm -f "$log_dir/ssm.commands"
+
+  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null 2>&1; then
+    printf 'expected apply-prepared to reject a prepared package missing DKG TLS artifacts\n' >&2
+    exit 1
+  fi
+
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "missing dkg tls artifact fails before remote rollout"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "missing dkg tls artifact leaves rollout pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_rejects_unmanifested_stage_file() {
+  local workdir output_dir log_dir fake_bin manifest state_file
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  write_test_dkg_tls_dir "$workdir/dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/dkg-tls"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --prepare-only >/dev/null
+  rm -f "$log_dir/ssm.commands"
+
+  if PRODUCTION_TEST_UNMANIFESTED_STAGE_FILE=true PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+      --operator-deploy "$manifest" \
+      --apply-prepared >/dev/null 2>&1; then
+    printf 'expected apply-prepared to reject unmanifested staged files\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$log_dir/ssm.commands")" "find . -mindepth 1 -maxdepth 1 -type f" "apply-prepared compares actual remote stage files against manifest"
+  assert_not_contains "$(cat "$log_dir/ssm.commands")" "run-operator-rollout.sh\" --stage-dir" "unmanifested stage file fails before remote rollout"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "unmanifested stage file leaves rollout pending"
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_apply_prepared_done_state_requires_force() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+  jq '(.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111")).status = "done"' "$state_file" >"$state_file.tmp"
+  mv "$state_file.tmp" "$state_file"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  chmod +x "$fake_bin/aws"
+
+  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --apply-prepared >/dev/null 2>&1; then
+    printf 'expected apply-prepared to require --force when rollout state is done\n' >&2
+    exit 1
+  fi
+  if [[ -e "$log_dir/ssm.commands" ]]; then
+    printf 'expected apply-prepared done-state failure before SSM but saw:\n%s\n' "$(cat "$log_dir/ssm.commands")" >&2
+    exit 1
+  fi
+
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_full_deploy_marks_failed_when_staging_fails() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/aws" "$fake_bin/cast"
+
+  if PRODUCTION_TEST_FAIL_REMOTE_STAGE=true PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" >/dev/null 2>&1; then
+    printf 'expected full deploy to fail when remote staging fails\n' >&2
+    exit 1
+  fi
+
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "failed" "full deploy staging failure marks rollout failed"
+
+  rm -rf "$workdir"
+}
+
 test_deploy_operator_stages_base_relayer_ready_balance_floor() {
   local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
   workdir="$(mktemp -d)"
@@ -1222,6 +1878,16 @@ main() {
   test_deploy_operator_prefers_manifest_private_endpoints_for_dkg_peer_hosts
   test_deploy_operator_resolves_stale_peer_hosts_by_operator_profile_tag
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
+  test_deploy_operator_prepare_only_stages_without_rollout
+  test_deploy_operator_apply_prepared_runs_without_restaging
+  test_deploy_operator_apply_prepared_dry_run_verifies_without_rollout
+  test_deploy_operator_apply_prepared_rejects_stale_manifest
+  test_deploy_operator_apply_prepared_rejects_extra_manifest_path
+  test_deploy_operator_apply_prepared_accepts_dkg_tls_package
+  test_deploy_operator_apply_prepared_rejects_missing_dkg_tls_artifact
+  test_deploy_operator_apply_prepared_rejects_unmanifested_stage_file
+  test_deploy_operator_apply_prepared_done_state_requires_force
+  test_deploy_operator_full_deploy_marks_failed_when_staging_fails
   test_deploy_operator_stages_base_relayer_ready_balance_floor
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
