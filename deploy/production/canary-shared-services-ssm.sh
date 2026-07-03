@@ -209,6 +209,7 @@ cleanup() {
   sudo rm -rf $remote_stage_dir_q
 }
 trap cleanup EXIT
+export HOME="\${HOME:-/root}"
 export PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE=true
 $queue_env_block
 bash $remote_canary_q --shared-manifest $remote_manifest_q

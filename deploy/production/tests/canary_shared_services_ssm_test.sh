@@ -224,6 +224,7 @@ EOF
   assert_contains "$(cat "$log_dir/commands.log")" "deploy/production/canary-shared-services.sh" "ssm canary stages the shared canary script"
   assert_contains "$(cat "$log_dir/commands.log")" "deploy/production/lib.sh" "ssm canary stages production lib dependency"
   assert_contains "$(cat "$log_dir/commands.log")" "deploy/operators/dkg/common.sh" "ssm canary stages dkg common dependency"
+  assert_contains "$(cat "$log_dir/commands.log")" 'export HOME="${HOME:-/root}"' "remote canary normalizes HOME for non-login ssm shells"
   assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE=true" "remote canary uses instance profile credentials"
   assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_QUEUE_INSPECT_BIN=" "remote canary receives staged queue-inspect binary"
   assert_contains "$(cat "$log_dir/commands.log")" "PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV=POSTGRES_DSN" "remote canary reads proof role postgres dsn env"
