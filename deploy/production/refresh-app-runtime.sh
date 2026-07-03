@@ -66,6 +66,7 @@ ensure_live_e2e_app_runtime_ingress() {
   local aws_region="$4"
   local app_security_group_id deployment_id shared_resource_name
   local shared_security_group_id ipfs_security_group_id operator_security_group_id
+  local shared_queue_driver
   local shared_postgres_port shared_kafka_port shared_ipfs_api_port operator_grpc_min_port operator_grpc_max_port juno_rpc_port juno_scan_port
 
   app_security_group_id="$(jq -r '.app_role.app_security_group_id // empty' "$app_deploy")"
@@ -83,8 +84,17 @@ ensure_live_e2e_app_runtime_ingress() {
   [[ -n "$ipfs_security_group_id" ]] || die "live-e2e ipfs security group not found: ${shared_resource_name}-ipfs-sg"
   [[ -n "$operator_security_group_id" ]] || die "live-e2e operator security group not found: ${shared_resource_name}-operator-sg"
 
+  shared_queue_driver="$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest")"
+  case "$shared_queue_driver" in
+    kafka|postgres) ;;
+    *) die "shared_services.queue.driver must be kafka or postgres" ;;
+  esac
+
   shared_postgres_port="$(jq -r '.shared_services.postgres.port // 5432' "$shared_manifest")"
-  shared_kafka_port="$(jq -r '(.shared_services.kafka.bootstrap_brokers // "" | split(",") | map(select(length > 0)) | .[0] // "") | capture(":(?<port>[0-9]+)$").port // "9098"' "$shared_manifest")"
+  shared_kafka_port=""
+  if [[ "$shared_queue_driver" == "kafka" ]]; then
+    shared_kafka_port="$(jq -r '(.shared_services.kafka.bootstrap_brokers // "" | split(",") | map(select(length > 0)) | .[0] // "") | capture(":(?<port>[0-9]+)$").port // "9098"' "$shared_manifest")"
+  fi
   shared_ipfs_api_port="$(jq -r '(.shared_services.ipfs.api_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "5001"' "$shared_manifest")"
   operator_grpc_min_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | min // empty' "$app_deploy")"
   operator_grpc_max_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | max // empty' "$app_deploy")"
@@ -92,7 +102,9 @@ ensure_live_e2e_app_runtime_ingress() {
   juno_scan_port="$(jq -r '(.juno_scan_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "8080"' "$app_deploy")"
 
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_postgres_port" "$shared_postgres_port" "$app_security_group_id" "Postgres from app runtime"
-  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_kafka_port" "$shared_kafka_port" "$app_security_group_id" "Kafka from app runtime"
+  if [[ -n "$shared_kafka_port" ]]; then
+    ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_kafka_port" "$shared_kafka_port" "$app_security_group_id" "Kafka from app runtime"
+  fi
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$ipfs_security_group_id" "$shared_ipfs_api_port" "$shared_ipfs_api_port" "$app_security_group_id" "IPFS API from app runtime"
 
   if [[ -n "$operator_grpc_min_port" && -n "$operator_grpc_max_port" ]]; then

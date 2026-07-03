@@ -343,8 +343,54 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   rm -rf "$tmp"
 }
 
+test_refresh_app_runtime_skips_kafka_ingress_for_postgres_queue() {
+  local tmp fake_bin aws_log shared_manifest app_deploy secret_contract output_dir operators_root
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+  shared_manifest="$tmp/shared-manifest.json"
+  output_dir="$tmp/output"
+  operators_root="$tmp"
+  mkdir -p "$fake_bin" "$tmp/app" "$output_dir"
+
+  secret_contract="$tmp/app/app-secrets.env"
+  app_deploy="$tmp/app/app-deploy.json"
+  write_refresh_runtime_shared_manifest_fixture "$shared_manifest"
+  jq '.shared_services.queue.driver = "postgres" | del(.shared_services.kafka.bootstrap_brokers)' \
+    "$shared_manifest" >"$shared_manifest.next"
+  mv "$shared_manifest.next" "$shared_manifest"
+  write_refresh_runtime_app_secret_contract "$secret_contract"
+  write_refresh_runtime_app_deploy_fixture "$app_deploy" "$secret_contract"
+  write_refresh_runtime_operator_secret_contract "$tmp/op1-secrets.env" "0x1111111111111111111111111111111111111111111111111111111111111111"
+  write_refresh_runtime_operator_secret_contract "$tmp/op2-secrets.env" "0x2222222222222222222222222222222222222222222222222222222222222222"
+  write_refresh_runtime_operator_handoff "$operators_root" "0x1111111111111111111111111111111111111111" "$tmp/op1-secrets.env"
+  write_refresh_runtime_operator_handoff "$operators_root" "0x2222222222222222222222222222222222222222" "$tmp/op2-secrets.env"
+  write_fake_refresh_runtime_aws "$fake_bin/aws"
+  write_fake_refresh_runtime_cast "$fake_bin/cast"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/refresh-app-runtime.sh" \
+        --shared-manifest "$shared_manifest" \
+        --app-deploy "$app_deploy" \
+        --output-dir "$output_dir" >"$tmp/refresh-summary.json"
+  )
+
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-shared1234567890" "refresh still restores preview app ingress to shared postgres"
+  assert_contains "$(cat "$aws_log")" '"FromPort":5432' "refresh restores shared postgres ingress for the app security group"
+  assert_not_contains "$(cat "$aws_log")" '"FromPort":9098' "refresh does not restore shared kafka ingress when the shared queue driver is postgres"
+  assert_not_contains "$(cat "$aws_log")" "Kafka from app runtime" "refresh does not describe kafka ingress when the shared queue driver is postgres"
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-ipfs1234567890" "refresh still restores preview app ingress to shared ipfs"
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-operator1234567890" "refresh still restores preview app ingress to operator services"
+  assert_eq "$(jq -r '.ready_for_deploy' "$tmp/refresh-summary.json")" "true" "refresh summary reports success"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm
+  test_refresh_app_runtime_skips_kafka_ingress_for_postgres_queue
 }
 
 main "$@"
