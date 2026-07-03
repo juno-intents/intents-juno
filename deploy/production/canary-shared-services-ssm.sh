@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  canary-shared-services-ssm.sh --shared-manifest <path> [--queue-inspect-bin <path>] [--remote-runtime-env <path>] [--dry-run]
+  canary-shared-services-ssm.sh --shared-manifest <path> [--queue-inspect-bin <path> | --queue-inspect-release-tag <tag> [--github-repo <repo>]] [--remote-runtime-env <path>] [--dry-run]
 
 Checks:
   - Resolves a healthy shared proof-role instance from shared_roles.proof.asg
@@ -25,6 +25,11 @@ EOF
 
 shared_manifest=""
 queue_inspect_bin=""
+queue_inspect_bin_provided="false"
+queue_inspect_release_tag=""
+queue_inspect_release_tag_provided="false"
+github_repo="juno-intents/intents-juno"
+github_repo_provided="false"
 remote_runtime_env="/etc/intents-juno/proof-requestor.env"
 dry_run="false"
 
@@ -36,6 +41,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --queue-inspect-bin)
       queue_inspect_bin="$2"
+      queue_inspect_bin_provided="true"
+      shift 2
+      ;;
+    --queue-inspect-release-tag)
+      queue_inspect_release_tag="$2"
+      queue_inspect_release_tag_provided="true"
+      shift 2
+      ;;
+    --github-repo)
+      github_repo="$2"
+      github_repo_provided="true"
       shift 2
       ;;
     --remote-runtime-env)
@@ -59,6 +75,27 @@ done
 [[ -n "$shared_manifest" ]] || die "--shared-manifest is required"
 [[ -f "$shared_manifest" ]] || die "shared manifest not found: $shared_manifest"
 [[ -n "$remote_runtime_env" ]] || die "--remote-runtime-env must not be empty"
+if [[ "$queue_inspect_bin_provided" == "true" && "$queue_inspect_release_tag_provided" == "true" ]]; then
+  die "--queue-inspect-bin and --queue-inspect-release-tag are mutually exclusive"
+fi
+if [[ "$queue_inspect_bin_provided" == "true" && -z "$queue_inspect_bin" ]]; then
+  die "--queue-inspect-bin must not be empty"
+fi
+if [[ "$queue_inspect_release_tag_provided" == "true" && -z "$queue_inspect_release_tag" ]]; then
+  die "--queue-inspect-release-tag must not be empty"
+fi
+if [[ "$github_repo_provided" == "true" && "$queue_inspect_release_tag_provided" != "true" ]]; then
+  die "--github-repo requires --queue-inspect-release-tag"
+fi
+if [[ "$github_repo_provided" == "true" && -z "$github_repo" ]]; then
+  die "--github-repo must not be empty"
+fi
+if [[ "$queue_inspect_release_tag_provided" == "true" ]]; then
+  [[ "$github_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+    || die "--github-repo must use owner/name syntax with safe characters"
+  [[ "$queue_inspect_release_tag" =~ ^app-binaries-v[0-9]{4}\.[0-9]{2}\.[0-9]{2}-r[0-9]+-(testnet|mainnet)$ ]] \
+    || die "--queue-inspect-release-tag must be a pinned app-binaries release ending in -testnet or -mainnet"
+fi
 
 for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
@@ -165,6 +202,10 @@ stage_remote_file() {
 instance_id="$(resolve_shared_proof_instance_id)"
 remote_stage_dir="/tmp/intents-juno-shared-canary-$(production_safe_slug "$environment")-$(date +%s)-$$"
 remote_queue_inspect_bin=""
+remote_queue_inspect_asset=""
+remote_queue_inspect_checksum=""
+queue_inspect_asset_url=""
+queue_inspect_checksum_url=""
 
 production_ssm_run_shell_command \
   "$aws_profile" "$aws_region" "$instance_id" \
@@ -179,6 +220,12 @@ stage_remote_file "$shared_manifest" "$remote_stage_dir/shared-manifest.json" 06
 if [[ -n "$queue_inspect_bin" ]]; then
   remote_queue_inspect_bin="$remote_stage_dir/bin/queue-inspect"
   stage_remote_file "$queue_inspect_bin" "$remote_queue_inspect_bin" 0755
+elif [[ -n "$queue_inspect_release_tag" ]]; then
+  remote_queue_inspect_bin="$remote_stage_dir/bin/queue-inspect"
+  remote_queue_inspect_asset="$remote_stage_dir/bin/queue-inspect_linux_amd64"
+  remote_queue_inspect_checksum="$remote_stage_dir/bin/queue-inspect_linux_amd64.sha256"
+  queue_inspect_asset_url="https://github.com/${github_repo}/releases/download/${queue_inspect_release_tag}/queue-inspect_linux_amd64"
+  queue_inspect_checksum_url="https://github.com/${github_repo}/releases/download/${queue_inspect_release_tag}/queue-inspect_linux_amd64.sha256"
 fi
 
 printf -v remote_stage_dir_q '%q' "$remote_stage_dir"
@@ -186,6 +233,36 @@ printf -v remote_manifest_q '%q' "$remote_stage_dir/shared-manifest.json"
 printf -v remote_canary_q '%q' "$remote_stage_dir/deploy/production/canary-shared-services.sh"
 printf -v remote_runtime_env_q '%q' "$remote_runtime_env"
 printf -v remote_queue_inspect_bin_q '%q' "$remote_queue_inspect_bin"
+printf -v remote_queue_inspect_asset_q '%q' "$remote_queue_inspect_asset"
+printf -v remote_queue_inspect_checksum_q '%q' "$remote_queue_inspect_checksum"
+printf -v queue_inspect_asset_url_q '%q' "$queue_inspect_asset_url"
+printf -v queue_inspect_checksum_url_q '%q' "$queue_inspect_checksum_url"
+
+queue_release_download_block=""
+if [[ -n "$queue_inspect_release_tag" ]]; then
+  queue_release_download_block="$(cat <<EOF
+for cmd in curl sha256sum awk install; do
+  command -v "\$cmd" >/dev/null 2>&1 || {
+    echo "required command not found for queue-inspect release download: \$cmd" >&2
+    exit 1
+  }
+done
+curl -fsSL $queue_inspect_asset_url_q -o $remote_queue_inspect_asset_q
+curl -fsSL $queue_inspect_checksum_url_q -o $remote_queue_inspect_checksum_q
+queue_inspect_expected="\$(awk 'NF {print \$1; exit}' $remote_queue_inspect_checksum_q)"
+if [[ ! "\$queue_inspect_expected" =~ ^[0-9a-fA-F]{64}\$ ]]; then
+  echo "invalid queue-inspect checksum in release asset" >&2
+  exit 1
+fi
+printf '%s  %s\n' "\$queue_inspect_expected" $remote_queue_inspect_asset_q | sha256sum -c - >/dev/null
+install -m 0755 $remote_queue_inspect_asset_q $remote_queue_inspect_bin_q
+[[ -x $remote_queue_inspect_bin_q ]] || {
+  echo "downloaded queue-inspect is not executable" >&2
+  exit 1
+}
+EOF
+)"
+fi
 
 queue_env_block=""
 if [[ -n "$remote_queue_inspect_bin" ]]; then
@@ -211,6 +288,7 @@ cleanup() {
 trap cleanup EXIT
 export HOME="\${HOME:-/root}"
 export PRODUCTION_CANARY_AWS_USE_INSTANCE_PROFILE=true
+$queue_release_download_block
 $queue_env_block
 bash $remote_canary_q --shared-manifest $remote_manifest_q
 EOF

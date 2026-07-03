@@ -241,6 +241,173 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_ssm_canary_downloads_queue_inspect_release_on_remote_host() {
+  local tmp manifest fake_bin log_dir output_json local_probe_log commands
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_dir="$tmp/logs"
+  output_json="$tmp/output.json"
+  local_probe_log="$log_dir/local-probes.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  write_fake_aws_for_shared_ssm "$fake_bin/aws" "$log_dir"
+
+  for cmd in pg_isready nc curl; do
+    cat >"$fake_bin/$cmd" <<EOF
+#!/usr/bin/env bash
+printf '$cmd %s\n' "\$*" >>"$local_probe_log"
+exit 99
+EOF
+    chmod 0755 "$fake_bin/$cmd"
+  done
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --github-repo juno-intents/intents-juno >"$output_json"
+  )
+
+  commands="$(cat "$log_dir/commands.log")"
+  assert_contains "$commands" "curl -fsSL https://github.com/juno-intents/intents-juno/releases/download/app-binaries-v2026.07.03-r1-mainnet/queue-inspect_linux_amd64 -o" "release mode downloads queue-inspect binary on the remote host"
+  assert_contains "$commands" "curl -fsSL https://github.com/juno-intents/intents-juno/releases/download/app-binaries-v2026.07.03-r1-mainnet/queue-inspect_linux_amd64.sha256 -o" "release mode downloads queue-inspect checksum on the remote host"
+  assert_contains "$commands" 'command -v "$cmd" >/dev/null' "release mode preflights remote download tools"
+  assert_contains "$commands" "queue_inspect_expected=\"\$(awk 'NF {print \$1; exit}'" "release mode parses the checksum field"
+  assert_contains "$commands" "sha256sum -c - >/dev/null" "release mode suppresses checksum stdout before canary JSON"
+  assert_contains "$commands" "install -m 0755" "release mode installs the verified queue-inspect binary"
+  assert_contains "$commands" "PRODUCTION_CANARY_QUEUE_INSPECT_BIN=" "release mode passes queue-inspect path to the remote canary"
+  assert_not_contains "$commands" "queue-inspect.b64" "release mode does not stage a local queue-inspect binary over ssm"
+  assert_not_contains "$commands" "sha256sum -c queue-inspect_linux_amd64.sha256" "release mode does not run checksum validation with stdout pollution"
+  if [[ -f "$local_probe_log" ]]; then
+    printf 'ssm release wrapper should not run private endpoint probes locally\n' >&2
+    exit 1
+  fi
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "ssm release canary returns remote ready flag"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "ssm release canary returns remote queue status"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_ssm_canary_rejects_invalid_release_inputs() {
+  local tmp manifest queue_inspect_bin output_json stderr
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  queue_inspect_bin="$tmp/queue-inspect"
+  output_json="$tmp/output.json"
+  stderr="$tmp/stderr"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  cat >"$queue_inspect_bin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$queue_inspect_bin"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag latest \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject latest release tag\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "pinned app-binaries release" "release tag must be pinned"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --github-repo "bad repo" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject invalid github repo\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "owner/name syntax" "github repo is validated before remote command rendering"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --github-repo juno-intents/intents-juno \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject github repo without release tag\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "--github-repo requires --queue-inspect-release-tag" "github repo override requires release mode"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag "" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject empty release tag\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "--queue-inspect-release-tag must not be empty" "explicit empty release tag is rejected"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --github-repo "" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject empty github repo\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "--github-repo must not be empty" "explicit empty github repo is rejected"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-bin "$queue_inspect_bin" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject both queue-inspect modes\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "mutually exclusive" "local and release queue-inspect modes are mutually exclusive"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-bin "" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject both queue-inspect modes even with empty local bin\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "mutually exclusive" "mutual exclusion uses provided flags instead of non-empty values"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-bin "" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject empty local queue-inspect bin\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "--queue-inspect-bin must not be empty" "explicit empty local queue-inspect path is rejected"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_ssm_canary_requires_proof_asg() {
   local tmp manifest output_json stderr
   tmp="$(mktemp -d)"
@@ -326,6 +493,8 @@ test_shared_services_ssm_canary_rejects_protected_instance_name_before_ssm() {
 main() {
   test_shared_services_ssm_canary_dry_run_validates_manifest_without_aws
   test_shared_services_ssm_canary_runs_remote_shared_canary
+  test_shared_services_ssm_canary_downloads_queue_inspect_release_on_remote_host
+  test_shared_services_ssm_canary_rejects_invalid_release_inputs
   test_shared_services_ssm_canary_requires_proof_asg
   test_shared_services_ssm_canary_rejects_protected_instance_id_before_ssm
   test_shared_services_ssm_canary_rejects_protected_instance_name_before_ssm
