@@ -365,8 +365,8 @@ resolve_dkg_peer_host_from_manifest() {
   profile="$(jq -r '.aws_profile // empty' "$manifest")"
   region="$(jq -r '.aws_region // empty' "$manifest")"
   if [[ -n "$profile" && -n "$region" ]]; then
-    resolved_host="$(aws_resolve_private_ip "$profile" "$region" "$host" 2>/dev/null || true)"
-    if [[ -n "$resolved_host" && "$resolved_host" != "$host" ]]; then
+    resolved_host="$(aws_describe_instance_field "$profile" "$region" "$host" 'Reservations[].Instances[].PrivateIpAddress | [0]' 2>/dev/null || true)"
+    if [[ -n "$resolved_host" && "$resolved_host" != "None" ]]; then
       printf '%s\n' "$resolved_host"
       return 0
     fi
@@ -375,10 +375,6 @@ resolve_dkg_peer_host_from_manifest() {
       printf '%s\n' "$resolved_host"
       return 0
     fi
-    [[ -n "$resolved_host" ]] && {
-      printf '%s\n' "$resolved_host"
-      return 0
-    }
     printf '%s\n' "$host"
     return 0
   fi

@@ -213,8 +213,10 @@ if [[ "\${args[*]}" == *"ec2 describe-instances"* ]]; then
     *'Name=ip-address,Values=10.9.0.233'* ) printf 'None\n' ;;
     *'Name=private-ip-address,Values=10.9.0.222'* ) printf 'None\n' ;;
     *'Name=private-ip-address,Values=10.9.0.233'* ) printf 'None\n' ;;
+    *'Name=private-ip-address,Values=10.9.0.44'* ) printf '10.9.0.44\n' ;;
     *'Name=tag:Operator,Values=op2'* ) printf '10.9.1.22\n' ;;
     *'Name=tag:Operator,Values=op3'* ) printf '10.9.1.33\n' ;;
+    *'Name=tag:Operator,Values=op4'* ) printf '10.9.1.44\n' ;;
     * )
       if [[ "\$query" == *"InstanceId"* ]]; then
         printf '%s\n' "\$instance_id"
@@ -760,6 +762,100 @@ EOF
   assert_eq "$(jq -r '.[] | select(.operator_id=="0x3333333333333333333333333333333333333333") | .host' <<<"$dkg_peer_hosts")" "10.9.0.33" "deploy uses manifest private endpoint for peer two"
   assert_eq "$(jq -r '.[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .host' <<<"$dkg_peer_hosts")" "10.0.0.11" "deploy still resolves the current operator host for local tls identity"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11" "deploy still resolves the current operator host for local tls identity"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_prefers_confirmed_private_operator_host_over_tag_fallback() {
+  local workdir output_dir manifest state_file log_dir fake_bin cert_b64 key_b64
+  local dkg_peer_hosts
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '.environment = "production" | .operators[0].known_hosts_file = null' "$workdir/inventory.json" >"$workdir/inventory.tmp.json"
+  mv "$workdir/inventory.tmp.json" "$workdir/inventory.json"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/mainnet" "$workdir"
+
+  manifest="$output_dir/mainnet/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/mainnet/rollout-state.json"
+  jq '
+    .operator_host = "10.9.0.44"
+    | .public_endpoint = "198.51.100.44"
+    | .private_endpoint = null
+    | .operator_probe_host = null
+    | .aws_profile = "mainnet-op4"
+    | .aws_region = "us-east-1"
+    | .operator_role.operator_host = "10.9.0.44"
+    | .operator_role.public_endpoint = "198.51.100.44"
+  ' "$manifest" >"$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/ssm.commands"
+for arg in "\$@"; do
+  if [[ -f "\$arg" ]]; then
+    cp "\$arg" "$log_dir/\$(basename "\$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssm.commands"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+cat "\$stdin_file" >>"$log_dir/run-operator-rollout.sh"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
+fi
+exit 0
+EOF
+  write_fake_ssm_aws "$fake_bin/aws" "$log_dir" "i-op004" "10.9.0.44"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  dkg_peer_hosts="$(cat "$log_dir/dkg-peer-hosts.json")"
+  assert_eq "$(jq -r '.[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .host' <<<"$dkg_peer_hosts")" "10.9.0.44" "deploy keeps confirmed explicit private operator host for local tls identity"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.9.0.44" "deploy stages tss server name from confirmed explicit private operator host"
+  assert_not_contains "$(cat "$log_dir/aws.log")" 'Name=tag:Operator,Values=op4' "deploy does not use ambiguous tag fallback after confirming explicit private operator host"
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
   rm -rf "$workdir"
 }
@@ -1876,6 +1972,7 @@ main() {
   test_deploy_operator_respects_scan_backfill_from_height_override
   test_deploy_operator_stages_distributed_dkg_server_tls
   test_deploy_operator_prefers_manifest_private_endpoints_for_dkg_peer_hosts
+  test_deploy_operator_prefers_confirmed_private_operator_host_over_tag_fallback
   test_deploy_operator_resolves_stale_peer_hosts_by_operator_profile_tag
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
   test_deploy_operator_prepare_only_stages_without_rollout
