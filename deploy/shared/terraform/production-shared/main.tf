@@ -1535,7 +1535,7 @@ resource "aws_launch_template" "proof_role" {
       "$@"
     }
     run_with_retry apt-get update -y
-    run_with_retry apt-get install -y ca-certificates curl jq unzip
+    run_with_retry apt-get install -y ca-certificates curl jq netcat-openbsd postgresql-client unzip
     arch="$(uname -m)"
     case "$arch" in
       x86_64) awscli_arch="x86_64" ;;

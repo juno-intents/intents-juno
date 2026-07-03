@@ -131,6 +131,7 @@ main() {
   assert_contains "$main_tf" 'resource "aws_iam_instance_profile" "proof_role"' "production-shared provisions a proof-role instance profile"
   assert_contains "$main_tf" 'resource "aws_iam_role_policy_attachment" "proof_role_ssm_managed_instance_core"' "production-shared attaches SSM managed instance core to the proof-role instance role"
   assert_contains "$main_tf" 'policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"' "production-shared uses the AWS-managed SSM instance core policy for proof-role canaries"
+  assert_contains "$proof_role_launch_template" 'run_with_retry apt-get install -y ca-certificates curl jq netcat-openbsd postgresql-client unzip' "production-shared proof-role bootstrap installs shared canary network dependencies"
   assert_contains "$proof_role_launch_template" 'snap list amazon-ssm-agent' "production-shared proof-role bootstrap prefers the preinstalled snap SSM agent when present"
   assert_contains "$proof_role_launch_template" 'snap.amazon-ssm-agent.amazon-ssm-agent.service' "production-shared proof-role bootstrap enables and starts the snap SSM agent service"
   assert_contains "$proof_role_launch_template" 'debian_amd64' "production-shared proof-role bootstrap supports amd64 SSM agent packages"
