@@ -291,6 +291,42 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_ssm_canary_fetches_queue_dsn_secret_on_remote_host() {
+  local tmp manifest fake_bin log_dir output_json commands secret_arn
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_dir="$tmp/logs"
+  output_json="$tmp/output.json"
+  secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:intents-juno-shared-mainnet-shared-postgres-dsn-AbCdEf"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_shared_manifest_for_ssm_canary "$manifest"
+  write_fake_aws_for_shared_ssm "$fake_bin/aws" "$log_dir"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --queue-inspect-postgres-dsn-secret-arn "$secret_arn" >"$output_json"
+  )
+
+  commands="$(cat "$log_dir/commands.log")"
+  assert_contains "$commands" "command -v aws >/dev/null" "secret mode preflights remote aws cli"
+  assert_contains "$commands" "aws --region us-east-1 secretsmanager get-secret-value --secret-id $secret_arn --query SecretString --output text" "secret mode fetches queue dsn with instance profile"
+  assert_contains "$commands" 'POSTGRES_DSN="$(AWS_PAGER="" aws' "secret mode captures the dsn without printing it"
+  assert_contains "$commands" '[[ -z "$POSTGRES_DSN" || "$POSTGRES_DSN" == "None" ]]' "secret mode validates non-empty secret value"
+  assert_contains "$commands" "export POSTGRES_DSN" "secret mode exports dsn for queue-inspect"
+  assert_contains "$commands" "PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV=POSTGRES_DSN" "secret mode keeps queue-inspect env indirection"
+  assert_not_contains "$commands" "source /etc/intents-juno/proof-requestor.env" "secret mode does not require a host runtime env file"
+  assert_not_contains "$commands" "postgres://queue.example.invalid" "secret mode does not expose dsn in command text"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "ssm secret canary returns remote ready flag"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "ssm secret canary returns remote queue status"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_ssm_canary_rejects_invalid_release_inputs() {
   local tmp manifest queue_inspect_bin output_json stderr
   tmp="$(mktemp -d)"
@@ -408,6 +444,70 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_ssm_canary_rejects_invalid_queue_dsn_secret_inputs() {
+  local tmp manifest output_json stderr secret_arn
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  output_json="$tmp/output.json"
+  stderr="$tmp/stderr"
+  secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:intents-juno-shared-mainnet-shared-postgres-dsn-AbCdEf"
+  write_shared_manifest_for_ssm_canary "$manifest"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-postgres-dsn-secret-arn "$secret_arn" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject queue dsn secret without queue inspection\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "requires queue inspection" "queue dsn secret requires queue inspection mode"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --queue-inspect-postgres-dsn-secret-arn "" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject empty queue dsn secret arn\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "--queue-inspect-postgres-dsn-secret-arn must not be empty" "explicit empty queue dsn secret arn is rejected"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --queue-inspect-postgres-dsn-secret-arn "not-an-arn" \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject invalid queue dsn secret arn\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "Secrets Manager secret ARN" "queue dsn secret arn syntax is validated locally"
+
+  if (
+    cd "$REPO_ROOT"
+    bash deploy/production/canary-shared-services-ssm.sh \
+      --shared-manifest "$manifest" \
+      --queue-inspect-release-tag app-binaries-v2026.07.03-r1-mainnet \
+      --queue-inspect-postgres-dsn-secret-arn "$secret_arn" \
+      --remote-runtime-env /etc/intents-juno/proof-requestor.env \
+      --dry-run >"$output_json" 2>"$stderr"
+  ); then
+    printf 'expected ssm canary to reject both queue dsn secret and remote runtime env\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$stderr")" "mutually exclusive" "queue dsn secret and runtime env are mutually exclusive"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_ssm_canary_requires_proof_asg() {
   local tmp manifest output_json stderr
   tmp="$(mktemp -d)"
@@ -494,7 +594,9 @@ main() {
   test_shared_services_ssm_canary_dry_run_validates_manifest_without_aws
   test_shared_services_ssm_canary_runs_remote_shared_canary
   test_shared_services_ssm_canary_downloads_queue_inspect_release_on_remote_host
+  test_shared_services_ssm_canary_fetches_queue_dsn_secret_on_remote_host
   test_shared_services_ssm_canary_rejects_invalid_release_inputs
+  test_shared_services_ssm_canary_rejects_invalid_queue_dsn_secret_inputs
   test_shared_services_ssm_canary_requires_proof_asg
   test_shared_services_ssm_canary_rejects_protected_instance_id_before_ssm
   test_shared_services_ssm_canary_rejects_protected_instance_name_before_ssm

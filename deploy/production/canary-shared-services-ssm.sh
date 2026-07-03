@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/lib.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  canary-shared-services-ssm.sh --shared-manifest <path> [--queue-inspect-bin <path> | --queue-inspect-release-tag <tag> [--github-repo <repo>]] [--remote-runtime-env <path>] [--dry-run]
+  canary-shared-services-ssm.sh --shared-manifest <path> [--queue-inspect-bin <path> | --queue-inspect-release-tag <tag> [--github-repo <repo>]] [--queue-inspect-postgres-dsn-secret-arn <arn> | --remote-runtime-env <path>] [--dry-run]
 
 Checks:
   - Resolves a healthy shared proof-role instance from shared_roles.proof.asg
@@ -30,7 +30,10 @@ queue_inspect_release_tag=""
 queue_inspect_release_tag_provided="false"
 github_repo="juno-intents/intents-juno"
 github_repo_provided="false"
+queue_inspect_postgres_dsn_secret_arn=""
+queue_inspect_postgres_dsn_secret_arn_provided="false"
 remote_runtime_env="/etc/intents-juno/proof-requestor.env"
+remote_runtime_env_provided="false"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -54,8 +57,14 @@ while [[ $# -gt 0 ]]; do
       github_repo_provided="true"
       shift 2
       ;;
+    --queue-inspect-postgres-dsn-secret-arn)
+      queue_inspect_postgres_dsn_secret_arn="$2"
+      queue_inspect_postgres_dsn_secret_arn_provided="true"
+      shift 2
+      ;;
     --remote-runtime-env)
       remote_runtime_env="$2"
+      remote_runtime_env_provided="true"
       shift 2
       ;;
     --dry-run)
@@ -95,6 +104,19 @@ if [[ "$queue_inspect_release_tag_provided" == "true" ]]; then
     || die "--github-repo must use owner/name syntax with safe characters"
   [[ "$queue_inspect_release_tag" =~ ^app-binaries-v[0-9]{4}\.[0-9]{2}\.[0-9]{2}-r[0-9]+-(testnet|mainnet)$ ]] \
     || die "--queue-inspect-release-tag must be a pinned app-binaries release ending in -testnet or -mainnet"
+fi
+if [[ "$queue_inspect_postgres_dsn_secret_arn_provided" == "true" && "$remote_runtime_env_provided" == "true" ]]; then
+  die "--queue-inspect-postgres-dsn-secret-arn and --remote-runtime-env are mutually exclusive"
+fi
+if [[ "$queue_inspect_postgres_dsn_secret_arn_provided" == "true" && "$queue_inspect_bin_provided" != "true" && "$queue_inspect_release_tag_provided" != "true" ]]; then
+  die "--queue-inspect-postgres-dsn-secret-arn requires queue inspection"
+fi
+if [[ "$queue_inspect_postgres_dsn_secret_arn_provided" == "true" && -z "$queue_inspect_postgres_dsn_secret_arn" ]]; then
+  die "--queue-inspect-postgres-dsn-secret-arn must not be empty"
+fi
+if [[ "$queue_inspect_postgres_dsn_secret_arn_provided" == "true" ]]; then
+  [[ "$queue_inspect_postgres_dsn_secret_arn" =~ ^arn:aws[a-zA-Z-]*:secretsmanager:[A-Za-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$ ]] \
+    || die "--queue-inspect-postgres-dsn-secret-arn must be a Secrets Manager secret ARN"
 fi
 
 for cmd in jq; do
@@ -231,12 +253,14 @@ fi
 printf -v remote_stage_dir_q '%q' "$remote_stage_dir"
 printf -v remote_manifest_q '%q' "$remote_stage_dir/shared-manifest.json"
 printf -v remote_canary_q '%q' "$remote_stage_dir/deploy/production/canary-shared-services.sh"
+printf -v aws_region_q '%q' "$aws_region"
 printf -v remote_runtime_env_q '%q' "$remote_runtime_env"
 printf -v remote_queue_inspect_bin_q '%q' "$remote_queue_inspect_bin"
 printf -v remote_queue_inspect_asset_q '%q' "$remote_queue_inspect_asset"
 printf -v remote_queue_inspect_checksum_q '%q' "$remote_queue_inspect_checksum"
 printf -v queue_inspect_asset_url_q '%q' "$queue_inspect_asset_url"
 printf -v queue_inspect_checksum_url_q '%q' "$queue_inspect_checksum_url"
+printf -v queue_inspect_postgres_dsn_secret_arn_q '%q' "$queue_inspect_postgres_dsn_secret_arn"
 
 queue_release_download_block=""
 if [[ -n "$queue_inspect_release_tag" ]]; then
@@ -266,7 +290,24 @@ fi
 
 queue_env_block=""
 if [[ -n "$remote_queue_inspect_bin" ]]; then
-  queue_env_block="$(cat <<EOF
+  if [[ -n "$queue_inspect_postgres_dsn_secret_arn" ]]; then
+    queue_env_block="$(cat <<EOF
+command -v aws >/dev/null 2>&1 || {
+  echo "required command not found for queue-inspect postgres dsn secret: aws" >&2
+  exit 1
+}
+POSTGRES_DSN="\$(AWS_PAGER="" aws --region $aws_region_q secretsmanager get-secret-value --secret-id $queue_inspect_postgres_dsn_secret_arn_q --query SecretString --output text)"
+if [[ -z "\$POSTGRES_DSN" || "\$POSTGRES_DSN" == "None" ]]; then
+  echo "queue-inspect postgres dsn secret is empty" >&2
+  exit 1
+fi
+export POSTGRES_DSN
+export PRODUCTION_CANARY_QUEUE_INSPECT_BIN=$remote_queue_inspect_bin_q
+export PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV=POSTGRES_DSN
+EOF
+)"
+  else
+    queue_env_block="$(cat <<EOF
 if [[ ! -f $remote_runtime_env_q ]]; then
   echo "remote runtime env not found: $remote_runtime_env" >&2
   exit 1
@@ -278,6 +319,7 @@ export PRODUCTION_CANARY_QUEUE_INSPECT_BIN=$remote_queue_inspect_bin_q
 export PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV=POSTGRES_DSN
 EOF
 )"
+  fi
 fi
 
 remote_command="$(cat <<EOF
