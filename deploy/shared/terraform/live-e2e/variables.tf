@@ -245,6 +245,28 @@ variable "shared_kafka_port" {
   }
 }
 
+variable "shared_queue_driver" {
+  description = "Shared queue transport that controls live-e2e MSK lifecycle. Kafka remains the default until all managed e2e queue paths have cut over."
+  type        = string
+  default     = "kafka"
+
+  validation {
+    condition     = contains(["kafka", "postgres"], lower(trimspace(var.shared_queue_driver)))
+    error_message = "shared_queue_driver must be one of kafka or postgres."
+  }
+}
+
+variable "shared_proof_queue_driver" {
+  description = "Optional proof-service queue transport override. Empty follows shared_queue_driver so proof ECS can cut over before MSK deletion."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = trimspace(var.shared_proof_queue_driver) == "" || contains(["kafka", "postgres"], lower(trimspace(var.shared_proof_queue_driver)))
+    error_message = "shared_proof_queue_driver must be empty or one of kafka or postgres."
+  }
+}
+
 variable "shared_msk_kafka_version" {
   description = "MSK Kafka version for live e2e shared services."
   type        = string

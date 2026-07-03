@@ -16,10 +16,16 @@ cleanup_primary_state_file=""
 cleanup_primary_tfvars_file=""
 cleanup_primary_aws_region=""
 cleanup_primary_sp1_requestor_secret_arn=""
+cleanup_primary_sp1_funder_secret_arn=""
+cleanup_primary_sp1_requestor_secret_marker_file=""
+cleanup_primary_sp1_funder_secret_marker_file=""
 cleanup_dr_state_file=""
 cleanup_dr_tfvars_file=""
 cleanup_dr_aws_region=""
 cleanup_dr_sp1_requestor_secret_arn=""
+cleanup_dr_sp1_funder_secret_arn=""
+cleanup_dr_sp1_requestor_secret_marker_file=""
+cleanup_dr_sp1_funder_secret_marker_file=""
 AWS_ENV_ARGS=()
 DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX=""
 DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX=""
@@ -94,10 +100,15 @@ run options:
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
   --sp1-requestor-key-file <p>   required file with SP1 requestor private key hex
+  --sp1-funder-key-file <p>      file with SP1 proof-funder key hex when creating funder secrets
   --shared-sp1-requestor-secret-arn <arn>
                                        optional pre-existing primary-region secret ARN for shared proof services
   --shared-sp1-requestor-secret-arn-dr <arn>
                                        optional pre-existing DR-region secret ARN for shared proof services
+  --shared-sp1-funder-secret-arn <arn>
+                                       optional pre-existing primary-region funder secret ARN for shared proof services
+  --shared-sp1-funder-secret-arn-dr <arn>
+                                       optional pre-existing DR-region funder secret ARN for shared proof services
   --shared-proof-services-image <image>
                                        optional explicit shared proof-services image
                                        (deploys this image for shared proof-requestor/proof-funder services)
@@ -115,7 +126,7 @@ run options:
   --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
   --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
-  --shared-kafka-port <port>           shared MSK TLS Kafka TCP port (default: 9094)
+  --shared-kafka-port <port>           shared MSK SASL/IAM Kafka TCP port (default: 9098)
   --relayer-runtime-mode <mode>        relayer runtime mode for run-testnet-e2e.sh (runner|distributed, default: distributed)
   --distributed-relayer-runtime        shorthand for --relayer-runtime-mode distributed
   --keep-infra                         do not destroy infra at the end
@@ -587,6 +598,7 @@ run_preflight_aws_reachability_probes() {
   local aws_profile="$1"
   local aws_region="$2"
   local with_shared_services="$3"
+  local shared_queue_requires_kafka="${4:-true}"
 
   aws_env_args "$aws_profile" "$aws_region"
   run_required_aws_probe \
@@ -601,11 +613,15 @@ run_preflight_aws_reachability_probes() {
         --engine aurora-postgresql \
         --default-only \
         --max-records 20
-    run_required_aws_probe \
-      "kafka:ListClustersV2" \
-      env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
-        --region "$aws_region" \
-        --max-results 1
+    if [[ "$shared_queue_requires_kafka" == "true" ]]; then
+      run_required_aws_probe \
+        "kafka:ListClustersV2" \
+        env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
+          --region "$aws_region" \
+          --max-results 1
+    else
+      log "skipping kafka preflight probe because all active shared queue paths use postgres"
+    fi
     run_required_aws_probe \
       "ecs:ListClusters" \
       env "${AWS_ENV_ARGS[@]}" aws ecs list-clusters \
@@ -723,25 +739,35 @@ aws_env_args() {
   fi
 }
 
-create_sp1_requestor_secret() {
+create_sp1_secret() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_name="$3"
   local secret_value="$4"
+  local secret_kind="$5"
 
-  [[ -n "$secret_name" ]] || die "sp1 requestor secret name is required"
-  [[ -n "$secret_value" ]] || die "sp1 requestor secret value is required"
+  [[ -n "$secret_name" ]] || die "sp1 secret name is required"
+  [[ -n "$secret_value" ]] || die "sp1 secret value is required"
+  [[ -n "$secret_kind" ]] || die "sp1 secret kind is required"
 
   aws_env_args "$aws_profile" "$aws_region"
   env "${AWS_ENV_ARGS[@]}" aws secretsmanager create-secret \
     --name "$secret_name" \
-    --description "sp1 requestor key for intents-juno live e2e" \
+    --description "sp1 ${secret_kind} key for intents-juno live e2e" \
     --secret-string "$secret_value" \
     --query 'ARN' \
     --output text
 }
 
-delete_sp1_requestor_secret() {
+create_sp1_requestor_secret() {
+  create_sp1_secret "$1" "$2" "$3" "$4" "requestor"
+}
+
+create_sp1_funder_secret() {
+  create_sp1_secret "$1" "$2" "$3" "$4" "funder"
+}
+
+delete_sp1_secret() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_id="$3"
@@ -754,7 +780,15 @@ delete_sp1_requestor_secret() {
     --force-delete-without-recovery >/dev/null
 }
 
-sp1_requestor_secret_exists() {
+delete_sp1_requestor_secret() {
+  delete_sp1_secret "$1" "$2" "$3"
+}
+
+delete_sp1_funder_secret() {
+  delete_sp1_secret "$1" "$2" "$3"
+}
+
+sp1_secret_exists() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_id="$3"
@@ -764,6 +798,73 @@ sp1_requestor_secret_exists() {
   aws_env_args "$aws_profile" "$aws_region"
   env "${AWS_ENV_ARGS[@]}" aws secretsmanager describe-secret \
     --secret-id "$secret_id" >/dev/null 2>&1
+}
+
+sp1_requestor_secret_exists() {
+  sp1_secret_exists "$1" "$2" "$3"
+}
+
+sp1_funder_secret_exists() {
+  sp1_secret_exists "$1" "$2" "$3"
+}
+
+write_created_sp1_secret_marker() {
+  local marker_file="$1"
+  local secret_arn="$2"
+  local aws_region="$3"
+
+  [[ -n "$marker_file" ]] || die "created sp1 secret marker path is required"
+  [[ -n "$secret_arn" ]] || die "created sp1 secret arn is required"
+  [[ -n "$aws_region" ]] || die "created sp1 secret region is required"
+
+  ensure_dir "$(dirname "$marker_file")"
+  jq -n \
+    --arg arn "$secret_arn" \
+    --arg region "$aws_region" \
+    '{arn: $arn, region: $region}' >"$marker_file"
+}
+
+created_sp1_secret_marker_arn() {
+  local marker_file="$1"
+  [[ -f "$marker_file" ]] || return 0
+  jq -r '.arn // empty' "$marker_file"
+}
+
+created_sp1_secret_marker_region() {
+  local marker_file="$1"
+  [[ -f "$marker_file" ]] || return 0
+  jq -r '.region // empty' "$marker_file"
+}
+
+created_sp1_secret_marker_matches() {
+  local marker_file="$1"
+  local secret_arn="$2"
+
+  [[ -n "$secret_arn" && -f "$marker_file" ]] || return 1
+  [[ "$(created_sp1_secret_marker_arn "$marker_file")" == "$secret_arn" ]]
+}
+
+delete_created_sp1_secret_marker() {
+  local aws_profile="$1"
+  local fallback_region="$2"
+  local marker_file="$3"
+  local secret_kind="$4"
+
+  [[ -f "$marker_file" ]] || return 0
+
+  local secret_arn marker_region delete_region
+  secret_arn="$(created_sp1_secret_marker_arn "$marker_file")"
+  marker_region="$(created_sp1_secret_marker_region "$marker_file")"
+  delete_region="${marker_region:-$fallback_region}"
+  [[ -n "$secret_arn" ]] || return 0
+  [[ -n "$delete_region" ]] || die "region is required to delete created $secret_kind secret"
+
+  log "cleanup: deleting created $secret_kind secret"
+  if delete_sp1_secret "$aws_profile" "$delete_region" "$secret_arn"; then
+    rm -f "$marker_file"
+  else
+    log "cleanup: created $secret_kind secret delete failed or secret already removed"
+  fi
 }
 
 run_with_retry() {
@@ -887,19 +988,10 @@ cleanup_trap() {
     fi
   fi
 
-  if [[ -n "$cleanup_dr_sp1_requestor_secret_arn" ]]; then
-    log "cleanup trap: deleting dr sp1 requestor secret"
-    if ! delete_sp1_requestor_secret "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_sp1_requestor_secret_arn"; then
-      log "cleanup trap dr secret delete failed (manual cleanup may be required)"
-    fi
-  fi
-
-  if [[ -n "$cleanup_primary_sp1_requestor_secret_arn" ]]; then
-    log "cleanup trap: deleting primary sp1 requestor secret"
-    if ! delete_sp1_requestor_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_requestor_secret_arn"; then
-      log "cleanup trap primary secret delete failed (manual cleanup may be required)"
-    fi
-  fi
+  delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_sp1_requestor_secret_marker_file" "dr sp1 requestor"
+  delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_sp1_funder_secret_marker_file" "dr sp1 funder"
+  delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_requestor_secret_marker_file" "primary sp1 requestor"
+  delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_funder_secret_marker_file" "primary sp1 funder"
 }
 
 rollout_shared_proof_services() {
@@ -1187,6 +1279,7 @@ validate_shared_services_dr_readiness() {
   local aws_profile="$1"
   local aws_region="$2"
   local aws_dr_region="$3"
+  local shared_queue_requires_kafka="${4:-true}"
 
   [[ -n "$aws_dr_region" ]] || die "--aws-dr-region is required when shared services are enabled"
   [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
@@ -1217,11 +1310,15 @@ validate_shared_services_dr_readiness() {
       --default-only \
       --max-records 20
 
-  run_optional_dr_readiness_probe \
-    "kafka:ListClustersV2" \
-    env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
-      --region "$aws_dr_region" \
-      --max-results 1
+  if [[ "$shared_queue_requires_kafka" == "true" ]]; then
+    run_optional_dr_readiness_probe \
+      "kafka:ListClustersV2" \
+      env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
+        --region "$aws_dr_region" \
+        --max-results 1
+  else
+    log "skipping dr kafka readiness probe because all active shared queue paths use postgres"
+  fi
 
   run_optional_dr_readiness_probe \
     "ecs:ListClusters" \
@@ -2500,8 +2597,20 @@ command_cleanup() {
   tfvars_file="$infra_dir/terraform.tfvars.json"
   dr_state_file="$infra_dir/dr/terraform.tfstate"
   dr_tfvars_file="$infra_dir/dr/terraform.tfvars.json"
+  local created_primary_sp1_requestor_secret_marker_file
+  local created_primary_sp1_funder_secret_marker_file
+  local created_dr_sp1_requestor_secret_marker_file
+  local created_dr_sp1_funder_secret_marker_file
+  created_primary_sp1_requestor_secret_marker_file="$infra_dir/created-sp1-requestor-secret.json"
+  created_primary_sp1_funder_secret_marker_file="$infra_dir/created-sp1-funder-secret.json"
+  created_dr_sp1_requestor_secret_marker_file="$infra_dir/dr/created-sp1-requestor-secret.json"
+  created_dr_sp1_funder_secret_marker_file="$infra_dir/dr/created-sp1-funder-secret.json"
 
-  if [[ ! -f "$tfvars_file" && ! -f "$dr_tfvars_file" ]]; then
+  if [[ ! -f "$tfvars_file" && ! -f "$dr_tfvars_file" &&
+        ! -f "$created_primary_sp1_requestor_secret_marker_file" &&
+        ! -f "$created_primary_sp1_funder_secret_marker_file" &&
+        ! -f "$created_dr_sp1_requestor_secret_marker_file" &&
+        ! -f "$created_dr_sp1_funder_secret_marker_file" ]]; then
     log "cleanup: primary/dr tfvars files not found; nothing to destroy"
     return 0
   fi
@@ -2514,15 +2623,6 @@ command_cleanup() {
   fi
   if [[ -z "$dr_region_for_cleanup" && -f "$dr_tfvars_file" ]]; then
     dr_region_for_cleanup="$(jq -r '.aws_region // empty' "$dr_tfvars_file")"
-  fi
-
-  local sp1_requestor_secret_arn=""
-  local sp1_requestor_secret_arn_dr=""
-  if [[ -f "$tfvars_file" ]]; then
-    sp1_requestor_secret_arn="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$tfvars_file")"
-  fi
-  if [[ -f "$dr_tfvars_file" ]]; then
-    sp1_requestor_secret_arn_dr="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$dr_tfvars_file")"
   fi
 
   if [[ -f "$dr_tfvars_file" ]]; then
@@ -2539,19 +2639,10 @@ command_cleanup() {
     fi
   fi
 
-  if [[ -n "$sp1_requestor_secret_arn_dr" ]]; then
-    log "cleanup: deleting dr sp1 requestor secret"
-    if ! delete_sp1_requestor_secret "$aws_profile" "$dr_region_for_cleanup" "$sp1_requestor_secret_arn_dr"; then
-      log "cleanup: dr sp1 requestor secret delete failed or secret already removed"
-    fi
-  fi
-
-  if [[ -n "$sp1_requestor_secret_arn" ]]; then
-    log "cleanup: deleting primary sp1 requestor secret"
-    if ! delete_sp1_requestor_secret "$aws_profile" "$primary_region_for_cleanup" "$sp1_requestor_secret_arn"; then
-      log "cleanup: primary sp1 requestor secret delete failed or secret already removed"
-    fi
-  fi
+  delete_created_sp1_secret_marker "$aws_profile" "$dr_region_for_cleanup" "$created_dr_sp1_requestor_secret_marker_file" "dr sp1 requestor"
+  delete_created_sp1_secret_marker "$aws_profile" "$dr_region_for_cleanup" "$created_dr_sp1_funder_secret_marker_file" "dr sp1 funder"
+  delete_created_sp1_secret_marker "$aws_profile" "$primary_region_for_cleanup" "$created_primary_sp1_requestor_secret_marker_file" "primary sp1 requestor"
+  delete_created_sp1_secret_marker "$aws_profile" "$primary_region_for_cleanup" "$created_primary_sp1_funder_secret_marker_file" "primary sp1 funder"
 }
 
 command_run() {
@@ -2590,8 +2681,11 @@ command_run() {
   local juno_rpc_pass_file=""
   local juno_scan_bearer_token_file=""
   local sp1_requestor_key_file=""
+  local sp1_funder_key_file=""
   local shared_sp1_requestor_secret_arn_override=""
   local shared_sp1_requestor_secret_arn_dr_override=""
+  local shared_sp1_funder_secret_arn_override=""
+  local shared_sp1_funder_secret_arn_dr_override=""
   local shared_proof_services_image_override=""
   local shared_proof_services_image_release_tag="$DEFAULT_SHARED_PROOF_SERVICES_IMAGE_RELEASE_TAG"
   local shared_proof_services_image_release_tag_explicit="false"
@@ -2600,7 +2694,7 @@ command_run() {
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
   local shared_postgres_port="5432"
-  local shared_kafka_port="9094"
+  local shared_kafka_port="9098"
   local relayer_runtime_mode="distributed"
   local relayer_runtime_mode_explicit="false"
   local distributed_relayer_runtime_explicit="false"
@@ -2774,6 +2868,11 @@ command_run() {
         sp1_requestor_key_file="$2"
         shift 2
         ;;
+      --sp1-funder-key-file)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-funder-key-file"
+        sp1_funder_key_file="$2"
+        shift 2
+        ;;
       --shared-sp1-requestor-secret-arn)
         [[ $# -ge 2 ]] || die "missing value for --shared-sp1-requestor-secret-arn"
         shared_sp1_requestor_secret_arn_override="$2"
@@ -2782,6 +2881,16 @@ command_run() {
       --shared-sp1-requestor-secret-arn-dr)
         [[ $# -ge 2 ]] || die "missing value for --shared-sp1-requestor-secret-arn-dr"
         shared_sp1_requestor_secret_arn_dr_override="$2"
+        shift 2
+        ;;
+      --shared-sp1-funder-secret-arn)
+        [[ $# -ge 2 ]] || die "missing value for --shared-sp1-funder-secret-arn"
+        shared_sp1_funder_secret_arn_override="$2"
+        shift 2
+        ;;
+      --shared-sp1-funder-secret-arn-dr)
+        [[ $# -ge 2 ]] || die "missing value for --shared-sp1-funder-secret-arn-dr"
+        shared_sp1_funder_secret_arn_dr_override="$2"
         shift 2
         ;;
       --shared-proof-services-image)
@@ -2919,6 +3028,10 @@ command_run() {
       [[ -n "$shared_sp1_requestor_secret_arn_override" ]] || die "--shared-sp1-requestor-secret-arn-dr requires --shared-sp1-requestor-secret-arn"
       [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]] || die "--shared-sp1-requestor-secret-arn requires --shared-sp1-requestor-secret-arn-dr"
     fi
+    if [[ -n "$shared_sp1_funder_secret_arn_override" || -n "$shared_sp1_funder_secret_arn_dr_override" ]]; then
+      [[ -n "$shared_sp1_funder_secret_arn_override" ]] || die "--shared-sp1-funder-secret-arn-dr requires --shared-sp1-funder-secret-arn"
+      [[ -n "$shared_sp1_funder_secret_arn_dr_override" ]] || die "--shared-sp1-funder-secret-arn requires --shared-sp1-funder-secret-arn-dr"
+    fi
     if [[ -n "$shared_proof_services_image_override" ]]; then
       [[ "$shared_proof_services_image_override" =~ [[:space:]] ]] && die "--shared-proof-services-image must not contain whitespace"
       log "using provided shared proof services image override: $shared_proof_services_image_override"
@@ -3039,8 +3152,11 @@ command_run() {
   effective_operator_queue_driver="$(forwarded_queue_driver_or_default "--operator-queue-driver" "kafka" "${e2e_args[@]}")"
   effective_checkpoint_queue_driver="$(forwarded_queue_driver_or_default "--checkpoint-queue-driver" "kafka" "${e2e_args[@]}")"
   effective_proof_queue_driver="$(forwarded_queue_driver_or_default "--proof-queue-driver" "kafka" "${e2e_args[@]}")"
+  local shared_queue_driver="kafka"
+  local shared_proof_queue_driver="$effective_proof_queue_driver"
   local shared_queue_requires_kafka="true"
   if [[ "$effective_operator_queue_driver" == "postgres" && "$effective_checkpoint_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then
+    shared_queue_driver="postgres"
     shared_queue_requires_kafka="false"
   fi
   if [[ "$with_shared_services" != "true" ]]; then
@@ -3150,14 +3266,14 @@ command_run() {
 
   if [[ "$with_shared_services" == "true" ]]; then
     log "shared services are enabled; validating dr readiness"
-    validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"
+    validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region" "$shared_queue_requires_kafka"
   elif [[ -n "$aws_dr_region" && "$aws_dr_readiness_checks_enabled" == "true" ]]; then
     log "shared services disabled; skipping dr readiness checks for aws-dr-region=$aws_dr_region"
   fi
 
   if [[ "$preflight_only" == "true" ]]; then
     log "running preflight hard-block checks"
-    run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"
+    run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services" "$shared_queue_requires_kafka"
 
     if [[ "$skip_distributed_dkg" == "true" || "$skip_terraform_apply" == "true" ]]; then
       local resume_tfvars_file resume_state_file
@@ -3248,6 +3364,14 @@ command_run() {
     dr_state_file="$infra_dir/dr/terraform.tfstate"
     ensure_dir "$(dirname "$dr_tfvars_file")"
   fi
+  local created_primary_sp1_requestor_secret_marker_file
+  local created_primary_sp1_funder_secret_marker_file
+  local created_dr_sp1_requestor_secret_marker_file
+  local created_dr_sp1_funder_secret_marker_file
+  created_primary_sp1_requestor_secret_marker_file="$infra_dir/created-sp1-requestor-secret.json"
+  created_primary_sp1_funder_secret_marker_file="$infra_dir/created-sp1-funder-secret.json"
+  created_dr_sp1_requestor_secret_marker_file="$infra_dir/dr/created-sp1-requestor-secret.json"
+  created_dr_sp1_funder_secret_marker_file="$infra_dir/dr/created-sp1-funder-secret.json"
 
   if [[ "$skip_terraform_apply" == "true" ]]; then
     if [[ ! -f "$tfvars_file" || ! -f "$state_file" ]]; then
@@ -3261,16 +3385,20 @@ command_run() {
   local existing_deployment_id=""
   local existing_shared_postgres_password=""
   local existing_sp1_requestor_secret_arn=""
+  local existing_sp1_funder_secret_arn=""
   local existing_dr_deployment_id=""
   local existing_sp1_requestor_secret_arn_dr=""
+  local existing_sp1_funder_secret_arn_dr=""
   if [[ -f "$tfvars_file" ]]; then
     existing_deployment_id="$(jq -r '.deployment_id // empty' "$tfvars_file")"
     existing_shared_postgres_password="$(jq -r '.shared_postgres_password // empty' "$tfvars_file")"
     existing_sp1_requestor_secret_arn="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$tfvars_file")"
+    existing_sp1_funder_secret_arn="$(jq -r '.shared_sp1_funder_secret_arn // empty' "$tfvars_file")"
   fi
   if [[ "$with_shared_services" == "true" && -f "$dr_tfvars_file" ]]; then
     existing_dr_deployment_id="$(jq -r '.deployment_id // empty' "$dr_tfvars_file")"
     existing_sp1_requestor_secret_arn_dr="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$dr_tfvars_file")"
+    existing_sp1_funder_secret_arn_dr="$(jq -r '.shared_sp1_funder_secret_arn // empty' "$dr_tfvars_file")"
   fi
 
   local deployment_id
@@ -3304,10 +3432,23 @@ command_run() {
   local sp1_requestor_key_hex
   sp1_requestor_key_hex="$(trimmed_file_value "$sp1_requestor_key_file")"
   [[ -n "$sp1_requestor_key_hex" ]] || die "sp1 requestor key file is empty: $sp1_requestor_key_file"
+  local sp1_funder_key_hex=""
+  load_sp1_funder_key_hex() {
+    if [[ -z "$sp1_funder_key_hex" ]]; then
+      [[ -n "$sp1_funder_key_file" ]] || die "--sp1-funder-key-file is required to create SP1 funder secrets"
+      [[ -f "$sp1_funder_key_file" ]] || die "sp1 funder key file not found: $sp1_funder_key_file"
+      sp1_funder_key_hex="$(trimmed_file_value "$sp1_funder_key_file")"
+      [[ -n "$sp1_funder_key_hex" ]] || die "sp1 funder key file is empty: $sp1_funder_key_file"
+    fi
+  }
   local sp1_requestor_secret_arn=""
   local sp1_requestor_secret_arn_dr=""
+  local sp1_funder_secret_arn=""
+  local sp1_funder_secret_arn_dr=""
   local sp1_requestor_secret_created="false"
   local sp1_requestor_secret_dr_created="false"
+  local sp1_funder_secret_created="false"
+  local sp1_funder_secret_dr_created="false"
 
   cleanup_terraform_dir="$terraform_dir"
   cleanup_aws_profile="$aws_profile"
@@ -3315,10 +3456,16 @@ command_run() {
   cleanup_primary_tfvars_file="$tfvars_file"
   cleanup_primary_aws_region="$aws_region"
   cleanup_primary_sp1_requestor_secret_arn=""
+  cleanup_primary_sp1_funder_secret_arn=""
+  cleanup_primary_sp1_requestor_secret_marker_file="$created_primary_sp1_requestor_secret_marker_file"
+  cleanup_primary_sp1_funder_secret_marker_file="$created_primary_sp1_funder_secret_marker_file"
   cleanup_dr_state_file="$dr_state_file"
   cleanup_dr_tfvars_file="$dr_tfvars_file"
   cleanup_dr_aws_region="$aws_dr_region"
   cleanup_dr_sp1_requestor_secret_arn=""
+  cleanup_dr_sp1_funder_secret_arn=""
+  cleanup_dr_sp1_requestor_secret_marker_file="$created_dr_sp1_requestor_secret_marker_file"
+  cleanup_dr_sp1_funder_secret_marker_file="$created_dr_sp1_funder_secret_marker_file"
   cleanup_enabled="true"
   if [[ "$keep_infra" == "true" ]]; then
     cleanup_enabled="false"
@@ -3338,13 +3485,27 @@ command_run() {
       else
         sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
       fi
+      if [[ -n "$shared_sp1_funder_secret_arn_override" ]]; then
+        sp1_funder_secret_arn="$shared_sp1_funder_secret_arn_override"
+      else
+        sp1_funder_secret_arn="$existing_sp1_funder_secret_arn"
+      fi
+      if [[ -n "$shared_sp1_funder_secret_arn_dr_override" ]]; then
+        sp1_funder_secret_arn_dr="$shared_sp1_funder_secret_arn_dr_override"
+      else
+        sp1_funder_secret_arn_dr="$existing_sp1_funder_secret_arn_dr"
+      fi
       [[ -n "$sp1_requestor_secret_arn" ]] || \
         die "--skip-terraform-apply requires existing shared_sp1_requestor_secret_arn in terraform.tfvars.json"
       [[ -n "$sp1_requestor_secret_arn_dr" ]] || \
         die "--skip-terraform-apply requires existing dr shared_sp1_requestor_secret_arn in terraform.tfvars.json"
+      [[ -n "$sp1_funder_secret_arn" ]] || \
+        die "--skip-terraform-apply requires existing shared_sp1_funder_secret_arn in terraform.tfvars.json"
+      [[ -n "$sp1_funder_secret_arn_dr" ]] || \
+        die "--skip-terraform-apply requires existing dr shared_sp1_funder_secret_arn in terraform.tfvars.json"
     else
-      local secret_name_prefix sp1_requestor_secret_name
-      local sp1_requestor_secret_name_dr
+      local secret_name_prefix sp1_requestor_secret_name sp1_funder_secret_name
+      local sp1_requestor_secret_name_dr sp1_funder_secret_name_dr
       secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
       secret_name_prefix="${secret_name_prefix#-}"
       secret_name_prefix="${secret_name_prefix%-}"
@@ -3355,6 +3516,9 @@ command_run() {
       elif [[ -n "$existing_sp1_requestor_secret_arn" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_sp1_requestor_secret_arn"; then
         sp1_requestor_secret_arn="$existing_sp1_requestor_secret_arn"
         log "reusing sp1 requestor secret: $sp1_requestor_secret_arn"
+        if created_sp1_secret_marker_matches "$created_primary_sp1_requestor_secret_marker_file" "$sp1_requestor_secret_arn"; then
+          cleanup_primary_sp1_requestor_secret_arn="$sp1_requestor_secret_arn"
+        fi
       else
         sp1_requestor_secret_name="${secret_name_prefix}-${deployment_id}-sp1-requestor-key"
         log "creating sp1 requestor secret"
@@ -3369,7 +3533,36 @@ command_run() {
         sp1_requestor_secret_created="true"
       fi
       if [[ "$sp1_requestor_secret_created" == "true" ]]; then
+        write_created_sp1_secret_marker "$created_primary_sp1_requestor_secret_marker_file" "$sp1_requestor_secret_arn" "$aws_region"
         cleanup_primary_sp1_requestor_secret_arn="$sp1_requestor_secret_arn"
+      fi
+
+      if [[ -n "$shared_sp1_funder_secret_arn_override" ]]; then
+        sp1_funder_secret_arn="$shared_sp1_funder_secret_arn_override"
+        log "using provided sp1 funder secret arn: $sp1_funder_secret_arn"
+      elif [[ -n "$existing_sp1_funder_secret_arn" ]] && sp1_funder_secret_exists "$aws_profile" "$aws_region" "$existing_sp1_funder_secret_arn"; then
+        sp1_funder_secret_arn="$existing_sp1_funder_secret_arn"
+        log "reusing sp1 funder secret: $sp1_funder_secret_arn"
+        if created_sp1_secret_marker_matches "$created_primary_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn"; then
+          cleanup_primary_sp1_funder_secret_arn="$sp1_funder_secret_arn"
+        fi
+      else
+        load_sp1_funder_key_hex
+        sp1_funder_secret_name="${secret_name_prefix}-${deployment_id}-sp1-funder-key"
+        log "creating sp1 funder secret"
+        sp1_funder_secret_arn="$(
+          create_sp1_funder_secret \
+            "$aws_profile" \
+            "$aws_region" \
+            "$sp1_funder_secret_name" \
+            "$sp1_funder_key_hex"
+        )"
+        [[ -n "$sp1_funder_secret_arn" && "$sp1_funder_secret_arn" != "None" ]] || die "failed to create sp1 funder secret"
+        sp1_funder_secret_created="true"
+      fi
+      if [[ "$sp1_funder_secret_created" == "true" ]]; then
+        write_created_sp1_secret_marker "$created_primary_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn" "$aws_region"
+        cleanup_primary_sp1_funder_secret_arn="$sp1_funder_secret_arn"
       fi
 
       if [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
@@ -3378,6 +3571,9 @@ command_run() {
       elif [[ -n "$existing_sp1_requestor_secret_arn_dr" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_sp1_requestor_secret_arn_dr"; then
         sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
         log "reusing dr sp1 requestor secret: $sp1_requestor_secret_arn_dr"
+        if created_sp1_secret_marker_matches "$created_dr_sp1_requestor_secret_marker_file" "$sp1_requestor_secret_arn_dr"; then
+          cleanup_dr_sp1_requestor_secret_arn="$sp1_requestor_secret_arn_dr"
+        fi
       else
         sp1_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-sp1-requestor-key"
         log "creating dr sp1 requestor secret"
@@ -3392,9 +3588,42 @@ command_run() {
         sp1_requestor_secret_dr_created="true"
       fi
       if [[ "$sp1_requestor_secret_dr_created" == "true" ]]; then
+        write_created_sp1_secret_marker "$created_dr_sp1_requestor_secret_marker_file" "$sp1_requestor_secret_arn_dr" "$aws_dr_region"
         cleanup_dr_sp1_requestor_secret_arn="$sp1_requestor_secret_arn_dr"
       fi
+
+      if [[ -n "$shared_sp1_funder_secret_arn_dr_override" ]]; then
+        sp1_funder_secret_arn_dr="$shared_sp1_funder_secret_arn_dr_override"
+        log "using provided dr sp1 funder secret arn: $sp1_funder_secret_arn_dr"
+      elif [[ -n "$existing_sp1_funder_secret_arn_dr" ]] && sp1_funder_secret_exists "$aws_profile" "$aws_dr_region" "$existing_sp1_funder_secret_arn_dr"; then
+        sp1_funder_secret_arn_dr="$existing_sp1_funder_secret_arn_dr"
+        log "reusing dr sp1 funder secret: $sp1_funder_secret_arn_dr"
+        if created_sp1_secret_marker_matches "$created_dr_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn_dr"; then
+          cleanup_dr_sp1_funder_secret_arn="$sp1_funder_secret_arn_dr"
+        fi
+      else
+        load_sp1_funder_key_hex
+        sp1_funder_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-sp1-funder-key"
+        log "creating dr sp1 funder secret"
+        sp1_funder_secret_arn_dr="$(
+          create_sp1_funder_secret \
+            "$aws_profile" \
+            "$aws_dr_region" \
+            "$sp1_funder_secret_name_dr" \
+            "$sp1_funder_key_hex"
+        )"
+        [[ -n "$sp1_funder_secret_arn_dr" && "$sp1_funder_secret_arn_dr" != "None" ]] || die "failed to create dr sp1 funder secret"
+        sp1_funder_secret_dr_created="true"
+      fi
+      if [[ "$sp1_funder_secret_dr_created" == "true" ]]; then
+        write_created_sp1_secret_marker "$created_dr_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn_dr" "$aws_dr_region"
+        cleanup_dr_sp1_funder_secret_arn="$sp1_funder_secret_arn_dr"
+      fi
     fi
+    [[ "$sp1_requestor_secret_arn" != "$sp1_funder_secret_arn" ]] || \
+      die "shared_sp1_requestor_secret_arn and shared_sp1_funder_secret_arn must differ"
+    [[ "$sp1_requestor_secret_arn_dr" != "$sp1_funder_secret_arn_dr" ]] || \
+      die "dr shared_sp1_requestor_secret_arn and shared_sp1_funder_secret_arn must differ"
   fi
 
   local provision_shared_services_json
@@ -3428,8 +3657,11 @@ command_run() {
       --arg shared_postgres_db "$shared_postgres_db" \
       --arg shared_proof_service_image "$shared_proof_service_image" \
       --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn" \
+      --arg shared_sp1_funder_secret_arn "$sp1_funder_secret_arn" \
       --argjson shared_postgres_port "$shared_postgres_port" \
       --argjson shared_kafka_port "$shared_kafka_port" \
+      --arg shared_queue_driver "$shared_queue_driver" \
+      --arg shared_proof_queue_driver "$shared_proof_queue_driver" \
       --argjson runner_associate_public_ip_address "$runner_associate_public_ip_address" \
       --argjson operator_associate_public_ip_address "$operator_associate_public_ip_address" \
       --argjson shared_ecs_assign_public_ip "$shared_ecs_assign_public_ip" \
@@ -3455,8 +3687,11 @@ command_run() {
         shared_postgres_db: $shared_postgres_db,
         shared_proof_service_image: $shared_proof_service_image,
         shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+        shared_sp1_funder_secret_arn: $shared_sp1_funder_secret_arn,
         shared_postgres_port: $shared_postgres_port,
         shared_kafka_port: $shared_kafka_port,
+        shared_queue_driver: $shared_queue_driver,
+        shared_proof_queue_driver: $shared_proof_queue_driver,
         runner_associate_public_ip_address: $runner_associate_public_ip_address,
         operator_associate_public_ip_address: $operator_associate_public_ip_address,
         shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
@@ -3473,12 +3708,14 @@ command_run() {
         --arg aws_region "$aws_dr_region" \
         --arg deployment_id "$dr_deployment_id" \
         --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn_dr" \
+        --arg shared_sp1_funder_secret_arn "$sp1_funder_secret_arn_dr" \
         --arg runner_ami_id "$dr_runner_ami_id" \
         --arg operator_ami_id "$dr_operator_ami_id" \
         --arg shared_ami_id "$dr_shared_ami_id" \
         '.aws_region = $aws_region
         | .deployment_id = $deployment_id
         | .shared_sp1_requestor_secret_arn = $shared_sp1_requestor_secret_arn
+        | .shared_sp1_funder_secret_arn = $shared_sp1_funder_secret_arn
         | .runner_ami_id = $runner_ami_id
         | .operator_ami_id = $operator_ami_id
         | .shared_ami_id = $shared_ami_id' \

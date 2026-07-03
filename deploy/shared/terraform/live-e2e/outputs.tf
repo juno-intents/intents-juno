@@ -48,6 +48,16 @@ output "shared_postgres_port" {
   value       = var.shared_postgres_port
 }
 
+output "shared_queue_driver" {
+  description = "Selected shared queue transport."
+  value       = local.shared_queue_driver
+}
+
+output "shared_proof_queue_driver" {
+  description = "Selected proof-service queue transport."
+  value       = local.shared_proof_queue_driver
+}
+
 output "shared_kafka_port" {
   description = "MSK SASL/IAM Kafka port."
   value       = var.shared_kafka_port

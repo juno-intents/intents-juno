@@ -18,6 +18,13 @@ locals {
   }
 }
 
+check "distinct_proof_secret_arns" {
+  assert {
+    condition     = !var.provision_shared_services || var.shared_sp1_requestor_secret_arn != var.shared_sp1_funder_secret_arn
+    error_message = "shared_sp1_requestor_secret_arn and shared_sp1_funder_secret_arn must differ."
+  }
+}
+
 data "aws_subnets" "selected_vpc" {
   dynamic "filter" {
     for_each = var.vpc_id == "" ? [] : [var.vpc_id]
@@ -261,6 +268,20 @@ resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
   secret_string = random_password.shared_ipfs_api_bearer_token[0].result
 }
 
+resource "aws_secretsmanager_secret" "shared_postgres_dsn" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name = "${local.resource_name}-shared-postgres-dsn"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_postgres_dsn" {
+  count = var.provision_shared_services ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.shared_postgres_dsn[0].id
+  secret_string = local.shared_postgres_dsn
+}
+
 resource "random_password" "shared_kafka_critical_hmac_key" {
   count = var.provision_shared_services ? 1 : 0
 
@@ -357,7 +378,7 @@ locals {
     ],
     [
       for statement_json in(
-        var.provision_shared_services ? [
+        local.shared_queue_uses_kafka ? [
           jsonencode({
             Sid    = "AllowSharedMSKConnect"
             Effect = "Allow"
@@ -390,7 +411,13 @@ locals {
               "kafka-cluster:DescribeGroup"
             ]
             Resource = ["${local.shared_kafka_group_arn_prefix}/*"]
-          }),
+          })
+        ] : []
+      ) : jsondecode(statement_json)
+    ],
+    [
+      for statement_json in(
+        var.provision_shared_services ? [
           jsonencode({
             Sid    = "AllowSharedECSServiceRollout"
             Effect = "Allow"
@@ -880,7 +907,7 @@ resource "aws_backup_selection" "shared_postgres" {
 }
 
 resource "aws_msk_configuration" "shared" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_queue_uses_kafka ? 1 : 0
 
   kafka_versions = [var.shared_msk_kafka_version]
   name           = "${local.resource_slug}-shared-msk-config"
@@ -893,7 +920,7 @@ resource "aws_msk_configuration" "shared" {
 }
 
 resource "aws_msk_cluster" "shared" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_queue_uses_kafka ? 1 : 0
 
   cluster_name           = "${local.resource_name}-shared-msk"
   kafka_version          = var.shared_msk_kafka_version
@@ -1015,6 +1042,10 @@ locals {
   shared_deposit_image_id_hex        = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex       = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), try(aws_rds_cluster.shared[0].endpoint, ""), var.shared_postgres_port, urlencode(var.shared_postgres_db))
+  shared_queue_driver                = lower(trimspace(var.shared_queue_driver))
+  shared_proof_queue_driver          = trimspace(var.shared_proof_queue_driver) == "" ? local.shared_queue_driver : lower(trimspace(var.shared_proof_queue_driver))
+  shared_queue_uses_kafka            = var.provision_shared_services && local.shared_queue_driver == "kafka"
+  shared_proof_queue_uses_kafka      = var.provision_shared_services && local.shared_proof_queue_driver == "kafka"
   shared_kafka_cluster_arn           = length(aws_msk_cluster.shared) > 0 ? aws_msk_cluster.shared[0].arn : ""
   shared_kafka_bootstrap_brokers     = length(aws_msk_cluster.shared) > 0 ? aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam : ""
   shared_kafka_topic_arn_prefix      = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
@@ -1029,9 +1060,12 @@ locals {
   shared_sp1_required_credit_buffer  = local.shared_sp1_projected_with_overhead * 3
   shared_sp1_deposit_program_url     = trimspace(var.shared_sp1_deposit_program_url_override) != "" ? trimspace(var.shared_sp1_deposit_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/deposit-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_deposit_image_id_hex) : ""
   shared_sp1_withdraw_program_url    = trimspace(var.shared_sp1_withdraw_program_url_override) != "" ? trimspace(var.shared_sp1_withdraw_program_url_override) : can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
-  shared_proof_requestor_command = [
+  shared_queue_kafka_args            = ["--queue-brokers", local.shared_kafka_bootstrap_brokers]
+  shared_queue_postgres_args         = ["--queue-postgres-dsn-env", "POSTGRES_DSN"]
+  shared_proof_queue_args            = concat(["--queue-driver", local.shared_proof_queue_driver], local.shared_proof_queue_driver == "postgres" ? local.shared_queue_postgres_args : local.shared_queue_kafka_args)
+  shared_proof_requestor_command = concat([
     "/usr/local/bin/proof-requestor",
-    "--postgres-dsn", local.shared_postgres_dsn,
+    "--postgres-dsn-env", "POSTGRES_DSN",
     "--store-driver", "postgres",
     "--owner", "${local.resource_name}-proof-requestor",
     "--sp1-requestor-address", local.shared_sp1_requestor_address,
@@ -1044,23 +1078,21 @@ locals {
     "--failure-topic", local.shared_proof_failure_topic,
     "--max-inflight-requests", "32",
     "--request-timeout", format("%ds", var.shared_sp1_request_timeout_seconds),
-    "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
+    ], local.shared_proof_queue_args, [
     "--queue-group", local.shared_proof_requestor_group,
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
-  ]
-  shared_proof_funder_command = [
+  ])
+  shared_proof_funder_command = concat([
     "/usr/local/bin/proof-funder",
-    "--postgres-dsn", local.shared_postgres_dsn,
+    "--postgres-dsn-env", "POSTGRES_DSN",
     "--lease-driver", "postgres",
     "--owner-id", "${local.resource_name}-proof-funder",
     "--sp1-requestor-address", local.shared_sp1_requestor_address,
     "--min-balance-wei", tostring(local.shared_sp1_required_credit_buffer),
     "--critical-balance-wei", tostring(local.shared_sp1_projected_with_overhead),
-    "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
+    ], local.shared_proof_queue_args, [
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
-  ]
+  ])
   shared_proof_requestor_environment = [
     {
       name  = "JUNO_QUEUE_KAFKA_TLS"
@@ -1156,7 +1188,7 @@ locals {
 }
 
 data "aws_iam_policy_document" "ecs_task_execution_secrets" {
-  count = var.provision_shared_services && (local.shared_sp1_requestor_secret_arn != "" || local.shared_sp1_funder_secret_arn != "") ? 1 : 0
+  count = var.provision_shared_services ? 1 : 0
 
   statement {
     sid = "AllowProofServiceSecretRead"
@@ -1165,6 +1197,7 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
       "secretsmanager:DescribeSecret",
     ]
     resources = compact([
+      aws_secretsmanager_secret.shared_postgres_dsn[0].arn,
       local.shared_sp1_requestor_secret_arn,
       local.shared_sp1_funder_secret_arn,
     ])
@@ -1172,7 +1205,7 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
 }
 
 data "aws_iam_policy_document" "proof_requestor_task_access" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_proof_queue_uses_kafka ? 1 : 0
 
   statement {
     sid = "AllowMSKConnect"
@@ -1245,7 +1278,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
 }
 
 data "aws_iam_policy_document" "proof_funder_task_access" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_proof_queue_uses_kafka ? 1 : 0
 
   statement {
     sid = "AllowMSKConnect"
@@ -1268,7 +1301,7 @@ data "aws_iam_policy_document" "proof_funder_task_access" {
 }
 
 resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
-  count = var.provision_shared_services && (local.shared_sp1_requestor_secret_arn != "" || local.shared_sp1_funder_secret_arn != "") ? 1 : 0
+  count = var.provision_shared_services ? 1 : 0
 
   name   = "${local.resource_name}-ecs-task-exec-secrets"
   role   = aws_iam_role.ecs_task_execution[0].id
@@ -1276,7 +1309,7 @@ resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
 }
 
 resource "aws_iam_role_policy" "proof_requestor_task_access" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_proof_queue_uses_kafka ? 1 : 0
 
   name   = "${local.resource_name}-proof-requestor-task"
   role   = aws_iam_role.proof_requestor_task[0].id
@@ -1284,7 +1317,7 @@ resource "aws_iam_role_policy" "proof_requestor_task_access" {
 }
 
 resource "aws_iam_role_policy" "proof_funder_task_access" {
-  count = var.provision_shared_services ? 1 : 0
+  count = local.shared_proof_queue_uses_kafka ? 1 : 0
 
   name   = "${local.resource_name}-proof-funder-task"
   role   = aws_iam_role.proof_funder_task[0].id
@@ -1440,6 +1473,10 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       environment = local.shared_proof_requestor_environment
       secrets = [
         {
+          name      = "POSTGRES_DSN"
+          valueFrom = aws_secretsmanager_secret.shared_postgres_dsn[0].arn
+        },
+        {
           name      = "PROOF_REQUESTOR_KEY"
           valueFrom = local.shared_sp1_requestor_secret_arn
         }
@@ -1473,6 +1510,10 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       error_message = "shared_base_chain_id must be > 0 when shared_ecs_desired_count > 0."
     }
     precondition {
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
+      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
+    }
+    precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
       error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
     }
@@ -1504,6 +1545,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
       command     = local.shared_proof_funder_command
       environment = local.shared_proof_funder_environment
       secrets = [
+        {
+          name      = "POSTGRES_DSN"
+          valueFrom = aws_secretsmanager_secret.shared_postgres_dsn[0].arn
+        },
         {
           name      = "PROOF_REQUESTOR_KEY"
           valueFrom = local.shared_sp1_requestor_secret_arn
@@ -1542,6 +1587,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
       error_message = "shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0."
     }
     precondition {
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
+      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
+    }
+    precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
       error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
     }
@@ -1572,7 +1621,11 @@ resource "aws_ecs_service" "proof_requestor" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy_attachment.ecs_task_execution]
+  depends_on = [
+    aws_iam_role_policy.ecs_task_execution_secrets,
+    aws_iam_role_policy_attachment.ecs_task_execution,
+    aws_secretsmanager_secret_version.shared_postgres_dsn,
+  ]
 
   tags = local.common_tags
 }
@@ -1595,7 +1648,11 @@ resource "aws_ecs_service" "proof_funder" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy_attachment.ecs_task_execution]
+  depends_on = [
+    aws_iam_role_policy.ecs_task_execution_secrets,
+    aws_iam_role_policy_attachment.ecs_task_execution,
+    aws_secretsmanager_secret_version.shared_postgres_dsn,
+  ]
 
   tags = local.common_tags
 }

@@ -148,7 +148,7 @@ resource "aws_cloudwatch_metric_alarm" "shared_postgres_instance_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "shared_kafka_offline_partitions" {
-  count               = var.provision_shared_services ? 1 : 0
+  count               = local.shared_queue_uses_kafka ? 1 : 0
   alarm_name          = "${local.resource_name}-msk-offline-partitions"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1

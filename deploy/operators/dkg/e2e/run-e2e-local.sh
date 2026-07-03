@@ -16,6 +16,7 @@
 #   - Base funder key:     $REPO_ROOT/tmp/funders/base-funder.key
 #   - Juno funder seed:    $REPO_ROOT/tmp/funders-orchard/juno-funder.seed.txt
 #   - SP1 requestor key:   ~/.juno-secrets/boundless-requestor-mainnet.key
+#   - SP1 funder key:      ~/.juno-secrets/boundless-funder-mainnet.key
 #   - Operator AMI:        from GH release operator-stack-ami-latest
 #   - SP1 vkeys + ELFs:    from GH release bridge-guests-latest
 #   - Proof services image: from GH release shared-proof-services-image-latest
@@ -55,6 +56,7 @@ JUNO_FUNDER_KEY_FILE=""
 JUNO_FUNDER_SEED_FILE=""
 JUNO_FUNDER_SOURCE_ADDRESS_FILE=""
 SP1_REQUESTOR_KEY_FILE=""
+SP1_FUNDER_KEY_FILE=""
 
 # Resolved from GH releases
 BRIDGE_DEPOSIT_IMAGE_ID=""
@@ -96,6 +98,7 @@ MIN_WITHDRAW_AMOUNT="${MIN_WITHDRAW_AMOUNT:-0}"
 # Cleanup globals
 CLEANUP_ENABLED=false
 CLEANUP_SP1_SECRET_ARN=""
+CLEANUP_SP1_FUNDER_SECRET_ARN=""
 
 # SSH
 SSH_KEY_PRIVATE=""
@@ -144,11 +147,13 @@ Options:
   --keep-infra                 Do not destroy infra on exit
   --base-funder-key-file <p>   Override Base funder key file
   --sp1-requestor-key-file <p> Override SP1 requestor key file
+  --sp1-funder-key-file <p>    Override SP1 proof-funder key file
 
 Auto-discovered secrets (override with flags if needed):
   Base funder key:       tmp/funders/base-funder.key
   Juno funder seed:      tmp/funders-orchard/juno-funder.seed.txt
   SP1 requestor key:     ~/.juno-secrets/boundless-requestor-mainnet.key
+  SP1 funder key:        ~/.juno-secrets/boundless-funder-mainnet.key
   Operator AMI:          from GH release operator-stack-ami-latest
   SP1 guest programs:    from GH release bridge-guests-latest
   Proof services image:  from GH release shared-proof-services-image-latest
@@ -179,6 +184,7 @@ parse_args() {
       --base-rpc-url)           BASE_RPC_URL="$2"; shift 2 ;;
       --base-funder-key-file)   BASE_FUNDER_KEY_FILE="$2"; shift 2 ;;
       --sp1-requestor-key-file) SP1_REQUESTOR_KEY_FILE="$2"; shift 2 ;;
+      --sp1-funder-key-file)    SP1_FUNDER_KEY_FILE="$2"; shift 2 ;;
       --keep-infra)             KEEP_INFRA=true; shift ;;
       --min-deposit-amount)     MIN_DEPOSIT_AMOUNT="$2"; shift 2 ;;
       --min-withdraw-amount)    MIN_WITHDRAW_AMOUNT="$2"; shift 2 ;;
@@ -257,6 +263,24 @@ auto_discover_secrets() {
   [[ -n "$SP1_REQUESTOR_KEY_FILE" && -f "$SP1_REQUESTOR_KEY_FILE" ]] || \
     die "SP1 requestor key not found; provide --sp1-requestor-key-file or place at ~/.juno-secrets/boundless-requestor-mainnet.key"
   ok "SP1 requestor key: $SP1_REQUESTOR_KEY_FILE"
+
+  # SP1 proof-funder key
+  if [[ -z "$SP1_FUNDER_KEY_FILE" ]]; then
+    local sp1_funder_candidates=(
+      "$HOME/.juno-secrets/boundless-funder-mainnet.key"
+      "$REPO_ROOT/tmp/funders/boundless-funder-mainnet.key"
+      "$REPO_ROOT/tmp/funders/sp1-funder-mainnet.key"
+    )
+    for f in "${sp1_funder_candidates[@]}"; do
+      if [[ -f "$f" ]]; then
+        SP1_FUNDER_KEY_FILE="$f"
+        break
+      fi
+    done
+  fi
+  [[ -n "$SP1_FUNDER_KEY_FILE" && -f "$SP1_FUNDER_KEY_FILE" ]] || \
+    die "SP1 funder key not found; provide --sp1-funder-key-file or place at ~/.juno-secrets/boundless-funder-mainnet.key"
+  ok "SP1 funder key: $SP1_FUNDER_KEY_FILE"
 }
 
 # ── GH release resolution ───────────────────────────────────────────────────
@@ -374,6 +398,7 @@ generate_tfvars() {
   local ssh_allowed_cidr="$3"
   local shared_postgres_password="$4"
   local sp1_secret_arn="${5:-}"
+  local sp1_funder_secret_arn="${6:-}"
 
   jq -n \
     --arg aws_region "$AWS_REGION" \
@@ -396,8 +421,11 @@ generate_tfvars() {
     --arg shared_postgres_db "intents_e2e" \
     --arg shared_proof_service_image "$PROOF_SERVICES_IMAGE" \
     --arg shared_sp1_requestor_secret_arn "$sp1_secret_arn" \
+    --arg shared_sp1_funder_secret_arn "$sp1_funder_secret_arn" \
     --argjson shared_postgres_port 5432 \
-    --argjson shared_kafka_port 9094 \
+    --argjson shared_kafka_port 9098 \
+    --arg shared_queue_driver "kafka" \
+    --arg shared_proof_queue_driver "kafka" \
     --argjson runner_associate_public_ip_address true \
     --argjson operator_associate_public_ip_address true \
     --argjson shared_ecs_assign_public_ip true \
@@ -423,8 +451,11 @@ generate_tfvars() {
       shared_postgres_db: "intents_e2e",
       shared_proof_service_image: $shared_proof_service_image,
       shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+      shared_sp1_funder_secret_arn: $shared_sp1_funder_secret_arn,
       shared_postgres_port: $shared_postgres_port,
       shared_kafka_port: $shared_kafka_port,
+      shared_queue_driver: $shared_queue_driver,
+      shared_proof_queue_driver: $shared_proof_queue_driver,
       runner_associate_public_ip_address: $runner_associate_public_ip_address,
       operator_associate_public_ip_address: $operator_associate_public_ip_address,
       shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
@@ -471,30 +502,56 @@ terraform_apply() {
     chmod 600 "$pg_pass_file"
   fi
 
-  # Create SP1 Secrets Manager secret (for proof-requestor/proof-funder ECS tasks)
+  # Create SP1 Secrets Manager secrets (for proof-requestor/proof-funder ECS tasks)
   local sp1_secret_arn=""
   local sp1_secret_arn_file="$WORKDIR/local-secrets/sp1-secret-arn.txt"
   if [[ -f "$sp1_secret_arn_file" ]]; then
     sp1_secret_arn="$(cat "$sp1_secret_arn_file")"
-    log "reusing SP1 Secrets Manager secret: $sp1_secret_arn"
+    log "reusing SP1 requestor Secrets Manager secret: $sp1_secret_arn"
   else
     local sp1_key_hex
     sp1_key_hex="$(tr -d '\r\n' < "$SP1_REQUESTOR_KEY_FILE")"
     local secret_name="juno-e2e-local-${deployment_id}-sp1-requestor"
-    log "creating SP1 Secrets Manager secret: $secret_name"
+    log "creating SP1 requestor Secrets Manager secret: $secret_name"
     sp1_secret_arn="$(
       env AWS_PROFILE="$AWS_PROFILE" aws secretsmanager create-secret \
         --region "$AWS_REGION" \
         --name "$secret_name" \
+        --description "sp1 requestor key for intents-juno local e2e" \
         --secret-string "$sp1_key_hex" \
         --query 'ARN' --output text 2>/dev/null
-    )" || die "failed to create SP1 secret in Secrets Manager"
+    )" || die "failed to create SP1 requestor secret in Secrets Manager"
     echo -n "$sp1_secret_arn" > "$sp1_secret_arn_file"
     CLEANUP_SP1_SECRET_ARN="$sp1_secret_arn"
-    ok "SP1 secret created: $sp1_secret_arn"
+    ok "SP1 requestor secret created: $sp1_secret_arn"
   fi
 
-  generate_tfvars "$tfvars_file" "$deployment_id" "$ssh_cidr" "$pg_password" "$sp1_secret_arn"
+  local sp1_funder_secret_arn=""
+  local sp1_funder_secret_arn_file="$WORKDIR/local-secrets/sp1-funder-secret-arn.txt"
+  if [[ -f "$sp1_funder_secret_arn_file" ]]; then
+    sp1_funder_secret_arn="$(cat "$sp1_funder_secret_arn_file")"
+    log "reusing SP1 funder Secrets Manager secret: $sp1_funder_secret_arn"
+  else
+    local sp1_funder_key_hex
+    sp1_funder_key_hex="$(tr -d '\r\n' < "$SP1_FUNDER_KEY_FILE")"
+    local funder_secret_name="juno-e2e-local-${deployment_id}-sp1-funder"
+    log "creating SP1 funder Secrets Manager secret: $funder_secret_name"
+    sp1_funder_secret_arn="$(
+      env AWS_PROFILE="$AWS_PROFILE" aws secretsmanager create-secret \
+        --region "$AWS_REGION" \
+        --name "$funder_secret_name" \
+        --description "sp1 funder key for intents-juno local e2e" \
+        --secret-string "$sp1_funder_key_hex" \
+        --query 'ARN' --output text 2>/dev/null
+    )" || die "failed to create SP1 funder secret in Secrets Manager"
+    echo -n "$sp1_funder_secret_arn" > "$sp1_funder_secret_arn_file"
+    CLEANUP_SP1_FUNDER_SECRET_ARN="$sp1_funder_secret_arn"
+    ok "SP1 funder secret created: $sp1_funder_secret_arn"
+  fi
+
+  [[ "$sp1_secret_arn" != "$sp1_funder_secret_arn" ]] || die "SP1 requestor and funder secret ARNs must differ"
+
+  generate_tfvars "$tfvars_file" "$deployment_id" "$ssh_cidr" "$pg_password" "$sp1_secret_arn" "$sp1_funder_secret_arn"
 
   log "running terraform init..."
   tf_cmd -chdir="$TERRAFORM_DIR" init -input=false >/dev/null
@@ -1103,7 +1160,8 @@ stage_secrets_on_runner() {
   scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/local-secrets/juno-rpc-user.txt" "$remote_secrets/juno-rpc-user.txt"
   scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/local-secrets/juno-rpc-pass.txt" "$remote_secrets/juno-rpc-pass.txt"
 
-  # SP1 requestor key
+  # SP1 requestor key. Proof-funder key stays in Terraform/Secrets Manager;
+  # the remote rollout preserves ECS task secrets instead of receiving raw key files.
   scp_to_host "$RUNNER_PUBLIC_IP" "$SP1_REQUESTOR_KEY_FILE" "$remote_secrets/sp1-requestor.key"
 
   # SSH fleet key (for runner -> operator access)
@@ -1694,6 +1752,7 @@ cleanup_trap() {
   if [[ "$CLEANUP_ENABLED" == "true" ]]; then
     terraform_destroy
     delete_sp1_secret "$CLEANUP_SP1_SECRET_ARN"
+    delete_sp1_secret "$CLEANUP_SP1_FUNDER_SECRET_ARN"
   else
     if [[ -n "$RUNNER_PUBLIC_IP" ]]; then
       log "infrastructure kept alive (--keep-infra). Runner: $RUNNER_SSH_USER@$RUNNER_PUBLIC_IP"
@@ -1743,6 +1802,9 @@ cmd_run() {
   # Load SP1 secret ARN for cleanup
   if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
     CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+  if [[ -f "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt" ]]; then
+    CLEANUP_SP1_FUNDER_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt")"
   fi
 
   # Stage 2: Prepare hosts
@@ -1834,6 +1896,9 @@ cmd_resume() {
 
   if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
     CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+  if [[ -f "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt" ]]; then
+    CLEANUP_SP1_FUNDER_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt")"
   fi
 
   # Update runner code to current local commit (test scripts may have changed)
@@ -1928,6 +1993,9 @@ cmd_deploy() {
   # Load SP1 secret ARN for cleanup
   if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
     CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+  if [[ -f "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt" ]]; then
+    CLEANUP_SP1_FUNDER_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt")"
   fi
 
   # Stage 2: Prepare hosts
@@ -2218,6 +2286,9 @@ cmd_cleanup() {
 
   if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
     delete_sp1_secret "$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+  if [[ -f "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt" ]]; then
+    delete_sp1_secret "$(cat "$WORKDIR/local-secrets/sp1-funder-secret-arn.txt")"
   fi
 
   ok "Cleanup complete"

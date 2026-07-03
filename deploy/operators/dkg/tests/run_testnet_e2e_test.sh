@@ -1300,8 +1300,41 @@ test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers() {
   assert_contains "$script_text" 'effective_checkpoint_queue_driver="$(forwarded_queue_driver_or_default "--checkpoint-queue-driver" "kafka" "${e2e_args[@]}")"' "aws wrapper tracks effective checkpoint queue driver"
   assert_contains "$script_text" 'effective_proof_queue_driver="$(forwarded_queue_driver_or_default "--proof-queue-driver" "kafka" "${e2e_args[@]}")"' "aws wrapper tracks effective proof queue driver"
   assert_contains "$script_text" 'local shared_queue_requires_kafka="true"' "aws wrapper defaults to requiring kafka for shared queue validation"
+  assert_contains "$script_text" '--shared-kafka-port <port>           shared MSK SASL/IAM Kafka TCP port (default: 9098)' "aws wrapper documents the live-e2e MSK IAM listener default"
+  assert_contains "$script_text" 'local shared_kafka_port="9098"' "aws wrapper defaults shared kafka port to the live-e2e MSK IAM listener"
+  assert_contains "$script_text" 'local shared_queue_driver="kafka"' "aws wrapper defaults managed shared services to kafka"
+  assert_contains "$script_text" 'local shared_proof_queue_driver="$effective_proof_queue_driver"' "aws wrapper forwards the effective proof queue driver into managed terraform"
   assert_contains "$script_text" 'if [[ "$effective_operator_queue_driver" == "postgres" && "$effective_checkpoint_queue_driver" == "postgres" && "$effective_proof_queue_driver" == "postgres" ]]; then' "aws wrapper enters no-kafka mode only when every active queue is postgres"
+  assert_contains "$script_text" 'shared_queue_driver="postgres"' "aws wrapper switches managed shared services to postgres in full postgres queue mode"
   assert_contains "$script_text" 'shared_queue_requires_kafka="false"' "aws wrapper can disable kafka requirements for full postgres queue mode"
+  assert_contains "$script_text" '--arg shared_queue_driver "$shared_queue_driver"' "aws wrapper passes shared queue driver into managed terraform"
+  assert_contains "$script_text" '--arg shared_proof_queue_driver "$shared_proof_queue_driver"' "aws wrapper passes proof queue driver into managed terraform"
+  assert_contains "$script_text" 'shared_queue_driver: $shared_queue_driver' "aws wrapper writes shared queue driver to terraform tfvars"
+  assert_contains "$script_text" 'shared_proof_queue_driver: $shared_proof_queue_driver' "aws wrapper writes proof queue driver to terraform tfvars"
+  assert_contains "$script_text" '--sp1-funder-key-file <p>      file with SP1 proof-funder key hex when creating funder secrets' "aws wrapper documents conditional proof funder key file"
+  assert_contains "$script_text" '--shared-sp1-funder-secret-arn <arn>' "aws wrapper documents optional primary proof funder secret override"
+  assert_contains "$script_text" '--shared-sp1-funder-secret-arn-dr <arn>' "aws wrapper documents optional dr proof funder secret override"
+  assert_not_contains "$script_text" '[[ -n "$sp1_funder_key_file" ]] || die "--sp1-funder-key-file is required"' "aws wrapper does not require proof funder key unless it creates funder secrets"
+  assert_contains "$script_text" 'load_sp1_funder_key_hex()' "aws wrapper lazily loads proof funder key only for secret creation"
+  assert_contains "$script_text" '--sp1-funder-key-file is required to create SP1 funder secrets' "aws wrapper reports proof funder key requirement only for creation"
+  assert_contains "$script_text" 'sp1_funder_key_hex="$(trimmed_file_value "$sp1_funder_key_file")"' "aws wrapper sources proof funder secret value from explicit proof funder key file"
+  assert_contains "$script_text" 'write_created_sp1_secret_marker "$created_primary_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn" "$aws_region"' "aws wrapper records ownership for created primary proof funder secret"
+  assert_contains "$script_text" 'write_created_sp1_secret_marker "$created_dr_sp1_funder_secret_marker_file" "$sp1_funder_secret_arn_dr" "$aws_dr_region"' "aws wrapper records ownership for created dr proof funder secret"
+  assert_contains "$script_text" 'write_created_sp1_secret_marker "$created_primary_sp1_requestor_secret_marker_file" "$sp1_requestor_secret_arn" "$aws_region"' "aws wrapper records ownership for created primary proof requestor secret"
+  assert_contains "$script_text" 'delete_created_sp1_secret_marker "$aws_profile" "$primary_region_for_cleanup" "$created_primary_sp1_requestor_secret_marker_file" "primary sp1 requestor"' "aws wrapper cleanup deletes only marked primary proof requestor secrets"
+  assert_contains "$script_text" 'delete_created_sp1_secret_marker "$aws_profile" "$primary_region_for_cleanup" "$created_primary_sp1_funder_secret_marker_file" "primary sp1 funder"' "aws wrapper cleanup deletes only marked primary proof funder secrets"
+  assert_contains "$script_text" 'delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_requestor_secret_marker_file" "primary sp1 requestor"' "aws wrapper cleanup trap deletes only marked primary proof requestor secrets"
+  assert_contains "$script_text" 'delete_created_sp1_secret_marker "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_funder_secret_marker_file" "primary sp1 funder"' "aws wrapper cleanup trap deletes only marked primary proof funder secrets"
+  assert_not_contains "$script_text" '  sp1_requestor_secret_arn="$(jq -r '\''.shared_sp1_requestor_secret_arn // empty'\'' "$tfvars_file")"' "aws wrapper cleanup does not infer proof requestor secret ownership from primary tfvars"
+  assert_not_contains "$script_text" '  sp1_funder_secret_arn="$(jq -r '\''.shared_sp1_funder_secret_arn // empty'\'' "$tfvars_file")"' "aws wrapper cleanup does not infer proof funder secret ownership from primary tfvars"
+  assert_not_contains "$script_text" 'delete_sp1_requestor_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_requestor_secret_arn"' "aws wrapper cleanup trap does not delete primary proof requestor secret by raw arn"
+  assert_not_contains "$script_text" 'delete_sp1_funder_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_funder_secret_arn"' "aws wrapper cleanup trap does not delete primary proof funder secret by raw arn"
+  assert_contains "$script_text" 'create_sp1_funder_secret \' "aws wrapper creates a distinct proof funder secret when needed"
+  assert_not_contains "$script_text" 'runner_secret_bundle_entries+=("$sp1_funder_key_file" "sp1-funder.key")' "aws wrapper does not stage proof funder key on the runner"
+  assert_not_contains "$script_text" 'remote_args+=(--sp1-funder-key-file ".ci/secrets/sp1-funder.key")' "aws wrapper does not forward proof funder key to remote e2e"
+  assert_contains "$script_text" 'shared_sp1_funder_secret_arn: $shared_sp1_funder_secret_arn' "aws wrapper writes proof funder secret arn to primary terraform tfvars"
+  assert_contains "$script_text" '| .shared_sp1_funder_secret_arn = $shared_sp1_funder_secret_arn' "aws wrapper writes proof funder secret arn to dr terraform tfvars"
+  assert_contains "$script_text" 'shared_sp1_requestor_secret_arn and shared_sp1_funder_secret_arn must differ' "aws wrapper rejects identical primary proof secret arns"
   assert_contains "$script_text" 'if [[ "$shared_queue_requires_kafka" == "true" && -z "$forwarded_shared_kafka_brokers" ]]; then' "forwarded shared services require kafka brokers only when any active queue path still uses kafka"
   assert_contains "$script_text" '--without-shared-services requires forwarded --shared-kafka-brokers unless operator, checkpoint, and proof queues are all postgres' "aws wrapper reports the mixed-mode kafka broker requirement"
   assert_contains "$script_text" '[[ -n "$shared_kafka_brokers_for_operator" || "$shared_queue_requires_kafka" != "true" ]] || die "operator stack hydration requires shared kafka brokers"' "operator hydration allows empty kafka brokers only in full postgres mode"
@@ -1310,11 +1343,32 @@ test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers() {
   assert_contains "$script_text" '"$effective_checkpoint_queue_driver"' "backup restore hydrator receives effective checkpoint queue driver"
   assert_contains "$script_text" 'if [[ "$shared_queue_requires_kafka" == "true" ]]; then' "aws wrapper gates kafka-only output/probe/arg paths"
   assert_contains "$script_text" 'remote_args+=("--shared-kafka-brokers" "$shared_kafka_brokers")' "aws wrapper still forwards kafka brokers when kafka is required"
+  assert_contains "$script_text" 'local shared_queue_requires_kafka="${4:-true}"' "aws wrapper preflight defaults to requiring kafka"
+  assert_contains "$script_text" 'skipping kafka preflight probe because all active shared queue paths use postgres' "aws wrapper preflight skips kafka probe in full postgres queue mode"
+  assert_contains "$script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services" "$shared_queue_requires_kafka"' "aws wrapper passes queue driver policy into preflight probes"
+  assert_contains "$script_text" 'validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region" "$shared_queue_requires_kafka"' "aws wrapper passes queue driver policy into dr readiness probes"
+  assert_contains "$script_text" 'skipping dr kafka readiness probe because all active shared queue paths use postgres' "aws wrapper dr readiness skips kafka probe in full postgres mode"
   assert_contains "$script_text" 'local shared_queue_requires_kafka="${5:-true}"' "runner shared probe receives queue driver policy"
   assert_contains "$script_text" 'kafka_ready="skipped"' "runner shared probe skips kafka checks in full postgres mode"
   assert_contains "$script_text" '"$shared_queue_requires_kafka"; then' "runner connectivity calls include queue driver policy"
-  assert_contains "$script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"' "managed shared-service preflight still probes kafka while terraform still provisions msk"
-  assert_contains "$script_text" 'validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"' "managed shared-service dr readiness still probes kafka while terraform still provisions msk"
+  assert_contains "$script_text" 'validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region" "$shared_queue_requires_kafka"' "managed shared-service dr readiness still runs before terraform apply"
+}
+
+test_local_e2e_uses_msk_iam_port_for_managed_shared_services() {
+  local local_script script_text
+  local_script="$SCRIPT_DIR/../e2e/run-e2e-local.sh"
+  script_text="$(cat "$local_script")"
+
+  assert_contains "$script_text" '--argjson shared_kafka_port 9098' "local e2e tfvars use the live-e2e MSK IAM listener"
+  assert_contains "$script_text" '--arg shared_sp1_funder_secret_arn "$sp1_funder_secret_arn"' "local e2e passes proof funder secret arn to terraform"
+  assert_contains "$script_text" '--sp1-funder-key-file <p>' "local e2e documents proof funder key override"
+  assert_contains "$script_text" 'SP1_FUNDER_KEY_FILE=""' "local e2e tracks explicit proof funder key file"
+  assert_contains "$script_text" 'boundless-funder-mainnet.key' "local e2e auto-discovers the proof funder key"
+  assert_contains "$script_text" 'sp1_funder_key_hex="$(tr -d' "local e2e trims proof funder key before secret creation"
+  assert_contains "$script_text" '< "$SP1_FUNDER_KEY_FILE")"' "local e2e sources proof funder secret value from proof funder key"
+  assert_not_contains "$script_text" 'scp_to_host "$RUNNER_PUBLIC_IP" "$SP1_FUNDER_KEY_FILE" "$remote_secrets/sp1-funder.key"' "local e2e does not stage proof funder key on the runner"
+  assert_not_contains "$script_text" '--sp1-funder-key-file "$remote_secrets/sp1-funder.key"' "local e2e does not forward proof funder key to remote e2e"
+  assert_contains "$script_text" 'SP1 requestor and funder secret ARNs must differ' "local e2e rejects identical proof secret arns"
 }
 
 test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
@@ -1414,6 +1468,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run
   test_aws_wrapper_defaults_operator_hosts_to_aggressive_cost_shape
   test_aws_wrapper_all_postgres_queue_mode_can_skip_kafka_brokers
+  test_local_e2e_uses_msk_iam_port_for_managed_shared_services
   test_deploy_production_canaries_excludes_legacy_aws_e2e_paths
 }
 
