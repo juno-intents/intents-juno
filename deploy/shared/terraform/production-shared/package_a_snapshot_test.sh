@@ -129,6 +129,8 @@ main() {
   assert_contains "$proof_role_launch_template" 'http_tokens   = "required"' "production-shared proof-role launch template requires IMDSv2 tokens"
   assert_contains "$main_tf" 'resource "aws_autoscaling_group" "proof_role"' "production-shared provisions a proof-role autoscaling group"
   assert_contains "$main_tf" 'resource "aws_iam_instance_profile" "proof_role"' "production-shared provisions a proof-role instance profile"
+  assert_contains "$main_tf" 'resource "aws_iam_role_policy_attachment" "proof_role_ssm_managed_instance_core"' "production-shared attaches SSM managed instance core to the proof-role instance role"
+  assert_contains "$main_tf" 'policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"' "production-shared uses the AWS-managed SSM instance core policy for proof-role canaries"
   assert_contains "$main_tf" 'proof-requestor.service' "production-shared writes a proof-requestor systemd unit for the proof role"
   assert_contains "$main_tf" 'proof-funder.service' "production-shared writes a proof-funder systemd unit for the proof role"
   assert_contains "$main_tf" 'var.shared_proof_role_min_size == 0 || var.shared_proof_role_desired_capacity >= var.shared_proof_role_min_size' "production-shared validates proof-role desired capacity against min size"

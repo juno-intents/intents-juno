@@ -1483,6 +1483,11 @@ resource "aws_iam_role_policy" "proof_role_access" {
   policy = data.aws_iam_policy_document.proof_role_access.json
 }
 
+resource "aws_iam_role_policy_attachment" "proof_role_ssm_managed_instance_core" {
+  role       = aws_iam_role.proof_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "proof_role" {
   name = "${local.resource_name}-proof-role"
   role = aws_iam_role.proof_role.name
