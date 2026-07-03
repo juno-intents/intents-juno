@@ -4605,6 +4605,271 @@ EOF
   rm -rf "$workdir"
 }
 
+write_fake_aws_for_ssm_stage_file() {
+  local target="$1"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "$*" >>"$TEST_AWS_LOG"
+
+args=( "$@" )
+if [[ "${args[0]:-}" == "--profile" ]]; then
+  args=( "${args[@]:2}" )
+fi
+if [[ "${args[0]:-}" == "--region" ]]; then
+  args=( "${args[@]:2}" )
+fi
+
+decode_ssm_command() {
+  local wrapped="$1"
+  awk '
+    /__INTENTS_JUNO_SSM_COMMAND__/ && !seen {
+      seen = 1
+      next
+    }
+    /^__INTENTS_JUNO_SSM_COMMAND__$/ && seen {
+      exit
+    }
+    seen {
+      print
+    }
+  ' <<<"$wrapped" | base64 --decode
+}
+
+arg_after() {
+  local want="$1"
+  shift
+  local args=( "$@" )
+  local i
+  for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == "$want" && $((i + 1)) -lt ${#args[@]} ]]; then
+      printf '%s\n' "${args[$((i + 1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+case "${args[*]}" in
+  ssm\ send-command\ --instance-ids\ i-1234567890abcdef0\ --document-name\ AWS-RunShellScript\ --parameters\ file://*\ --output\ json)
+    status_dir="${TEST_AWS_STATUS_DIR:-$(dirname "$TEST_AWS_COUNTER")}"
+    mkdir -p "$status_dir"
+    parameters_path="${args[7]#file://}"
+    wc -c <"$parameters_path" >>"$TEST_AWS_PARAMETER_SIZES"
+    command_text="$(jq -r '.commands[0]' "$parameters_path")"
+    decoded="$(decode_ssm_command "$command_text")"
+    bash -n <<<"$decoded"
+    {
+      printf '%s\n' "---COMMAND---"
+      printf '%s\n' "$decoded"
+    } >>"$TEST_AWS_COMMAND_LOG"
+    counter_file="$TEST_AWS_COUNTER"
+    counter=0
+    if [[ -f "$counter_file" ]]; then
+      counter="$(cat "$counter_file")"
+    fi
+    counter=$((counter + 1))
+    printf '%s' "$counter" >"$counter_file"
+    status="Success"
+    stderr=""
+    if [[ "$decoded" == *"<<'__INTENTS_JUNO_SSM_STAGE_CHUNK__'"* ]]; then
+      chunk_counter_file="${TEST_AWS_CHUNK_COUNTER:-$status_dir/chunk-counter}"
+      chunk_counter=0
+      if [[ -f "$chunk_counter_file" ]]; then
+        chunk_counter="$(cat "$chunk_counter_file")"
+      fi
+      chunk_counter=$((chunk_counter + 1))
+      printf '%s' "$chunk_counter" >"$chunk_counter_file"
+      if [[ -n "${TEST_AWS_FAIL_STAGE_CHUNK_NUMBER:-}" && "$chunk_counter" == "$TEST_AWS_FAIL_STAGE_CHUNK_NUMBER" ]]; then
+        status="Failed"
+        stderr="chunk failed"
+      fi
+    fi
+    printf '%s' "$status" >"$status_dir/cmd-$counter.status"
+    printf '%s' "$stderr" >"$status_dir/cmd-$counter.stderr"
+    printf '{"Command":{"CommandId":"cmd-%s"}}\n' "$counter"
+    ;;
+  ssm\ get-command-invocation\ --command-id\ cmd-*\ --instance-id\ i-1234567890abcdef0\ --output\ json)
+    status_dir="${TEST_AWS_STATUS_DIR:-$(dirname "$TEST_AWS_COUNTER")}"
+    command_id="$(arg_after --command-id "${args[@]}")"
+    status="$(cat "$status_dir/$command_id.status" 2>/dev/null || printf 'Success')"
+    stderr="$(cat "$status_dir/$command_id.stderr" 2>/dev/null || true)"
+    jq -n --arg status "$status" --arg stderr "$stderr" '{Status:$status,StandardOutputContent:"",StandardErrorContent:$stderr}'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
+test_production_ssm_stage_file_chunks_and_reconstructs_payload() {
+  local workdir fake_aws source_file reconstructed_file reconstructed_b64 full_b64 path_backup send_count max_parameters_size
+  workdir="$(mktemp -d)"
+  fake_aws="$workdir/aws"
+  source_file="$workdir/source payload.bin"
+  reconstructed_file="$workdir/reconstructed.bin"
+  path_backup="$PATH"
+
+  printf 'chunked payload with spaces, quotes, and enough bytes to force chunking: %s\n' "$(printf 'abc123%.0s' $(seq 1 24))" >"$source_file"
+  write_fake_aws_for_ssm_stage_file "$fake_aws"
+
+  PATH="$workdir:$PATH"
+  export TEST_AWS_LOG="$workdir/aws.log"
+  export TEST_AWS_COMMAND_LOG="$workdir/commands.log"
+  export TEST_AWS_PARAMETER_SIZES="$workdir/parameter-sizes.log"
+  export TEST_AWS_COUNTER="$workdir/command-counter"
+  PRODUCTION_SSM_STAGE_CHUNK_SIZE=16 \
+    production_ssm_stage_file "juno" "us-east-1" "i-1234567890abcdef0" "$source_file" "/tmp/remote dir/file's.bin" 0644
+
+  send_count="$(grep -c 'ssm send-command' "$TEST_AWS_LOG")"
+  if ((send_count < 4)); then
+    printf 'expected chunked stage to use multiple SSM commands, got %s\n' "$send_count" >&2
+    exit 1
+  fi
+
+  max_parameters_size="$(sort -nr "$TEST_AWS_PARAMETER_SIZES" | head -1)"
+  if ((max_parameters_size > 5000)); then
+    printf 'expected staged SSM parameter JSON to stay small, got %s bytes\n' "$max_parameters_size" >&2
+    exit 1
+  fi
+
+  full_b64="$(base64 <"$source_file" | tr -d '\n')"
+  assert_not_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "$full_b64" "stage helper does not send the full payload in one command"
+  reconstructed_b64="$(
+    awk '
+      /<<'\''__INTENTS_JUNO_SSM_STAGE_CHUNK__'\''/ {
+        in_chunk = 1
+        next
+      }
+      /^__INTENTS_JUNO_SSM_STAGE_CHUNK__$/ && in_chunk {
+        in_chunk = 0
+        next
+      }
+      in_chunk {
+        printf "%s", $0
+      }
+    ' "$TEST_AWS_COMMAND_LOG"
+  )"
+  printf '%s' "$reconstructed_b64" | base64 --decode >"$reconstructed_file"
+  if ! cmp -s "$source_file" "$reconstructed_file"; then
+    printf 'reconstructed staged payload does not match source\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "sudo mv" "stage helper moves a fully decoded temp file into place"
+  assert_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "sudo chmod 0644" "stage helper applies requested mode to temp output"
+
+  unset TEST_AWS_LOG
+  unset TEST_AWS_COMMAND_LOG
+  unset TEST_AWS_PARAMETER_SIZES
+  unset TEST_AWS_COUNTER
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
+test_production_ssm_stage_file_returns_failure_on_chunk_error() {
+  local workdir fake_aws source_file stderr_file path_backup
+  workdir="$(mktemp -d)"
+  fake_aws="$workdir/aws"
+  source_file="$workdir/source.bin"
+  stderr_file="$workdir/stderr.log"
+  path_backup="$PATH"
+
+  printf 'payload that will require more than one staged chunk\n' >"$source_file"
+  write_fake_aws_for_ssm_stage_file "$fake_aws"
+
+  PATH="$workdir:$PATH"
+  export TEST_AWS_LOG="$workdir/aws.log"
+  export TEST_AWS_COMMAND_LOG="$workdir/commands.log"
+  export TEST_AWS_PARAMETER_SIZES="$workdir/parameter-sizes.log"
+  export TEST_AWS_COUNTER="$workdir/command-counter"
+  export TEST_AWS_FAIL_STAGE_CHUNK_NUMBER=2
+  if PRODUCTION_SSM_STAGE_CHUNK_SIZE=12 \
+    production_ssm_stage_file "juno" "us-east-1" "i-1234567890abcdef0" "$source_file" "/tmp/remote.bin" 0644 2>"$stderr_file"; then
+    printf 'expected stage helper to fail when a staged chunk fails remotely\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "chunk failed" "stage helper surfaces remote chunk failure"
+  assert_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "sudo rm -f /tmp/remote.bin.b64." "stage helper cleans remote temp files after chunk failure"
+  assert_not_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "sudo mv" "stage helper does not move a destination after chunk failure"
+
+  unset TEST_AWS_LOG
+  unset TEST_AWS_COMMAND_LOG
+  unset TEST_AWS_PARAMETER_SIZES
+  unset TEST_AWS_COUNTER
+  unset TEST_AWS_FAIL_STAGE_CHUNK_NUMBER
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
+test_production_ssm_stage_file_rejects_local_encoding_failure_before_ssm() {
+  local workdir fake_aws source_file stderr_file path_backup
+  workdir="$(mktemp -d)"
+  fake_aws="$workdir/aws"
+  source_file="$workdir/source.bin"
+  stderr_file="$workdir/stderr.log"
+  path_backup="$PATH"
+
+  printf 'payload\n' >"$source_file"
+  write_fake_aws_for_ssm_stage_file "$fake_aws"
+  cat >"$workdir/base64" <<'EOF'
+#!/usr/bin/env bash
+printf 'local base64 failed\n' >&2
+exit 42
+EOF
+  chmod 0755 "$workdir/base64"
+
+  if (
+    PATH="$workdir:$PATH"
+    export TEST_AWS_LOG="$workdir/aws.log"
+    export TEST_AWS_COMMAND_LOG="$workdir/commands.log"
+    export TEST_AWS_PARAMETER_SIZES="$workdir/parameter-sizes.log"
+    export TEST_AWS_COUNTER="$workdir/command-counter"
+    production_ssm_stage_file "juno" "us-east-1" "i-1234567890abcdef0" "$source_file" "/tmp/file.bin" 0644
+  ) 2>"$stderr_file"; then
+    printf 'expected local encoding failure before staging\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "local base64 failed" "stage helper surfaces local encoding failure"
+  if [[ -f "$workdir/aws.log" ]]; then
+    printf 'stage helper should reject local encoding failure before calling aws\n' >&2
+    exit 1
+  fi
+
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
+test_production_ssm_stage_file_rejects_invalid_mode_before_ssm() {
+  local workdir source_file stderr_file path_backup
+  workdir="$(mktemp -d)"
+  source_file="$workdir/source.bin"
+  stderr_file="$workdir/stderr.log"
+  path_backup="$PATH"
+  printf 'payload\n' >"$source_file"
+
+  if (
+    PATH="$workdir:$PATH"
+    production_ssm_stage_file "juno" "us-east-1" "i-1234567890abcdef0" "$source_file" "/tmp/file.bin" "bad-mode"
+  ) 2>"$stderr_file"; then
+    printf 'expected invalid stage file mode to fail\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "invalid stage file mode" "stage helper rejects non-octal modes"
+  if [[ -f "$workdir/aws.log" ]]; then
+    printf 'stage helper should reject invalid mode before calling aws\n' >&2
+    exit 1
+  fi
+
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
 main() {
   setup_default_checkpoint_signer_kms_provisioner
   trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
@@ -4682,6 +4947,10 @@ main() {
   test_production_maybe_use_public_sts_endpoint_preserves_existing_override
   test_production_maybe_use_public_sts_endpoint_skips_public_regional_resolution
   test_production_ssm_run_shell_command_executes_payload_via_bash
+  test_production_ssm_stage_file_chunks_and_reconstructs_payload
+  test_production_ssm_stage_file_returns_failure_on_chunk_error
+  test_production_ssm_stage_file_rejects_local_encoding_failure_before_ssm
+  test_production_ssm_stage_file_rejects_invalid_mode_before_ssm
 }
 
 main "$@"

@@ -140,7 +140,38 @@ decode_ssm_command() {
 
 record_staged_file() {
   local command="\$1"
-  local payload_line payload destination prefix dest_prefix
+  local payload_line payload destination prefix dest_prefix chunk
+  local stage_b64="\$log_dir/ssm/stage-current.b64"
+
+  if [[ "\$command" == *"sudo install -m 0600 /dev/null"* ]]; then
+    rm -f "\$stage_b64"
+  fi
+  if [[ "\$command" == *"<<'__INTENTS_JUNO_SSM_STAGE_CHUNK__'"* ]]; then
+    chunk="\$(awk '
+      /<<'\''__INTENTS_JUNO_SSM_STAGE_CHUNK__'\''/ {
+        in_chunk = 1
+        next
+      }
+      /^__INTENTS_JUNO_SSM_STAGE_CHUNK__\$/ && in_chunk {
+        in_chunk = 0
+        next
+      }
+      in_chunk {
+        printf "%s", \$0
+      }
+    ' <<<"\$command")"
+    printf '%s' "\$chunk" >>"\$stage_b64"
+    return 0
+  fi
+  if [[ "\$command" == *"sudo base64 --decode"* && "\$command" == *"sudo mv"* && -f "\$stage_b64" ]]; then
+    destination="\$(awk '/^sudo mv / { print \$NF }' <<<"\$command" | tail -1)"
+    destination="\${destination//\\\\/}"
+    [[ -n "\$destination" ]] || return 0
+    base64 --decode <"\$stage_b64" >"\$log_dir/\$(basename "\$destination")"
+    rm -f "\$stage_b64"
+    return 0
+  fi
+
   payload_line="\$(grep -F " | base64 --decode | sudo tee " <<<"\$command" || true)"
   [[ -n "\$payload_line" ]] || return 0
   prefix="printf '%s' '"

@@ -2480,19 +2480,85 @@ production_ssm_stage_file() {
   local source_path="$4"
   local destination_path="$5"
   local mode="${6:-0640}"
+  local chunk_size="${PRODUCTION_SSM_STAGE_CHUNK_SIZE:-12000}"
 
   [[ -f "$source_path" ]] || die "stage source file not found: $source_path"
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "invalid stage file mode: $mode"
+  [[ "$chunk_size" =~ ^[0-9]+$ && "$chunk_size" -gt 0 && "$chunk_size" -le 24000 ]] \
+    || die "invalid SSM stage chunk size: $chunk_size"
   have_cmd base64 || die "required command not found: base64"
+  have_cmd fold || die "required command not found: fold"
 
-  local encoded command
-  encoded="$(base64 <"$source_path" | tr -d '\n')"
-  command="$(cat <<EOF
-sudo install -d -m 0755 "$(dirname "$destination_path")"
-printf '%s' '$encoded' | base64 --decode | sudo tee "$destination_path" >/dev/null
-sudo chmod $mode "$destination_path"
+  local chunks_file destination_dir remote_tmp_b64 remote_tmp_file
+  local destination_path_q destination_dir_q remote_tmp_b64_q remote_tmp_file_q
+  local cleanup_command command chunk
+
+  chunks_file="$(mktemp)" || return 1
+  if ! base64 <"$source_path" | tr -d '\n' | fold -w "$chunk_size" >"$chunks_file"; then
+    rm -f "$chunks_file"
+    return 1
+  fi
+
+  destination_dir="$(dirname "$destination_path")"
+  remote_tmp_b64="$destination_path.b64.$$"
+  remote_tmp_file="$destination_path.tmp.$$"
+  printf -v destination_path_q '%q' "$destination_path"
+  printf -v destination_dir_q '%q' "$destination_dir"
+  printf -v remote_tmp_b64_q '%q' "$remote_tmp_b64"
+  printf -v remote_tmp_file_q '%q' "$remote_tmp_file"
+  cleanup_command="$(cat <<EOF
+sudo rm -f $remote_tmp_b64_q $remote_tmp_file_q
 EOF
 )"
-  production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$command" >/dev/null
+
+  command="$(cat <<EOF
+set -euo pipefail
+sudo install -d -m 0755 $destination_dir_q
+sudo rm -f $remote_tmp_b64_q $remote_tmp_file_q
+sudo install -m 0600 /dev/null $remote_tmp_b64_q
+EOF
+)"
+  if ! production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$command" >/dev/null; then
+    rm -f "$chunks_file"
+    return 1
+  fi
+
+  while IFS= read -r chunk || [[ -n "$chunk" ]]; do
+    command="$(cat <<EOF
+set -euo pipefail
+sudo tee -a $remote_tmp_b64_q >/dev/null <<'__INTENTS_JUNO_SSM_STAGE_CHUNK__'
+$chunk
+__INTENTS_JUNO_SSM_STAGE_CHUNK__
+EOF
+)"
+    if ! production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$command" >/dev/null; then
+      production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$cleanup_command" >/dev/null 2>&1 || true
+      rm -f "$chunks_file"
+      return 1
+    fi
+  done <"$chunks_file"
+
+  command="$(cat <<EOF
+set -euo pipefail
+cleanup() {
+  sudo rm -f $remote_tmp_b64_q $remote_tmp_file_q
+}
+trap cleanup EXIT
+sudo base64 --decode $remote_tmp_b64_q | sudo tee $remote_tmp_file_q >/dev/null
+sudo chmod $mode $remote_tmp_file_q
+sudo mv $remote_tmp_file_q $destination_path_q
+sudo rm -f $remote_tmp_b64_q
+trap - EXIT
+EOF
+)"
+  if ! production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$command" >/dev/null; then
+    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$cleanup_command" >/dev/null 2>&1 || true
+    rm -f "$chunks_file"
+    return 1
+  fi
+
+  rm -f "$chunks_file"
+  return 0
 }
 
 production_environment_allows_local_checkpoint_signer() {
