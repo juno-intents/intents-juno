@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
@@ -318,6 +319,7 @@ func TestQueuePublishProducerConfiguresShadow(t *testing.T) {
 		Brokers:              "b-1.example:9098,b-2.example:9098",
 		ShadowDriver:         queue.DriverPostgres,
 		ShadowPostgresDSNEnv: "QUEUE_POSTGRES_DSN",
+		ShadowTimeout:        10 * time.Millisecond,
 	}, io.Discard, factory)
 	if err != nil {
 		t.Fatalf("queuePublishProducer: %v", err)
@@ -364,6 +366,7 @@ func TestQueuePublishProducerConfiguresPostgresPrimaryKafkaShadow(t *testing.T) 
 		PostgresDSNEnv: "QUEUE_POSTGRES_DSN",
 		ShadowDriver:   queue.DriverKafka,
 		ShadowBrokers:  "b-1.example:9098,b-2.example:9098",
+		ShadowTimeout:  10 * time.Millisecond,
 	}, io.Discard, factory)
 	if err != nil {
 		t.Fatalf("queuePublishProducer: %v", err)
@@ -415,6 +418,26 @@ func TestQueuePublishProducerCanRequireShadow(t *testing.T) {
 	}
 }
 
+func TestQueuePublishProducerRejectsUnsafeOptionalShadowTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, err := queuePublishProducer(queuePublishProducerOptions{
+		Driver:         queue.DriverKafka,
+		Brokers:        "b-1.example:9098",
+		ShadowDriver:   queue.DriverStdio,
+		ShadowRequired: false,
+		ShadowTimeout:  0,
+	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		return &recordingQueuePublishProducer{name: cfg.Driver}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "optional shadow queue requires positive timeout") {
+		t.Fatalf("error = %v, want optional shadow timeout error", err)
+	}
+}
+
 func TestQueuePublishProducerToleratesOptionalShadowInitFailure(t *testing.T) {
 	shadowErr := errors.New("shadow init down")
 	var calls []string
@@ -426,9 +449,10 @@ func TestQueuePublishProducerToleratesOptionalShadowInitFailure(t *testing.T) {
 	}
 
 	producer, err := queuePublishProducer(queuePublishProducerOptions{
-		Driver:       queue.DriverKafka,
-		Brokers:      "b-1.example:9098",
-		ShadowDriver: queue.DriverStdio,
+		Driver:        queue.DriverKafka,
+		Brokers:       "b-1.example:9098",
+		ShadowDriver:  queue.DriverStdio,
+		ShadowTimeout: 10 * time.Millisecond,
 	}, io.Discard, factory)
 	if err != nil {
 		t.Fatalf("queuePublishProducer: %v", err)

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -255,6 +256,7 @@ func TestBaseEventScannerQueueProducerConfiguresPostgresShadow(t *testing.T) {
 		Brokers:          "b-1.example:9098,b-2.example:9098",
 		StorePostgresDSN: "postgres://state-db",
 		ShadowDriver:     queue.DriverPostgres,
+		ShadowTimeout:    10 * time.Millisecond,
 	}, io.Discard, factory)
 	if err != nil {
 		t.Fatalf("baseEventScannerQueueProducer: %v", err)
@@ -297,6 +299,7 @@ func TestBaseEventScannerQueueProducerToleratesOptionalShadowInitFailure(t *test
 		Brokers:          "b-1.example:9098",
 		StorePostgresDSN: "postgres://state-db",
 		ShadowDriver:     queue.DriverPostgres,
+		ShadowTimeout:    10 * time.Millisecond,
 	}, io.Discard, factory)
 	if err != nil {
 		t.Fatalf("baseEventScannerQueueProducer: %v", err)
@@ -363,5 +366,26 @@ func TestBaseEventScannerQueueProducerCanRequireShadow(t *testing.T) {
 	}
 	if err := producer.Publish(context.Background(), "withdrawals.requested.v2", []byte("payload")); !errors.Is(err, shadowErr) {
 		t.Fatalf("Publish error = %v, want shadow error", err)
+	}
+}
+
+func TestBaseEventScannerQueueProducerRejectsUnsafeOptionalShadowTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+		Driver:           queue.DriverKafka,
+		Brokers:          "b-1.example:9098",
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+		ShadowRequired:   false,
+		ShadowTimeout:    0,
+	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+		return &recordingScannerProducer{name: cfg.Driver}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "optional shadow queue requires positive timeout") {
+		t.Fatalf("error = %v, want optional shadow timeout error", err)
 	}
 }

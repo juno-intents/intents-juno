@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
@@ -56,6 +57,8 @@ type auditRecord struct {
 	Error         string `json:"error,omitempty"`
 }
 
+const defaultShadowQueueTimeout = 5 * time.Second
+
 func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	var payloadFiles stringListFlag
 	fs := flag.NewFlagSet("queue-publish", flag.ContinueOnError)
@@ -70,6 +73,7 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 	shadowQueuePostgresDSN := fs.String("shadow-queue-postgres-dsn", "", "Postgres DSN for postgres shadow queue driver")
 	shadowQueuePostgresDSNEnv := fs.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres shadow queue driver")
 	shadowQueueRequired := fs.Bool("shadow-queue-required", false, "fail publish when the shadow queue publish fails")
+	shadowQueueTimeout := fs.Duration("shadow-queue-timeout", defaultShadowQueueTimeout, "timeout for optional shadow queue publishes")
 	topic := fs.String("topic", "", "queue topic (required)")
 	payload := fs.String("payload", "", "inline payload body")
 	fs.Var(&payloadFiles, "payload-file", "payload file path (repeatable)")
@@ -140,6 +144,7 @@ func runMain(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer)
 				ShadowPostgresDSN:    *shadowQueuePostgresDSN,
 				ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
 				ShadowRequired:       *shadowQueueRequired,
+				ShadowTimeout:        *shadowQueueTimeout,
 			}, stdout, queue.NewProducer)
 			if err != nil {
 				return err
@@ -170,6 +175,7 @@ type queuePublishProducerOptions struct {
 	ShadowPostgresDSN    string
 	ShadowPostgresDSNEnv string
 	ShadowRequired       bool
+	ShadowTimeout        time.Duration
 }
 
 func validateQueuePublishConfig(driver, brokers, postgresDSN, postgresDSNEnv string, dryRun bool) error {
@@ -231,6 +237,10 @@ func queuePublishProducer(opts queuePublishProducerOptions, stdout io.Writer, fa
 	if strings.TrimSpace(opts.ShadowDriver) == "" {
 		return primary, nil
 	}
+	if !opts.ShadowRequired && opts.ShadowTimeout <= 0 {
+		_ = primary.Close()
+		return nil, errors.New("optional shadow queue requires positive timeout")
+	}
 
 	shadowCfg, err := producerConfigForQueueDriver(opts.ShadowDriver, opts.ShadowBrokers, opts.ShadowPostgresDSN, opts.ShadowPostgresDSNEnv, stdout)
 	if err != nil {
@@ -248,7 +258,10 @@ func queuePublishProducer(opts queuePublishProducerOptions, stdout io.Writer, fa
 		_ = primary.Close()
 		return nil, fmt.Errorf("init shadow queue producer: %w", err)
 	}
-	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{RequireShadow: opts.ShadowRequired})
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{
+		RequireShadow: opts.ShadowRequired,
+		ShadowTimeout: opts.ShadowTimeout,
+	})
 	if err != nil {
 		_ = primary.Close()
 		_ = shadow.Close()

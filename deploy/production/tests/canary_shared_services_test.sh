@@ -371,23 +371,23 @@ EOF
 #!/usr/bin/env bash
 printf 'queue-inspect %s\n' "\$*" >>"$log_file"
 case "\$*" in
-  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.requests.v1"*"--groups proof-requestor"*"--format json"*"--max-expired-leases 0"*)
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.requests.v1"*"--groups proof-requestor"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
     printf '{"topics":[]}\n'
     exit 0
     ;;
-  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics deposits.event.v2,checkpoints.packages.v1"*"--groups deposit-relayer"*"--format json"*"--max-expired-leases 0"*)
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics deposits.event.v2,checkpoints.packages.v1"*"--groups deposit-relayer"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
     printf '{"topics":[]}\n'
     exit 0
     ;;
-  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics withdrawals.requested.v2"*"--groups withdraw-coordinator"*"--format json"*"--max-expired-leases 0"*)
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics withdrawals.requested.v2"*"--groups withdraw-coordinator"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
     printf '{"topics":[]}\n'
     exit 0
     ;;
-  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics checkpoints.packages.v1"*"--groups withdraw-finalizer"*"--format json"*"--max-expired-leases 0"*)
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics checkpoints.packages.v1"*"--groups withdraw-finalizer"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
     printf '{"topics":[]}\n'
     exit 0
     ;;
-  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1"*"--format json"*"--max-expired-leases 0"*)
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
     printf '{"topics":[]}\n'
     exit 0
     ;;
@@ -415,6 +415,7 @@ EOF
   assert_contains "$(cat "$log_file")" "--topics withdrawals.requested.v2 --groups withdraw-coordinator" "postgres queue canary inspects withdraw coordinator mapping"
   assert_contains "$(cat "$log_file")" "--topics checkpoints.packages.v1 --groups withdraw-finalizer" "postgres queue canary inspects withdraw finalizer mapping"
   assert_contains "$(cat "$log_file")" "--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1" "postgres queue canary inspects dynamic and publisher-only topics"
+  assert_contains "$(cat "$log_file")" "--max-backlog 0" "postgres queue canary defaults to zero backlog tolerance"
   assert_not_contains "$(cat "$log_file")" "--groups proof-requestor,deposit-relayer,withdraw-finalizer,withdraw-coordinator" "postgres queue canary avoids cross-product topic/group checks"
   assert_not_contains "$(cat "$log_file")" "postgres://queue.example.invalid" "postgres queue canary keeps dsn out of command arguments"
   assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "postgres queue canary queue status"

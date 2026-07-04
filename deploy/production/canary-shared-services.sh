@@ -241,7 +241,7 @@ queue_inspect_bin="${PRODUCTION_CANARY_QUEUE_INSPECT_BIN:-}"
 queue_inspect_dsn_env="${PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
 queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-proof.requests.v1|proof-requestor;deposits.event.v2,checkpoints.packages.v1|deposit-relayer;withdrawals.requested.v2|withdraw-coordinator;checkpoints.packages.v1|withdraw-finalizer;proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|}"
 queue_inspect_max_expired_leases="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES:-0}"
-queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-}"
+queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-0}"
 postgres_queue_inspection_enabled="false"
 if [[ -n "$queue_inspect_bin" ]] && { [[ "$queue_driver" == "postgres" ]] || [[ "$proof_queue_driver" == "postgres" ]] || [[ "$proof_shadow_queue_driver" == "postgres" ]]; }; then
   postgres_queue_inspection_enabled="true"

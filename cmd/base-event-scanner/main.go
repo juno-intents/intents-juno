@@ -48,6 +48,8 @@ type eventPayload struct {
 	FinalitySource string `json:"finalitySource"`
 }
 
+const defaultShadowQueueTimeout = 5 * time.Second
+
 var ensureBaseEventScannerKafkaTopics = queue.EnsureKafkaTopics
 
 func runMain(args []string, stdout io.Writer) error {
@@ -81,6 +83,7 @@ func runMain(args []string, stdout io.Writer) error {
 	shadowQueuePostgresDSN := fs.String("shadow-queue-postgres-dsn", "", "Postgres DSN for postgres shadow queue driver (defaults to --postgres-dsn)")
 	shadowQueuePostgresDSNEnv := fs.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres shadow queue driver")
 	shadowQueueRequired := fs.Bool("shadow-queue-required", false, "fail publish when the shadow queue publish fails")
+	shadowQueueTimeout := fs.Duration("shadow-queue-timeout", defaultShadowQueueTimeout, "timeout for optional shadow queue publishes")
 	withdrawEventTopic := fs.String("withdraw-event-topic", "withdrawals.requested.v2", "Kafka topic for withdraw events")
 
 	if err := fs.Parse(args); err != nil {
@@ -149,6 +152,7 @@ func runMain(args []string, stdout io.Writer) error {
 		ShadowPostgresDSN:    *shadowQueuePostgresDSN,
 		ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
 		ShadowRequired:       *shadowQueueRequired,
+		ShadowTimeout:        *shadowQueueTimeout,
 	}, stdout, queue.NewProducer)
 	if err != nil {
 		return fmt.Errorf("create queue producer: %w", err)
@@ -265,6 +269,7 @@ type baseEventScannerQueueOptions struct {
 	ShadowPostgresDSN    string
 	ShadowPostgresDSNEnv string
 	ShadowRequired       bool
+	ShadowTimeout        time.Duration
 }
 
 func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.Writer, factory baseEventScannerQueueProducerFactory) (queue.Producer, error) {
@@ -291,6 +296,10 @@ func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.
 		_ = primary.Close()
 		return nil, fmt.Errorf("unsupported shadow queue driver %q", opts.ShadowDriver)
 	}
+	if !opts.ShadowRequired && opts.ShadowTimeout <= 0 {
+		_ = primary.Close()
+		return nil, errors.New("optional shadow queue requires positive timeout")
+	}
 	shadowCfg, err := baseEventScannerProducerConfig(opts.ShadowDriver, opts.ShadowBrokers, opts.ShadowPostgresDSN, opts.ShadowPostgresDSNEnv, opts.StorePostgresDSN, stdout)
 	if err != nil {
 		if !opts.ShadowRequired {
@@ -307,7 +316,10 @@ func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.
 		_ = primary.Close()
 		return nil, fmt.Errorf("init shadow queue producer: %w", err)
 	}
-	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{RequireShadow: opts.ShadowRequired})
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{
+		RequireShadow: opts.ShadowRequired,
+		ShadowTimeout: opts.ShadowTimeout,
+	})
 	if err != nil {
 		_ = primary.Close()
 		_ = shadow.Close()
