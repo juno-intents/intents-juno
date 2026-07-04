@@ -242,7 +242,7 @@ func TestEnsureScannerQueueTopics(t *testing.T) {
 func TestBaseEventScannerQueueProducerConfiguresPostgresShadow(t *testing.T) {
 	var configs []queue.ProducerConfig
 	var calls []string
-	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	factory := func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		configs = append(configs, cfg)
 		name := cfg.Driver
 		if len(configs) == 2 {
@@ -251,7 +251,7 @@ func TestBaseEventScannerQueueProducerConfiguresPostgresShadow(t *testing.T) {
 		return &recordingScannerProducer{name: name, calls: &calls}, nil
 	}
 
-	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	producer, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:           queue.DriverKafka,
 		Brokers:          "b-1.example:9098,b-2.example:9098",
 		StorePostgresDSN: "postgres://state-db",
@@ -287,14 +287,14 @@ func TestBaseEventScannerQueueProducerConfiguresPostgresShadow(t *testing.T) {
 func TestBaseEventScannerQueueProducerToleratesOptionalShadowInitFailure(t *testing.T) {
 	shadowErr := errors.New("shadow init down")
 	var calls []string
-	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	factory := func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		if cfg.Driver == queue.DriverPostgres {
 			return nil, shadowErr
 		}
 		return &recordingScannerProducer{name: cfg.Driver, calls: &calls}, nil
 	}
 
-	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	producer, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:           queue.DriverKafka,
 		Brokers:          "b-1.example:9098",
 		StorePostgresDSN: "postgres://state-db",
@@ -312,12 +312,41 @@ func TestBaseEventScannerQueueProducerToleratesOptionalShadowInitFailure(t *test
 	}
 }
 
+func TestBaseEventScannerQueueProducerOptionalShadowInitUsesTimeout(t *testing.T) {
+	t.Parallel()
+
+	var configs []queue.ProducerConfig
+	factory := func(ctx context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		if len(configs) == 1 {
+			return &recordingScannerProducer{name: "primary"}, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	producer, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
+		Driver:           queue.DriverKafka,
+		Brokers:          "b-1.example:9098",
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+		ShadowTimeout:    10 * time.Millisecond,
+	}, io.Discard, factory)
+	if err != nil {
+		t.Fatalf("baseEventScannerQueueProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	if len(configs) != 2 {
+		t.Fatalf("config count = %d, want 2", len(configs))
+	}
+}
+
 func TestBaseEventScannerQueueProducerRejectsUnsupportedShadowDriver(t *testing.T) {
-	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	_, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:       queue.DriverKafka,
 		Brokers:      "b-1.example:9098",
 		ShadowDriver: "typo",
-	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	}, io.Discard, func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		return &recordingScannerProducer{name: cfg.Driver}, nil
 	})
 	if err == nil {
@@ -329,11 +358,11 @@ func TestBaseEventScannerQueueProducerRejectsUnsupportedShadowDriver(t *testing.
 }
 
 func TestBaseEventScannerQueueProducerRequiredShadowRequiresDriver(t *testing.T) {
-	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	_, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:         queue.DriverKafka,
 		Brokers:        "b-1.example:9098",
 		ShadowRequired: true,
-	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	}, io.Discard, func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		return &recordingScannerProducer{name: cfg.Driver}, nil
 	})
 	if err == nil {
@@ -346,7 +375,7 @@ func TestBaseEventScannerQueueProducerRequiredShadowRequiresDriver(t *testing.T)
 
 func TestBaseEventScannerQueueProducerCanRequireShadow(t *testing.T) {
 	shadowErr := errors.New("shadow down")
-	factory := func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	factory := func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		producer := &recordingScannerProducer{name: cfg.Driver}
 		if cfg.Driver == queue.DriverPostgres {
 			producer.publishErr = shadowErr
@@ -354,7 +383,7 @@ func TestBaseEventScannerQueueProducerCanRequireShadow(t *testing.T) {
 		return producer, nil
 	}
 
-	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	producer, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:           queue.DriverKafka,
 		Brokers:          "b-1.example:9098",
 		StorePostgresDSN: "postgres://state-db",
@@ -372,14 +401,14 @@ func TestBaseEventScannerQueueProducerCanRequireShadow(t *testing.T) {
 func TestBaseEventScannerQueueProducerRejectsUnsafeOptionalShadowTimeout(t *testing.T) {
 	t.Parallel()
 
-	_, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	_, err := baseEventScannerQueueProducer(context.Background(), baseEventScannerQueueOptions{
 		Driver:           queue.DriverKafka,
 		Brokers:          "b-1.example:9098",
 		StorePostgresDSN: "postgres://state-db",
 		ShadowDriver:     queue.DriverPostgres,
 		ShadowRequired:   false,
 		ShadowTimeout:    0,
-	}, io.Discard, func(cfg queue.ProducerConfig) (queue.Producer, error) {
+	}, io.Discard, func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
 		return &recordingScannerProducer{name: cfg.Driver}, nil
 	})
 	if err == nil {

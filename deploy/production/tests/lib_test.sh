@@ -202,6 +202,7 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
     .environment = "mainnet"
     | .shared_postgres_password = "mainnet-postgres-password"
     | .shared_services.queue.driver = "postgres"
+    | .shared_services.msk_retention_mode = "retain"
     | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
     | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
     | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
@@ -219,6 +220,7 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
   assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars keep the shared proof role desired capacity within quota"
   assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "2" "production shared tfvars cap the shared proof role autoscaling within quota"
   assert_eq "$(jq -r '.shared_queue_driver' "$override_file")" "postgres" "production shared tfvars include the requested shared queue driver"
+  assert_eq "$(jq -r '.shared_msk_retention_mode' "$override_file")" "retain" "production shared tfvars can retain MSK during Postgres queue observation"
   rm -rf "$workdir"
 }
 
@@ -259,6 +261,79 @@ test_write_shared_terraform_override_tfvars_rejects_invalid_queue_driver() {
     assert_contains "$(cat "$stderr_file")" "shared_services.queue.driver must be kafka or postgres" "production shared tfvars reject invalid queue driver case $case_name"
     rm -rf "$workdir"
   done
+}
+
+test_write_shared_terraform_override_tfvars_requires_retained_msk_for_kafka_shadow_paths() {
+  local case_name retention_expr shadow_expr workdir override_file stderr_file
+  for case_name in shared-shadow-omitted shared-shadow-auto proof-shadow-omitted proof-shadow-auto; do
+    case "$case_name" in
+      shared-shadow-omitted)
+        retention_expr='del(.shared_services.msk_retention_mode) | del(.shared_services.msk)'
+        shadow_expr='.shared_services.queue.shadow.driver = "kafka"'
+        ;;
+      shared-shadow-auto)
+        retention_expr='.shared_services.msk_retention_mode = "auto"'
+        shadow_expr='.shared_services.queue.shadow.driver = "kafka"'
+        ;;
+      proof-shadow-omitted)
+        retention_expr='del(.shared_services.msk_retention_mode) | del(.shared_services.msk)'
+        shadow_expr='.shared_services.proof_queue.shadow.driver = "kafka"'
+        ;;
+      proof-shadow-auto)
+        retention_expr='.shared_services.msk_retention_mode = "auto"'
+        shadow_expr='.shared_services.proof_queue.shadow.driver = "kafka"'
+        ;;
+    esac
+
+    workdir="$(mktemp -d)"
+    write_inventory_fixture "$workdir/inventory.json" "$workdir"
+    jq "
+      .environment = \"mainnet\"
+      | .shared_postgres_password = \"mainnet-postgres-password\"
+      | .shared_services.queue.driver = \"postgres\"
+      | $retention_expr
+      | $shadow_expr
+      | .app_role.private_subnet_ids = [\"subnet-0afebf35409cafe82\", \"subnet-0dfe9dd62ddea943b\"]
+      | .shared_services.alarm_actions = [\"arn:aws:sns:us-east-1:021490342184:intents-juno-alerts\"]
+      | .contracts.bridge_guest_release_tag = \"bridge-guests-v2026.04.06-r1-mainnet\"
+    " "$workdir/inventory.json" >"$workdir/inventory.next"
+    mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+    override_file="$workdir/shared-terraform.auto.tfvars.json"
+    stderr_file="$workdir/stderr"
+    if (production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file") 2>"$stderr_file"; then
+      printf 'expected postgres primary with kafka shadow case %s to require retained MSK\n' "$case_name" >&2
+      exit 1
+    fi
+
+    assert_contains "$(cat "$stderr_file")" "shared_services.msk_retention_mode=retain is required when shared_services.queue.driver=postgres and any shared/proof queue path uses kafka" "production shared tfvars reject kafka shadow without retained MSK case $case_name"
+    rm -rf "$workdir"
+  done
+}
+
+test_write_shared_terraform_override_tfvars_allows_kafka_shadow_paths_with_retained_msk() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .shared_services.queue.driver = "postgres"
+    | .shared_services.queue.shadow.driver = "kafka"
+    | .shared_services.proof_queue.shadow.driver = "kafka"
+    | .shared_services.msk_retention_mode = "retain"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_queue_driver' "$override_file")" "postgres" "production shared tfvars keep postgres primary with retained MSK"
+  assert_eq "$(jq -r '.shared_msk_retention_mode' "$override_file")" "retain" "production shared tfvars writes retained MSK mode for kafka shadow paths"
+  rm -rf "$workdir"
 }
 
 test_write_shared_terraform_override_tfvars_writes_proof_queue_driver() {
@@ -1146,6 +1221,8 @@ EOF
   assert_eq "$(jq -r '.wireguard_role.publish_public_dns' "$shared_manifest")" "false" "wireguard role suppresses public dns"
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
   assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "postgres" "shared queue driver"
+  assert_eq "$(jq -r '.shared_services.msk.retention_mode' "$shared_manifest")" "auto" "shared manifest records default MSK retention mode"
+  assert_eq "$(jq -r '.shared_services.msk.provisioned' "$shared_manifest")" "true" "shared manifest records provisioned MSK when kafka outputs exist"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "ecs proof requestor service name"
@@ -1203,6 +1280,7 @@ test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers() {
   tf_json="$workdir/terraform-output.json"
   jq '
     .shared_queue_driver = { value: "postgres" }
+    | del(.shared_kafka_cluster_arn)
     | del(.shared_kafka_bootstrap_brokers)
   ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
 
@@ -1216,6 +1294,8 @@ test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers() {
     "$workdir"
 
   assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "postgres" "shared manifest keeps postgres queue driver"
+  assert_eq "$(jq -r '.shared_services.msk.retention_mode' "$shared_manifest")" "auto" "postgres shared manifest records default MSK retention mode"
+  assert_eq "$(jq -r '.shared_services.msk.provisioned' "$shared_manifest")" "false" "postgres shared manifest records absent MSK when kafka outputs are absent"
   assert_eq "$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")" "" "postgres shared manifest allows absent kafka brokers"
 
   cat >"$workdir/operator-deploy.json" <<'EOF'
@@ -1274,6 +1354,7 @@ test_render_shared_manifest_includes_proof_queue_controls() {
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   jq '
     .shared_services.queue.driver = "kafka"
+    | .shared_services.queue.shadow.driver = "postgres"
     | .shared_services.proof_queue.shadow.driver = "postgres"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
@@ -1293,8 +1374,49 @@ test_render_shared_manifest_includes_proof_queue_controls() {
     "$workdir"
 
   assert_eq "$(jq -r '.shared_services.queue.driver' "$shared_manifest")" "kafka" "shared manifest keeps shared queue on kafka"
+  assert_eq "$(jq -r '.shared_services.queue.shadow.driver' "$shared_manifest")" "postgres" "shared manifest carries shared queue shadow driver"
   assert_eq "$(jq -r '.shared_services.proof_queue.driver' "$shared_manifest")" "kafka" "shared manifest carries proof queue primary driver"
   assert_eq "$(jq -r '.shared_services.proof_queue.shadow.driver' "$shared_manifest")" "postgres" "shared manifest carries proof queue shadow driver"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_enables_main_queue_shadow() {
+  local workdir output_env
+  workdir="$(mktemp -d)"
+  write_shared_manifest_fixture "$workdir/shared-manifest.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "kafka"
+    | .shared_services.queue.shadow.driver = "postgres"
+  ' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_QUEUE_CRITICAL_HMAC_KEY=critical
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=kafka" "operator env keeps main queue on kafka during shadowing"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=kafka" "checkpoint env keeps checkpoint queue primary on kafka during shadowing"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SHADOW_QUEUE_DRIVER=postgres" "checkpoint env enables postgres shadow writes"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER=postgres" "base-event scanner env enables postgres shadow writes"
   rm -rf "$workdir"
 }
 
@@ -1467,7 +1589,8 @@ test_production_shared_postgres_queue_gates_msk_resources() {
   ' "$REPO_ROOT/deploy/shared/terraform/production-shared/main.tf")"
 
   assert_contains "$main_tf" 'shared_queue_uses_kafka' "production shared terraform derives kafka queue enablement from shared_queue_driver"
-  assert_contains "$main_tf" 'count                  = local.shared_queue_uses_kafka ? 1 : 0' "production shared terraform gates msk cluster resources behind kafka queue mode"
+  assert_contains "$main_tf" 'shared_msk_provisioned' "production shared terraform derives MSK lifecycle from queue mode plus retention"
+  assert_contains "$main_tf" 'count                  = local.shared_msk_provisioned ? 1 : 0' "production shared terraform gates msk cluster resources behind MSK lifecycle mode"
   assert_contains "$main_tf" 'aws_msk_cluster.shared[0]' "production shared terraform indexes optional msk cluster resources"
   assert_contains "$main_tf" 'from = aws_msk_configuration.shared' "production shared terraform preserves msk configuration state address during count migration"
   assert_contains "$main_tf" 'to   = aws_msk_configuration.shared[0]' "production shared terraform preserves indexed msk configuration state address during count migration"
@@ -1488,9 +1611,9 @@ test_production_shared_postgres_queue_gates_msk_resources() {
   assert_contains "$main_tf" 'to   = aws_iam_role_policy.proof_funder_task_access[0]' "production shared terraform preserves indexed kafka funder task policy state address during count migration"
   assert_contains "$main_tf" 'from = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions' "production shared terraform preserves msk alarm state address during count migration"
   assert_contains "$main_tf" 'to   = aws_cloudwatch_metric_alarm.shared_kafka_offline_partitions[0]' "production shared terraform preserves indexed msk alarm state address during count migration"
-  assert_contains "$main_tf" 'local.shared_queue_uses_kafka ? [' "production shared terraform gates kafka iam statements behind kafka queue mode"
-  assert_contains "$monitoring_tf" 'count               = local.shared_queue_uses_kafka ? 1 : 0' "production shared monitoring gates msk alarm behind kafka queue mode"
-  assert_contains "$outputs_tf" 'value       = local.shared_queue_uses_kafka ? var.shared_kafka_port : null' "production shared kafka port output is empty in postgres queue mode"
+  assert_contains "$main_tf" 'local.shared_msk_provisioned ? [' "production shared terraform keeps rollback kafka iam statements while MSK is retained"
+  assert_contains "$monitoring_tf" 'count               = local.shared_msk_provisioned ? 1 : 0' "production shared monitoring gates msk alarm behind MSK lifecycle mode"
+  assert_contains "$outputs_tf" 'value       = local.shared_msk_provisioned ? var.shared_kafka_port : null' "production shared kafka port output is empty only when MSK is not provisioned"
   assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")' "production shared kafka broker output is empty in postgres queue mode"
   assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].arn, "")' "production shared kafka cluster output is empty in postgres queue mode"
   assert_contains "$outputs_tf" 'try(aws_msk_cluster.shared[0].bootstrap_brokers_tls, "")' "production shared kafka tls broker output is empty in postgres queue mode"
@@ -4331,9 +4454,52 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint_ips")' "$override_file")" "false" "preview override does not write the unsupported plural backoffice endpoint input"
   assert_eq "$(jq -r 'has("shared_wireguard_role_ami_id")' "$override_file")" "false" "preview override does not write the unsupported wireguard ami input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
-  assert_eq "$(jq -r 'has("shared_queue_driver")' "$override_file")" "false" "preview override does not write the unsupported production shared queue driver input"
-  assert_eq "$(jq -r 'has("shared_proof_queue_driver")' "$override_file")" "false" "preview override does not write the unsupported production proof queue driver input"
+  assert_eq "$(jq -r '.shared_queue_driver' "$override_file")" "postgres" "preview override writes the live-e2e shared queue driver input"
+  assert_eq "$(jq -r '.shared_proof_queue_driver' "$override_file")" "postgres" "preview override writes the live-e2e proof queue driver input"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | length' "$override_file")" "0" "preview override writes an empty reusable VPC endpoint list when the VPC has none"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_rejects_live_e2e_postgres_with_kafka_shadow() {
+  local workdir override_file fake_bin old_path stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mkdir -p "$workdir/terraform/live-e2e"
+  write_live_e2e_tfvars_fixture "$workdir/terraform/live-e2e/terraform.tfvars"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_services.queue.driver = "postgres"
+    | .shared_services.queue.shadow.driver = "kafka"
+    | .shared_services.msk_retention_mode = "retain"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .shared_postgres_db = "preview-intents-db"
+    | .shared_services.live_e2e = {
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
+    | .app_role.app_security_group_id = "sg-approle012345678"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  stderr_file="$workdir/stderr"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_live_e2e_describer \
+    "$fake_bin/aws" \
+    --lt \
+    "lt-0123456789abcdef0@1=ami-0d130f29f8f555638"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  if (production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file") 2>"$stderr_file"; then
+    PATH="$old_path"
+    printf 'expected live-e2e postgres primary with kafka shadow to fail\n' >&2
+    exit 1
+  fi
+  PATH="$old_path"
+
+  assert_contains "$(cat "$stderr_file")" "live-e2e shared terraform cannot prove retained MSK for shared_services.queue.driver=postgres with kafka shared/proof queue paths; use deploy/shared/terraform/production-shared preview before mainnet promotion" "preview override rejects postgres primary with kafka shadow until live-e2e supports retained MSK"
   rm -rf "$workdir"
 }
 
@@ -4964,6 +5130,7 @@ main() {
   test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
   test_render_operator_stack_env_retargets_runtime_values_from_shared_manifest
+  test_render_operator_stack_env_enables_main_queue_shadow
   test_render_operator_stack_env_enables_proof_shadow_queue
   test_render_operator_stack_env_uses_proof_queue_driver_override
   test_render_operator_stack_env_rejects_duplicate_proof_shadow_driver
@@ -4994,6 +5161,8 @@ main() {
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
   test_write_shared_terraform_override_tfvars_rejects_invalid_queue_driver
+  test_write_shared_terraform_override_tfvars_requires_retained_msk_for_kafka_shadow_paths
+  test_write_shared_terraform_override_tfvars_allows_kafka_shadow_paths_with_retained_msk
   test_write_shared_terraform_override_tfvars_writes_proof_queue_driver
   test_write_shared_terraform_override_tfvars_rejects_uncoordinated_proof_queue_cutover
   test_write_shared_terraform_override_tfvars_rejects_invalid_proof_queue_driver
@@ -5004,6 +5173,7 @@ main() {
   test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable
   test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
+  test_write_shared_terraform_override_tfvars_rejects_live_e2e_postgres_with_kafka_shadow
   test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
   test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates
   test_write_app_terraform_override_tfvars_preserves_explicit_instance_type

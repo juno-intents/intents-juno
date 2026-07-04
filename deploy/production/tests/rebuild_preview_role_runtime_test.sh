@@ -86,11 +86,25 @@ done
 env_dir="\$output_dir/preview"
 mkdir -p "\$env_dir/app"
 shared_queue_driver="\${TEST_SHARED_QUEUE_DRIVER:-}"
+shared_queue_shadow_driver="\${TEST_SHARED_QUEUE_SHADOW_DRIVER:-}"
+proof_queue_shadow_driver="\${TEST_PROOF_QUEUE_SHADOW_DRIVER:-}"
+shared_msk_retention_mode="\${TEST_SHARED_MSK_RETENTION_MODE:-auto}"
+effective_shared_queue_driver="\${shared_queue_driver:-kafka}"
+shared_msk_provisioned=true
+if [[ "\$effective_shared_queue_driver" == "postgres" && "\$shared_msk_retention_mode" != "retain" ]]; then
+  shared_msk_provisioned=false
+fi
 shared_queue_json=""
-if [[ "\$shared_queue_driver" == "postgres" ]]; then
-  shared_queue_json='"queue": {"driver": "postgres"},'
-elif [[ "\$shared_queue_driver" == "kafka" ]]; then
-  shared_queue_json='"queue": {"driver": "kafka"},'
+proof_queue_json=""
+if [[ -n "\$shared_queue_driver" || -n "\$shared_queue_shadow_driver" ]]; then
+  if [[ -n "\$shared_queue_shadow_driver" ]]; then
+    shared_queue_json="\"queue\": {\"driver\": \"\${shared_queue_driver:-kafka}\", \"shadow\": {\"driver\": \"\$shared_queue_shadow_driver\"}},"
+  else
+    shared_queue_json="\"queue\": {\"driver\": \"\$shared_queue_driver\"},"
+  fi
+fi
+if [[ -n "\$proof_queue_shadow_driver" ]]; then
+  proof_queue_json="\"proof_queue\": {\"shadow\": {\"driver\": \"\$proof_queue_shadow_driver\"}},"
 fi
 app_role_json='"app_role": {
     "asg": "juno-app-runtime-preview-asg",
@@ -124,7 +138,13 @@ JSON
 cat >"\$env_dir/shared-manifest.json" <<JSON
 {
   "shared_services": {
+    "terraform_dir": "deploy/shared/terraform/production-shared",
     \$shared_queue_json
+    \$proof_queue_json
+    "msk": {
+      "retention_mode": "\$shared_msk_retention_mode",
+      "provisioned": \$shared_msk_provisioned
+    },
     "kafka": {
       "bootstrap_brokers": "b-1.preview.kafka:9098",
       "tls": true,
@@ -333,7 +353,7 @@ JSON
               ;;
           esac
         done
-        printf '%s\n' "\$parameters_json" >"$commands_file"
+        printf '%s\n' "\$parameters_json" >>"$commands_file"
         cat <<'JSON'
 {"Command":{"CommandId":"cmd-preview-ssm"}}
 JSON
@@ -509,6 +529,14 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_eq "$(jq -r '.app_binaries_release_tag' "$output_root/preview/role-runtime-release-lock.json")" "app-binaries-v2026.03.20-testnet" "release lock records the selected app-binaries release"
   assert_eq "$(jq -r '.app_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-backoffice-refresh.json" "release lock records the app backoffice refresh evidence"
   assert_eq "$(jq -r '.app_post_rollout_canary_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/canaries/app-post-final-rollout.json" "release lock records the final app canary evidence"
+  assert_eq "$(jq -r '.shared_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "kafka" "release lock records the shared queue driver"
+  assert_eq "$(jq -r '.shared_queue_shadow_driver // empty' "$output_root/preview/role-runtime-release-lock.json")" "" "release lock records empty shared queue shadow driver as null"
+  assert_eq "$(jq -r '.shared_proof_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "kafka" "release lock records the proof queue driver"
+  assert_eq "$(jq -r '.shared_proof_queue_shadow_driver // empty' "$output_root/preview/role-runtime-release-lock.json")" "" "release lock records empty proof queue shadow driver as null"
+  assert_eq "$(jq -r '.shared_terraform_dir' "$output_root/preview/role-runtime-release-lock.json")" "deploy/shared/terraform/production-shared" "release lock records shared terraform mode"
+  assert_eq "$(jq -r '.shared_msk_retention_mode' "$output_root/preview/role-runtime-release-lock.json")" "auto" "release lock records shared MSK retention mode"
+  assert_eq "$(jq -r '.shared_msk_provisioned' "$output_root/preview/role-runtime-release-lock.json")" "true" "release lock records shared MSK provisioned state"
+  assert_eq "$(jq -r '.shared_infra_e2e_outputs | join(",")' "$output_root/preview/role-runtime-release-lock.json")" "shared-infra-e2e.json" "release lock records shared infra e2e outputs"
 
   rm -rf "$tmp"
 }
@@ -585,6 +613,167 @@ test_rebuild_preview_role_runtime_uses_postgres_shared_validation() {
   rm -rf "$tmp"
 }
 
+test_rebuild_preview_role_runtime_runs_kafka_shadow_validation() {
+  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  refresh_log="$tmp/refresh.log"
+  e2e_log="$tmp/e2e.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
+
+  mkdir -p "$fake_bin"
+  write_rebuild_inventory_fixture "$inventory"
+  printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    TEST_SHARED_QUEUE_DRIVER=postgres \
+    TEST_SHARED_QUEUE_SHADOW_DRIVER=kafka \
+    TEST_SHARED_MSK_RETENTION_MODE=retain \
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_contains "$(cat "$ssm_commands")" "'--queue-driver' 'postgres'" "rebuild validates postgres primary queue path remotely"
+  assert_contains "$(cat "$ssm_commands")" "'--queue-driver' 'kafka'" "rebuild validates kafka shadow queue path remotely"
+  assert_contains "$(cat "$ssm_commands")" "--required-kafka-topics" "rebuild validates kafka topics for kafka shadow path"
+  assert_contains "$(cat "$ssm_commands")" "shared-infra-e2e.kafka-shadow.json" "rebuild records separate kafka shadow validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the primary postgres shared infra validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.kafka-shadow.json")" "true" "rebuild records the kafka shadow shared infra validation output"
+  assert_eq "$(jq -r '.shared_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "postgres" "release lock records the postgres shared queue driver"
+  assert_eq "$(jq -r '.shared_queue_shadow_driver' "$output_root/preview/role-runtime-release-lock.json")" "kafka" "release lock records the kafka shadow queue driver"
+  assert_eq "$(jq -r '.shared_proof_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "postgres" "release lock records the inherited postgres proof queue driver"
+  assert_eq "$(jq -r '.shared_proof_queue_shadow_driver // empty' "$output_root/preview/role-runtime-release-lock.json")" "" "release lock records empty proof queue shadow driver as null"
+  assert_eq "$(jq -r '.shared_msk_retention_mode' "$output_root/preview/role-runtime-release-lock.json")" "retain" "release lock records retained MSK mode for kafka shadow paths"
+  assert_eq "$(jq -r '.shared_msk_provisioned' "$output_root/preview/role-runtime-release-lock.json")" "true" "release lock records retained MSK as provisioned"
+  assert_eq "$(jq -r '.shared_infra_e2e_outputs | join(",")' "$output_root/preview/role-runtime-release-lock.json")" "shared-infra-e2e.json,shared-infra-e2e.kafka-shadow.json" "release lock records both primary and kafka shadow e2e outputs"
+
+  rm -rf "$tmp"
+}
+
+test_rebuild_preview_role_runtime_runs_postgres_shadow_validation() {
+  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  refresh_log="$tmp/refresh.log"
+  e2e_log="$tmp/e2e.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
+
+  mkdir -p "$fake_bin"
+  write_rebuild_inventory_fixture "$inventory"
+  printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    TEST_SHARED_QUEUE_DRIVER=kafka \
+    TEST_SHARED_QUEUE_SHADOW_DRIVER=postgres \
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_contains "$(cat "$ssm_commands")" "'--queue-driver' 'postgres'" "rebuild validates postgres shadow queue path remotely"
+  assert_contains "$(cat "$ssm_commands")" "'--queue-postgres-dsn' 'postgres://preview'" "rebuild passes postgres queue dsn to postgres shadow validation"
+  assert_contains "$(cat "$ssm_commands")" "shared-infra-e2e.postgres-shadow.json" "rebuild records separate postgres shadow validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the primary kafka shared infra validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.postgres-shadow.json")" "true" "rebuild records the postgres shadow shared infra validation output"
+  assert_eq "$(jq -r '.shared_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "kafka" "release lock records the kafka shared queue driver"
+  assert_eq "$(jq -r '.shared_queue_shadow_driver' "$output_root/preview/role-runtime-release-lock.json")" "postgres" "release lock records the postgres shadow queue driver"
+  assert_eq "$(jq -r '.shared_proof_queue_driver' "$output_root/preview/role-runtime-release-lock.json")" "kafka" "release lock records the inherited kafka proof queue driver"
+  assert_eq "$(jq -r '.shared_msk_retention_mode' "$output_root/preview/role-runtime-release-lock.json")" "auto" "release lock records auto MSK mode for kafka primary"
+  assert_eq "$(jq -r '.shared_msk_provisioned' "$output_root/preview/role-runtime-release-lock.json")" "true" "release lock records kafka primary MSK as provisioned"
+  assert_eq "$(jq -r '.shared_infra_e2e_outputs | join(",")' "$output_root/preview/role-runtime-release-lock.json")" "shared-infra-e2e.json,shared-infra-e2e.postgres-shadow.json" "release lock records both primary and postgres shadow e2e outputs"
+
+  rm -rf "$tmp"
+}
+
 test_rebuild_preview_role_runtime_uses_postgres_shared_validation_locally() {
   local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
   tmp="$(mktemp -d)"
@@ -654,6 +843,155 @@ test_rebuild_preview_role_runtime_uses_postgres_shared_validation_locally() {
   assert_not_contains "$(cat "$e2e_log")" "--kafka-brokers" "rebuild omits kafka brokers for local postgres shared infra validation"
   assert_not_contains "$(cat "$e2e_log")" "--required-kafka-topics" "rebuild omits kafka topic provisioning for local postgres shared infra validation"
   assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the local postgres shared infra validation output"
+
+  rm -rf "$tmp"
+}
+
+test_rebuild_preview_role_runtime_runs_kafka_shadow_validation_locally() {
+  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  refresh_log="$tmp/refresh.log"
+  e2e_log="$tmp/e2e.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
+
+  mkdir -p "$fake_bin"
+  write_rebuild_inventory_fixture "$inventory"
+  printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    TEST_SHARED_QUEUE_DRIVER=postgres \
+    TEST_SHARED_QUEUE_SHADOW_DRIVER=kafka \
+    TEST_REBUILD_APP_ROLE_MODE=local \
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_contains "$(cat "$e2e_log")" "--queue-driver postgres" "rebuild validates postgres primary queue path locally"
+  assert_contains "$(cat "$e2e_log")" "--queue-driver kafka" "rebuild validates kafka shadow queue path locally"
+  assert_contains "$(cat "$e2e_log")" "--required-kafka-topics" "rebuild validates kafka topics for local kafka shadow path"
+  assert_contains "$(cat "$e2e_log")" "shared-infra-e2e.kafka-shadow.json" "rebuild records separate local kafka shadow validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the local primary postgres shared infra validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.kafka-shadow.json")" "true" "rebuild records the local kafka shadow shared infra validation output"
+
+  rm -rf "$tmp"
+}
+
+test_rebuild_preview_role_runtime_runs_postgres_shadow_validation_locally() {
+  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  refresh_log="$tmp/refresh.log"
+  e2e_log="$tmp/e2e.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
+
+  mkdir -p "$fake_bin"
+  write_rebuild_inventory_fixture "$inventory"
+  printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    TEST_SHARED_QUEUE_DRIVER=kafka \
+    TEST_SHARED_QUEUE_SHADOW_DRIVER=postgres \
+    TEST_REBUILD_APP_ROLE_MODE=local \
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_contains "$(cat "$e2e_log")" "--queue-driver postgres" "rebuild validates postgres shadow queue path locally"
+  assert_contains "$(cat "$e2e_log")" "--queue-postgres-dsn postgres://preview" "rebuild passes postgres queue dsn to local postgres shadow validation"
+  assert_contains "$(cat "$e2e_log")" "shared-infra-e2e.postgres-shadow.json" "rebuild records separate local postgres shadow validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the local primary kafka shared infra validation output"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.postgres-shadow.json")" "true" "rebuild records the local postgres shadow shared infra validation output"
 
   rm -rf "$tmp"
 }
@@ -1058,7 +1396,11 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
 main() {
   test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout
   test_rebuild_preview_role_runtime_uses_postgres_shared_validation
+  test_rebuild_preview_role_runtime_runs_kafka_shadow_validation
+  test_rebuild_preview_role_runtime_runs_postgres_shadow_validation
   test_rebuild_preview_role_runtime_uses_postgres_shared_validation_locally
+  test_rebuild_preview_role_runtime_runs_kafka_shadow_validation_locally
+  test_rebuild_preview_role_runtime_runs_postgres_shadow_validation_locally
   test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets
   test_rebuild_preview_role_runtime_defaults_ephemeral_bridge_funding_amount
   test_rebuild_preview_role_runtime_reuses_latest_clean_preview_bridge_summary

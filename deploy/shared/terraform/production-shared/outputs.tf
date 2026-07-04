@@ -20,7 +20,7 @@ output "shared_postgres_port" {
 
 output "shared_kafka_port" {
   description = "MSK SASL/IAM Kafka port."
-  value       = local.shared_queue_uses_kafka ? var.shared_kafka_port : null
+  value       = local.shared_msk_provisioned ? var.shared_kafka_port : null
 }
 
 output "shared_kafka_bootstrap_brokers" {
@@ -39,7 +39,7 @@ output "shared_kafka_bootstrap_brokers_tls" {
 }
 
 output "shared_queue_driver" {
-  description = "Selected shared queue transport that controls MSK lifecycle."
+  description = "Selected shared queue transport."
   value       = local.shared_queue_driver
 }
 

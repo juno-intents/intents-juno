@@ -66,7 +66,7 @@ ensure_live_e2e_app_runtime_ingress() {
   local aws_region="$4"
   local app_security_group_id deployment_id shared_resource_name
   local shared_security_group_id ipfs_security_group_id operator_security_group_id
-  local shared_queue_driver
+  local shared_queue_driver shared_queue_shadow_driver proof_queue_driver proof_shadow_queue_driver selected_queue_driver kafka_path_active
   local shared_postgres_port shared_kafka_port shared_ipfs_api_port operator_grpc_min_port operator_grpc_max_port juno_rpc_port juno_scan_port
 
   app_security_group_id="$(jq -r '.app_role.app_security_group_id // empty' "$app_deploy")"
@@ -89,11 +89,25 @@ ensure_live_e2e_app_runtime_ingress() {
     kafka|postgres) ;;
     *) die "shared_services.queue.driver must be kafka or postgres" ;;
   esac
+  shared_queue_shadow_driver="$(jq -r '.shared_services.queue.shadow.driver // empty' "$shared_manifest")"
+  proof_queue_driver="$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$shared_manifest")"
+  proof_shadow_queue_driver="$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$shared_manifest")"
+  kafka_path_active="false"
+  for selected_queue_driver in "$shared_queue_driver" "$shared_queue_shadow_driver" "$proof_queue_driver" "$proof_shadow_queue_driver"; do
+    selected_queue_driver="$(trim "$(printf '%s' "$selected_queue_driver" | tr '[:upper:]' '[:lower:]')")"
+    case "$selected_queue_driver" in
+      "") ;;
+      kafka) kafka_path_active="true" ;;
+      postgres) ;;
+      *) die "shared manifest queue drivers must be kafka or postgres (got: $selected_queue_driver)" ;;
+    esac
+  done
 
   shared_postgres_port="$(jq -r '.shared_services.postgres.port // 5432' "$shared_manifest")"
   shared_kafka_port=""
-  if [[ "$shared_queue_driver" == "kafka" ]]; then
+  if [[ "$kafka_path_active" == "true" ]]; then
     shared_kafka_port="$(jq -r '(.shared_services.kafka.bootstrap_brokers // "" | split(",") | map(select(length > 0)) | .[0] // "") | capture(":(?<port>[0-9]+)$").port // "9098"' "$shared_manifest")"
+    [[ -n "$shared_kafka_port" ]] || die "shared_services.kafka.bootstrap_brokers is required when any shared/proof queue path uses kafka"
   fi
   shared_ipfs_api_port="$(jq -r '(.shared_services.ipfs.api_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "5001"' "$shared_manifest")"
   operator_grpc_min_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | min // empty' "$app_deploy")"

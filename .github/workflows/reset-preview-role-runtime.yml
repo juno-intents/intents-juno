@@ -182,7 +182,7 @@ jobs:
             .ci/preview-reset-output/preview/role-runtime-release-lock.json
             .ci/preview-reset-output/preview/canaries/shared-services.json
             .ci/preview-reset-output/preview/canaries/app.json
-            .ci/preview-reset-output/preview/e2e/shared-infra-e2e.json
+            .ci/preview-reset-output/preview/e2e/shared-infra-e2e*.json
             .ci/preview-reset-output/preview/operator-rollout.json
             .ci/preview-reset-output/preview/operator-rollout/**
             .ci/preview-reset-output/preview/bridge-summary.json

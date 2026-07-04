@@ -191,6 +191,21 @@ case "$queue_driver" in
   kafka|postgres) ;;
   *) die "shared_services.queue.driver must be kafka or postgres" ;;
 esac
+queue_shadow_driver=""
+if jq -e '(.shared_services.queue? | type == "object") and (.shared_services.queue.shadow? | type == "object") and (.shared_services.queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+  if ! jq -e '.shared_services.queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+    die "shared_services.queue.shadow.driver must be kafka or postgres"
+  fi
+  queue_shadow_driver="$(production_json_required "$shared_manifest" '.shared_services.queue.shadow.driver')"
+  queue_shadow_driver="$(trim "$(tr '[:upper:]' '[:lower:]' <<<"$queue_shadow_driver")")"
+  case "$queue_shadow_driver" in
+    kafka|postgres) ;;
+    *) die "shared_services.queue.shadow.driver must be kafka or postgres" ;;
+  esac
+fi
+if [[ -n "$queue_shadow_driver" && "$queue_shadow_driver" == "$queue_driver" ]]; then
+  die "shared_services.queue.shadow.driver must differ from shared queue driver"
+fi
 proof_queue_driver="$(production_json_optional "$shared_manifest" '.shared_services.proof_queue.driver | select(type == "string" and length > 0)')"
 proof_queue_driver="${proof_queue_driver:-$queue_driver}"
 proof_queue_driver="$(trim "$(tr '[:upper:]' '[:lower:]' <<<"$proof_queue_driver")")"
@@ -213,7 +228,15 @@ fi
 if [[ -n "$proof_shadow_queue_driver" && "$proof_shadow_queue_driver" == "$proof_queue_driver" ]]; then
   die "shared_services.proof_queue.shadow.driver must differ from proof queue driver"
 fi
-if [[ "$queue_driver" == "kafka" ]]; then
+postgres_queue_path_active="false"
+kafka_path_active="false"
+for selected_queue_driver in "$queue_driver" "$queue_shadow_driver" "$proof_queue_driver" "$proof_shadow_queue_driver"; do
+  case "$selected_queue_driver" in
+    postgres) postgres_queue_path_active="true" ;;
+    kafka) kafka_path_active="true" ;;
+  esac
+done
+if [[ "$kafka_path_active" == "true" ]]; then
   if [[ "$dry_run" != "true" ]]; then
     have_cmd nc || die "required command not found: nc"
   fi
@@ -243,7 +266,7 @@ queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-proof.requests
 queue_inspect_max_expired_leases="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES:-0}"
 queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-0}"
 postgres_queue_inspection_enabled="false"
-if [[ -n "$queue_inspect_bin" ]] && { [[ "$queue_driver" == "postgres" ]] || [[ "$proof_queue_driver" == "postgres" ]] || [[ "$proof_shadow_queue_driver" == "postgres" ]]; }; then
+if [[ -n "$queue_inspect_bin" && "$postgres_queue_path_active" == "true" ]]; then
   postgres_queue_inspection_enabled="true"
 fi
 ipfs_min_healthy_targets=1
@@ -275,7 +298,7 @@ if [[ "$environment" == "preview" && -n "$kafka_cluster_arn" ]]; then
   skip_kafka_local_check="true"
   kafka_detail="awaiting msk health verification"
 fi
-if [[ "$queue_driver" == "postgres" ]]; then
+if [[ "$kafka_path_active" != "true" ]]; then
   skip_kafka_local_check="true"
 fi
 if [[ "$environment" == "preview" && -n "$ipfs_target_group_arn" ]]; then
@@ -308,12 +331,12 @@ artifacts_detail="no artifact bucket configured"
 shared_proof_role_detail="legacy ecs path"
 wireguard_role_detail="legacy singleton path"
 ipfs_auth_header=()
-if [[ "$queue_driver" == "kafka" ]]; then
-  queue_detail="kafka queue driver selected"
+if [[ "$kafka_path_active" == "true" ]]; then
+  queue_detail="kafka queue path selected"
 fi
-if [[ "$queue_driver" == "postgres" ]]; then
+if [[ "$kafka_path_active" != "true" ]]; then
   kafka_status="skipped"
-  kafka_detail="postgres queue driver selected; kafka checks skipped"
+  kafka_detail="no kafka queue path selected; kafka checks skipped"
 fi
 
 if [[ "$dry_run" == "true" ]]; then
@@ -334,7 +357,7 @@ if [[ "$dry_run" == "true" ]]; then
   shared_proof_role_detail="dry run"
   wireguard_role_detail="dry run"
 else
-  if [[ "$queue_driver" == "kafka" ]]; then
+  if [[ "$kafka_path_active" == "true" ]]; then
     if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
       kafka_detail="all brokers reachable with aws-msk-iam"
     else
@@ -403,7 +426,7 @@ else
     fi
   fi
 
-  if [[ "$queue_driver" == "kafka" && "$skip_kafka_local_check" != "true" ]]; then
+  if [[ "$kafka_path_active" == "true" && "$skip_kafka_local_check" != "true" ]]; then
     IFS=',' read -r -a broker_array <<<"$kafka_brokers"
     for broker in "${broker_array[@]}"; do
       broker="$(trim "$broker")"
@@ -419,13 +442,13 @@ else
   fi
 
   aws_auth_required="false"
-  if [[ "$queue_driver" == "kafka" && "$kafka_auth_mode" == "aws-msk-iam" ]]; then
+  if [[ "$kafka_path_active" == "true" && "$kafka_auth_mode" == "aws-msk-iam" ]]; then
     aws_auth_required="true"
   fi
   if [[ -n "$postgres_cluster_arn" ]]; then
     aws_auth_required="true"
   fi
-  if [[ "$queue_driver" == "kafka" && -n "$kafka_cluster_arn" ]]; then
+  if [[ "$kafka_path_active" == "true" && -n "$kafka_cluster_arn" ]]; then
     aws_auth_required="true"
   fi
   if [[ -n "$ipfs_target_group_arn" || -n "$ipfs_api_auth_secret_arn" || -n "$checkpoint_blob_bucket" ]]; then
@@ -478,7 +501,7 @@ else
     fi
   fi
 
-  if [[ "$queue_driver" == "kafka" && "$aws_auth_status" == "passed" && "$kafka_status" == "passed" && -n "$kafka_cluster_arn" ]]; then
+  if [[ "$kafka_path_active" == "true" && "$aws_auth_status" == "passed" && "$kafka_status" == "passed" && -n "$kafka_cluster_arn" ]]; then
     kafka_cluster_json="$(AWS_PAGER="" "${aws_args[@]}" kafka describe-cluster-v2 --cluster-arn "$kafka_cluster_arn" --output json 2>/dev/null || true)"
     kafka_cluster_state="$(jq -r '.ClusterInfo.State // empty' <<<"$kafka_cluster_json")"
     kafka_cluster_subnets="$(jq -r '(.ClusterInfo.Provisioned.BrokerNodeGroupInfo.ClientSubnets // []) | length' <<<"$kafka_cluster_json")"
@@ -587,8 +610,11 @@ jq -n \
   --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
   --arg manifest "$shared_manifest" \
   --arg queue_driver "$queue_driver" \
+  --arg queue_shadow_driver "$queue_shadow_driver" \
   --arg proof_queue_driver "$proof_queue_driver" \
   --arg proof_shadow_queue_driver "$proof_shadow_queue_driver" \
+  --argjson postgres_queue_path_active "$postgres_queue_path_active" \
+  --argjson kafka_path_active "$kafka_path_active" \
   --arg aws_auth_status "$aws_auth_status" \
   --arg aws_auth_detail "$aws_auth_detail" \
   --arg postgres_status "$postgres_status" \
@@ -611,8 +637,11 @@ jq -n \
     generated_at: $generated_at,
     shared_manifest: $manifest,
     queue_driver: $queue_driver,
+    queue_shadow_driver: (if $queue_shadow_driver == "" then null else $queue_shadow_driver end),
     proof_queue_driver: $proof_queue_driver,
     proof_shadow_queue_driver: (if $proof_shadow_queue_driver == "" then null else $proof_shadow_queue_driver end),
+    postgres_queue_path_active: $postgres_queue_path_active,
+    kafka_path_active: $kafka_path_active,
     ready_for_deploy: $ready_for_deploy,
     checks: {
       aws_auth: {

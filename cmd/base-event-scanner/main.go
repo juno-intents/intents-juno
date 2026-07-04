@@ -141,7 +141,7 @@ func runMain(args []string, stdout io.Writer) error {
 	defer client.Close()
 
 	// Create queue producer.
-	producer, err := baseEventScannerQueueProducer(baseEventScannerQueueOptions{
+	producer, err := baseEventScannerQueueProducer(ctx, baseEventScannerQueueOptions{
 		Driver:               *queueDriver,
 		Brokers:              *queueBrokers,
 		PostgresDSN:          *queuePostgresDSN,
@@ -153,7 +153,7 @@ func runMain(args []string, stdout io.Writer) error {
 		ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
 		ShadowRequired:       *shadowQueueRequired,
 		ShadowTimeout:        *shadowQueueTimeout,
-	}, stdout, queue.NewProducer)
+	}, stdout, queue.NewProducerContext)
 	if err != nil {
 		return fmt.Errorf("create queue producer: %w", err)
 	}
@@ -256,7 +256,7 @@ func ensureScannerQueueTopics(ctx context.Context, driver, brokers, topics strin
 	return ensureBaseEventScannerKafkaTopics(ctx, queue.SplitCommaList(brokers), queue.SplitCommaList(topics))
 }
 
-type baseEventScannerQueueProducerFactory func(queue.ProducerConfig) (queue.Producer, error)
+type baseEventScannerQueueProducerFactory func(context.Context, queue.ProducerConfig) (queue.Producer, error)
 
 type baseEventScannerQueueOptions struct {
 	Driver               string
@@ -272,15 +272,15 @@ type baseEventScannerQueueOptions struct {
 	ShadowTimeout        time.Duration
 }
 
-func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.Writer, factory baseEventScannerQueueProducerFactory) (queue.Producer, error) {
+func baseEventScannerQueueProducer(ctx context.Context, opts baseEventScannerQueueOptions, stdout io.Writer, factory baseEventScannerQueueProducerFactory) (queue.Producer, error) {
 	if factory == nil {
-		factory = queue.NewProducer
+		factory = queue.NewProducerContext
 	}
 	primaryCfg, err := baseEventScannerProducerConfig(opts.Driver, opts.Brokers, opts.PostgresDSN, opts.PostgresDSNEnv, opts.StorePostgresDSN, stdout)
 	if err != nil {
 		return nil, err
 	}
-	primary, err := factory(primaryCfg)
+	primary, err := factory(ctx, primaryCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +308,13 @@ func baseEventScannerQueueProducer(opts baseEventScannerQueueOptions, stdout io.
 		_ = primary.Close()
 		return nil, fmt.Errorf("configure shadow queue producer: %w", err)
 	}
-	shadow, err := factory(shadowCfg)
+	shadowCtx := ctx
+	if !opts.ShadowRequired {
+		var cancel context.CancelFunc
+		shadowCtx, cancel = context.WithTimeout(ctx, opts.ShadowTimeout)
+		defer cancel()
+	}
+	shadow, err := factory(shadowCtx, shadowCfg)
 	if err != nil {
 		if !opts.ShadowRequired {
 			return primary, nil

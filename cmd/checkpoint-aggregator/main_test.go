@@ -32,6 +32,22 @@ func (p *stubCheckpointProducer) Close() error {
 	return nil
 }
 
+type recordingCheckpointAggregatorProducer struct {
+	name  string
+	calls *[]string
+}
+
+func (p *recordingCheckpointAggregatorProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return nil
+}
+
+func (p *recordingCheckpointAggregatorProducer) Close() error {
+	return nil
+}
+
 type noEmittedListPackageStore struct {
 	*checkpoint.MemoryPackageStore
 }
@@ -239,6 +255,102 @@ func TestCheckpointAggregatorQueueConfigs_PostgresDSNEnvOverridesStoreDSN(t *tes
 	}
 	if got, want := producerCfg.PostgresDSN, "postgres://queue-db"; got != want {
 		t.Fatalf("producer PostgresDSN = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointAggregatorQueueProducer_MirrorsToShadowPostgres(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	var configs []queue.ProducerConfig
+	factory := func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		name := cfg.Driver
+		if len(configs) > 1 {
+			name = "shadow-" + cfg.Driver
+		}
+		return &recordingCheckpointAggregatorProducer{name: name, calls: &calls}, nil
+	}
+
+	producer, err := checkpointAggregatorQueueProducer(context.Background(), checkpointAggregatorQueueOptions{
+		Driver:            queue.DriverKafka,
+		Brokers:           []string{"broker-1:9098"},
+		StorePostgresDSN:  "postgres://state-db",
+		ShadowDriver:      queue.DriverPostgres,
+		ShadowPostgresDSN: "postgres://shadow-db",
+		ShadowRequired:    true,
+		ShadowTimeout:     time.Second,
+	}, factory)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorQueueProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	if err := producer.Publish(context.Background(), "checkpoints.packages.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("producer configs = %d, want 2", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverKafka; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("shadow driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].PostgresDSN, "postgres://shadow-db"; got != want {
+		t.Fatalf("shadow PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:checkpoints.packages.v1:payload,shadow-postgres:checkpoints.packages.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointAggregatorQueueProducer_RejectsDuplicateShadowDriver(t *testing.T) {
+	t.Parallel()
+
+	_, err := checkpointAggregatorQueueProducer(context.Background(), checkpointAggregatorQueueOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+		ShadowRequired:   true,
+		ShadowTimeout:    time.Second,
+	}, nil)
+	if err == nil {
+		t.Fatalf("expected duplicate shadow driver error")
+	}
+	if !strings.Contains(err.Error(), "shadow queue driver must differ") {
+		t.Fatalf("error = %v, want duplicate shadow driver error", err)
+	}
+}
+
+func TestCheckpointAggregatorQueueProducer_OptionalShadowInitUsesTimeout(t *testing.T) {
+	t.Parallel()
+
+	var configs []queue.ProducerConfig
+	factory := func(ctx context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		if len(configs) == 1 {
+			return &recordingCheckpointAggregatorProducer{name: "primary"}, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	producer, err := checkpointAggregatorQueueProducer(context.Background(), checkpointAggregatorQueueOptions{
+		Driver:            queue.DriverKafka,
+		Brokers:           []string{"broker-1:9098"},
+		StorePostgresDSN:  "postgres://state-db",
+		ShadowDriver:      queue.DriverPostgres,
+		ShadowPostgresDSN: "postgres://shadow-db",
+		ShadowTimeout:     10 * time.Millisecond,
+	}, factory)
+	if err != nil {
+		t.Fatalf("checkpointAggregatorQueueProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	if len(configs) != 2 {
+		t.Fatalf("producer configs = %d, want 2", len(configs))
 	}
 }
 

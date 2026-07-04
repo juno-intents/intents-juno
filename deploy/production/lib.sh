@@ -680,7 +680,7 @@ production_write_shared_terraform_override_tfvars() {
 
   local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id bridge_guest_release_tag
   local bridge_paused shared_proof_requestor_desired_count shared_proof_funder_desired_count
-  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_services_json shared_terraform_dir shared_queue_driver shared_proof_queue_driver
+  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_services_json shared_terraform_dir shared_queue_driver shared_queue_shadow_driver shared_msk_retention_mode shared_proof_queue_driver shared_proof_shadow_queue_driver effective_shared_queue_driver effective_shared_proof_queue_driver
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
@@ -715,6 +715,37 @@ production_write_shared_terraform_override_tfvars() {
         ;;
     esac
   fi
+  effective_shared_queue_driver="${shared_queue_driver:-kafka}"
+  shared_queue_shadow_driver=""
+  if jq -e '(.shared_services.queue? | type == "object") and (.shared_services.queue.shadow? | type == "object") and (.shared_services.queue.shadow | has("driver"))' "$inventory" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.queue.shadow.driver | type == "string"' "$inventory" >/dev/null 2>&1; then
+      die "shared_services.queue.shadow.driver must be kafka or postgres"
+    fi
+    shared_queue_shadow_driver="$(production_json_required "$inventory" '.shared_services.queue.shadow.driver')"
+    shared_queue_shadow_driver="$(trim "$shared_queue_shadow_driver")"
+    [[ -n "$shared_queue_shadow_driver" ]] || die "shared_services.queue.shadow.driver must be kafka or postgres"
+    shared_queue_shadow_driver="$(lower "$shared_queue_shadow_driver")"
+    case "$shared_queue_shadow_driver" in
+      kafka | postgres) ;;
+      *)
+        die "shared_services.queue.shadow.driver must be kafka or postgres (got: $shared_queue_shadow_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$shared_queue_shadow_driver" && "$shared_queue_shadow_driver" == "$effective_shared_queue_driver" ]]; then
+    die "shared_services.queue.shadow.driver must differ from shared queue driver"
+  fi
+  shared_msk_retention_mode="$(production_json_optional "$inventory" '.shared_services.msk_retention_mode // .shared_services.msk.retention_mode')"
+  shared_msk_retention_mode="$(trim "$shared_msk_retention_mode")"
+  if [[ -n "$shared_msk_retention_mode" ]]; then
+    shared_msk_retention_mode="$(lower "$shared_msk_retention_mode")"
+    case "$shared_msk_retention_mode" in
+      auto | retain) ;;
+      *)
+        die "shared_services.msk_retention_mode must be auto or retain (got: $shared_msk_retention_mode)"
+        ;;
+    esac
+  fi
   shared_proof_queue_driver=""
   if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue | has("driver"))' "$inventory" >/dev/null 2>&1; then
     if ! jq -e '.shared_services.proof_queue.driver | type == "string"' "$inventory" >/dev/null 2>&1; then
@@ -730,6 +761,31 @@ production_write_shared_terraform_override_tfvars() {
         die "shared_services.proof_queue.driver must be kafka or postgres (got: $shared_proof_queue_driver)"
         ;;
     esac
+  fi
+  effective_shared_proof_queue_driver="${shared_proof_queue_driver:-$effective_shared_queue_driver}"
+  shared_proof_shadow_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue.shadow? | type == "object") and (.shared_services.proof_queue.shadow | has("driver"))' "$inventory" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.shadow.driver | type == "string"' "$inventory" >/dev/null 2>&1; then
+      die "shared_services.proof_queue.shadow.driver must be kafka or postgres"
+    fi
+    shared_proof_shadow_queue_driver="$(production_json_required "$inventory" '.shared_services.proof_queue.shadow.driver')"
+    shared_proof_shadow_queue_driver="$(trim "$shared_proof_shadow_queue_driver")"
+    [[ -n "$shared_proof_shadow_queue_driver" ]] || die "shared_services.proof_queue.shadow.driver must be kafka or postgres"
+    shared_proof_shadow_queue_driver="$(lower "$shared_proof_shadow_queue_driver")"
+    case "$shared_proof_shadow_queue_driver" in
+      kafka | postgres) ;;
+      *)
+        die "shared_services.proof_queue.shadow.driver must be kafka or postgres (got: $shared_proof_shadow_queue_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$shared_proof_shadow_queue_driver" && "$shared_proof_shadow_queue_driver" == "$effective_shared_proof_queue_driver" ]]; then
+    die "shared_services.proof_queue.shadow.driver must differ from proof queue driver"
+  fi
+  if [[ "$effective_shared_queue_driver" == "postgres" && "${shared_msk_retention_mode:-auto}" != "retain" ]]; then
+    if [[ "$shared_queue_shadow_driver" == "kafka" || "$effective_shared_proof_queue_driver" == "kafka" || "$shared_proof_shadow_queue_driver" == "kafka" ]]; then
+      die "shared_services.msk_retention_mode=retain is required when shared_services.queue.driver=postgres and any shared/proof queue path uses kafka"
+    fi
   fi
   live_e2e_json="$(production_json_optional "$inventory" '.shared_services.live_e2e // {}')"
   bridge_paused="$(jq -r '.bridge_api.paused // .bridge_api_paused // .bridge_paused // false' <<<"$app_role_json")"
@@ -853,6 +909,11 @@ production_write_shared_terraform_override_tfvars() {
     [[ -n "$shared_postgres_db" ]] || die "shared_postgres_db is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for live-e2e shared terraform"
+    if [[ "$effective_shared_queue_driver" == "postgres" ]]; then
+      if [[ "$shared_queue_shadow_driver" == "kafka" || "$effective_shared_proof_queue_driver" == "kafka" || "$shared_proof_shadow_queue_driver" == "kafka" ]]; then
+        die "live-e2e shared terraform cannot prove retained MSK for shared_services.queue.driver=postgres with kafka shared/proof queue paths; use deploy/shared/terraform/production-shared preview before mainnet promotion"
+      fi
+    fi
     operator_ami_id="$(production_inventory_live_e2e_operator_ami_id "$inventory" "$aws_profile" "$aws_region")"
     [[ -n "$operator_ami_id" ]] || die "operators[].launch_template.id is required to preserve the live-e2e operator ami during shared terraform refresh"
     shared_existing_vpc_endpoint_services_json="$(production_aws_existing_shared_vpc_endpoint_services_json "$aws_profile" "$aws_region" "$vpc_id")"
@@ -879,6 +940,8 @@ production_write_shared_terraform_override_tfvars() {
       --arg backoffice_private_endpoint "$backoffice_private_endpoint" \
       --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
       --arg shared_proof_service_image "$shared_proof_service_image" \
+      --arg shared_queue_driver "$shared_queue_driver" \
+      --arg shared_proof_queue_driver "$shared_proof_queue_driver" \
       --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
       --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
       --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
@@ -920,6 +983,12 @@ production_write_shared_terraform_override_tfvars() {
       } end)
       + (if ($shared_ipfs_client_security_group_ids | length) == 0 then {} else {
         shared_ipfs_client_security_group_ids: $shared_ipfs_client_security_group_ids
+      } end)
+      + (if $shared_queue_driver == "" then {} else {
+        shared_queue_driver: $shared_queue_driver
+      } end)
+      + (if $shared_proof_queue_driver == "" then {} else {
+        shared_proof_queue_driver: $shared_proof_queue_driver
       } end)
       + (if $wireguard_public_subnet_id == "" then {} else {
         shared_wireguard_public_subnet_id: $wireguard_public_subnet_id
@@ -967,6 +1036,7 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
     --arg shared_queue_driver "$shared_queue_driver" \
+    --arg shared_msk_retention_mode "$shared_msk_retention_mode" \
     --arg shared_proof_queue_driver "$shared_proof_queue_driver" \
     --argjson shared_proof_requestor_desired_count "$shared_proof_requestor_desired_count" \
     --argjson shared_proof_funder_desired_count "$shared_proof_funder_desired_count" \
@@ -1016,6 +1086,9 @@ production_write_shared_terraform_override_tfvars() {
     } else {} end)
     + (if $shared_queue_driver == "" then {} else {
       shared_queue_driver: $shared_queue_driver
+    } end)
+    + (if $shared_msk_retention_mode == "" then {} else {
+      shared_msk_retention_mode: $shared_msk_retention_mode
     } end)
     + (if $shared_proof_queue_driver == "" then {} else {
       shared_proof_queue_driver: $shared_proof_queue_driver
@@ -2778,7 +2851,7 @@ production_render_shared_manifest() {
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
-  local postgres_endpoint postgres_port queue_driver proof_queue_driver proof_shadow_queue_driver kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
+  local postgres_endpoint postgres_port queue_driver queue_shadow_driver proof_queue_driver proof_shadow_queue_driver msk_retention_mode msk_provisioned kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
   local shared_ecs_cluster_arn shared_proof_requestor_service_name shared_proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
@@ -2836,6 +2909,26 @@ production_render_shared_manifest() {
       die "shared queue driver must be kafka or postgres (got: $queue_driver)"
       ;;
   esac
+  queue_shadow_driver=""
+  if jq -e '(.shared_services.queue? | type == "object") and (.shared_services.queue.shadow? | type == "object") and (.shared_services.queue.shadow | has("driver"))' "$inventory" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.queue.shadow.driver | type == "string" and (length > 0)' "$inventory" >/dev/null 2>&1; then
+      die "shared_services.queue.shadow.driver must be kafka or postgres"
+    fi
+    queue_shadow_driver="$(production_json_required "$inventory" '.shared_services.queue.shadow.driver')"
+    queue_shadow_driver="$(trim "$queue_shadow_driver")"
+    [[ -n "$queue_shadow_driver" ]] || die "shared_services.queue.shadow.driver must be kafka or postgres"
+    queue_shadow_driver="$(lower "$queue_shadow_driver")"
+    case "$queue_shadow_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared_services.queue.shadow.driver must be kafka or postgres (got: $queue_shadow_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$queue_shadow_driver" && "$queue_driver" == "$queue_shadow_driver" ]]; then
+    die "shared queue shadow driver must differ from shared queue driver"
+  fi
   proof_queue_driver="$(production_tf_output_value "$tf_json" "shared_proof_queue_driver" false)"
   proof_queue_driver="$(trim "$proof_queue_driver")"
   if [[ -n "$proof_queue_driver" ]]; then
@@ -2868,9 +2961,32 @@ production_render_shared_manifest() {
   if [[ -n "$proof_shadow_queue_driver" && "${proof_queue_driver:-$queue_driver}" == "$proof_shadow_queue_driver" ]]; then
     die "shared proof queue shadow driver must differ from proof queue driver"
   fi
+  msk_retention_mode="$(production_json_optional "$inventory" '.shared_services.msk_retention_mode // .shared_services.msk.retention_mode')"
+  msk_retention_mode="$(trim "$msk_retention_mode")"
+  if [[ -z "$msk_retention_mode" ]]; then
+    msk_retention_mode="auto"
+  else
+    msk_retention_mode="$(lower "$msk_retention_mode")"
+    case "$msk_retention_mode" in
+      auto|retain)
+        ;;
+      *)
+        die "shared_services.msk_retention_mode must be auto or retain (got: $msk_retention_mode)"
+        ;;
+    esac
+  fi
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" false)"
-  if [[ "$queue_driver" == "kafka" && -z "$kafka_brokers" ]]; then
+  msk_provisioned="false"
+  if [[ -n "$kafka_cluster_arn" || -n "$kafka_brokers" ]]; then
+    msk_provisioned="true"
+  fi
+  if {
+    [[ "$queue_driver" == "kafka" ]] ||
+    [[ "$queue_shadow_driver" == "kafka" ]] ||
+    [[ "${proof_queue_driver:-$queue_driver}" == "kafka" ]] ||
+    [[ "$proof_shadow_queue_driver" == "kafka" ]]
+  } && [[ -z "$kafka_brokers" ]]; then
     die "missing required terraform output: shared_kafka_bootstrap_brokers"
   fi
   shared_ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
@@ -3051,8 +3167,11 @@ production_render_shared_manifest() {
     --arg postgres_cluster_arn "$postgres_cluster_arn" \
     --arg postgres_port "$postgres_port" \
     --arg queue_driver "$queue_driver" \
+    --arg queue_shadow_driver "$queue_shadow_driver" \
     --arg proof_queue_driver "$proof_queue_driver" \
     --arg proof_shadow_queue_driver "$proof_shadow_queue_driver" \
+    --arg msk_retention_mode "$msk_retention_mode" \
+    --arg msk_provisioned "$msk_provisioned" \
     --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
     --arg shared_ecs_cluster_arn "$shared_ecs_cluster_arn" \
@@ -3117,8 +3236,12 @@ production_render_shared_manifest() {
           cluster_arn: (if $postgres_cluster_arn == "" then null else $postgres_cluster_arn end),
           port: ($postgres_port | tonumber)
         },
-        queue: {
+        queue: ({
           driver: $queue_driver
+        } + (if $queue_shadow_driver == "" then {} else {shadow: {driver: $queue_shadow_driver}} end)),
+        msk: {
+          retention_mode: $msk_retention_mode,
+          provisioned: ($msk_provisioned == "true")
         },
         kafka: {
           cluster_arn: (if $kafka_cluster_arn == "" then null else $kafka_cluster_arn end),
@@ -3949,7 +4072,7 @@ production_render_operator_stack_env() {
   local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
-  local shared_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver proof_shadow_queue_driver_env_line
+  local shared_queue_driver queue_shadow_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver queue_shadow_queue_driver_env_lines proof_shadow_queue_driver_env_line
   local proof_response_postgres_initial_position
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
@@ -3985,6 +4108,30 @@ production_render_operator_stack_env() {
       die "shared manifest queue driver must be kafka or postgres (got: $shared_queue_driver)"
       ;;
   esac
+  queue_shadow_queue_driver=""
+  if jq -e '(.shared_services.queue? | type == "object") and (.shared_services.queue.shadow? | type == "object") and (.shared_services.queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest queue shadow driver must be kafka or postgres"
+    fi
+    queue_shadow_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.queue.shadow.driver')"
+    queue_shadow_queue_driver="$(trim "$queue_shadow_queue_driver")"
+    [[ -n "$queue_shadow_queue_driver" ]] || die "shared manifest queue shadow driver must be kafka or postgres"
+    queue_shadow_queue_driver="$(lower "$queue_shadow_queue_driver")"
+    case "$queue_shadow_queue_driver" in
+      kafka|postgres)
+        ;;
+      *)
+        die "shared manifest queue shadow driver must be kafka or postgres (got: $queue_shadow_queue_driver)"
+        ;;
+    esac
+  fi
+  if [[ -n "$queue_shadow_queue_driver" && "$shared_queue_driver" == "$queue_shadow_queue_driver" ]]; then
+    die "shared manifest queue shadow driver must differ from shared queue driver"
+  fi
+  queue_shadow_queue_driver_env_lines=""
+  if [[ -n "$queue_shadow_queue_driver" ]]; then
+    queue_shadow_queue_driver_env_lines="$(printf 'CHECKPOINT_SHADOW_QUEUE_DRIVER=%s\nBASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER=%s' "$queue_shadow_queue_driver" "$queue_shadow_queue_driver")"
+  fi
   shared_proof_queue_driver=""
   if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
     if ! jq -e '.shared_services.proof_queue.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
@@ -4104,6 +4251,7 @@ CHECKPOINT_SIGNATURE_TOPIC=$(jq -r '.checkpoint.signature_topic' "$shared_manife
 CHECKPOINT_PACKAGE_TOPIC=$(jq -r '.checkpoint.package_topic' "$shared_manifest")
 OPERATOR_QUEUE_DRIVER=$shared_queue_driver
 CHECKPOINT_QUEUE_DRIVER=$shared_queue_driver
+$queue_shadow_queue_driver_env_lines
 PROOF_QUEUE_DRIVER=$effective_proof_queue_driver
 $proof_shadow_queue_driver_env_line
 PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=$proof_response_postgres_initial_position

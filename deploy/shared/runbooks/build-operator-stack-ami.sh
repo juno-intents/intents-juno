@@ -540,6 +540,7 @@ CHECKPOINT_POSTGRES_DSN=
 CHECKPOINT_KAFKA_BROKERS=
 OPERATOR_QUEUE_DRIVER=kafka
 CHECKPOINT_QUEUE_DRIVER=
+CHECKPOINT_SHADOW_QUEUE_DRIVER=
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
 CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
 CHECKPOINT_BLOB_BUCKET=
@@ -589,6 +590,7 @@ DEPOSIT_SCAN_JUNO_RPC_PASS_ENV=JUNO_RPC_PASS
 DEPOSIT_SCAN_POLL_INTERVAL=15s
 BASE_EVENT_SCANNER_ENABLED=false
 BASE_EVENT_SCANNER_QUEUE_DRIVER=
+BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER=
 BASE_EVENT_SCANNER_BASE_RPC_URL=
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
@@ -918,10 +920,12 @@ checkpoint_postgres_dsn="$(resolve_value "CHECKPOINT_POSTGRES_DSN" "$(read_env_v
 checkpoint_kafka_brokers="$(resolve_value "CHECKPOINT_KAFKA_BROKERS" "$(read_env_value CHECKPOINT_KAFKA_BROKERS || true)" || true)"
 operator_queue_driver="$(resolve_value "OPERATOR_QUEUE_DRIVER" "$(read_env_value OPERATOR_QUEUE_DRIVER || printf 'kafka')" || printf 'kafka')"
 checkpoint_queue_driver="$(resolve_value "CHECKPOINT_QUEUE_DRIVER" "$(read_env_value CHECKPOINT_QUEUE_DRIVER || true)" || true)"
+checkpoint_shadow_queue_driver="$(resolve_value "CHECKPOINT_SHADOW_QUEUE_DRIVER" "$(read_env_value CHECKPOINT_SHADOW_QUEUE_DRIVER || true)" || true)"
 deposit_relayer_queue_driver="$(resolve_value "DEPOSIT_RELAYER_QUEUE_DRIVER" "$(read_env_value DEPOSIT_RELAYER_QUEUE_DRIVER || true)" || true)"
 withdraw_coordinator_queue_driver="$(resolve_value "WITHDRAW_COORDINATOR_QUEUE_DRIVER" "$(read_env_value WITHDRAW_COORDINATOR_QUEUE_DRIVER || true)" || true)"
 withdraw_finalizer_queue_driver="$(resolve_value "WITHDRAW_FINALIZER_QUEUE_DRIVER" "$(read_env_value WITHDRAW_FINALIZER_QUEUE_DRIVER || true)" || true)"
 base_event_scanner_queue_driver="$(resolve_value "BASE_EVENT_SCANNER_QUEUE_DRIVER" "$(read_env_value BASE_EVENT_SCANNER_QUEUE_DRIVER || true)" || true)"
+base_event_scanner_shadow_queue_driver="$(resolve_value "BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER" "$(read_env_value BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER || true)" || true)"
 proof_queue_driver="$(resolve_value "PROOF_QUEUE_DRIVER" "$(read_env_value PROOF_QUEUE_DRIVER || printf 'kafka')" || printf 'kafka')"
 proof_shadow_queue_driver="$(resolve_value "PROOF_SHADOW_QUEUE_DRIVER" "$(read_env_value PROOF_SHADOW_QUEUE_DRIVER || true)" || true)"
 proof_response_postgres_initial_position="$(resolve_value "PROOF_RESPONSE_POSTGRES_INITIAL_POSITION" "$(read_env_value PROOF_RESPONSE_POSTGRES_INITIAL_POSITION || true)" || true)"
@@ -959,10 +963,12 @@ pcr2="$(resolve_value "TSS_NITRO_EXPECTED_PCR2" "$(read_env_value TSS_NITRO_EXPE
 
 operator_queue_driver="$(normalize_required_queue_driver OPERATOR_QUEUE_DRIVER "$operator_queue_driver" kafka)"
 checkpoint_queue_driver="$(normalize_optional_queue_driver CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver")"
+checkpoint_shadow_queue_driver="$(normalize_optional_queue_driver CHECKPOINT_SHADOW_QUEUE_DRIVER "$checkpoint_shadow_queue_driver")"
 deposit_relayer_queue_driver="$(normalize_optional_queue_driver DEPOSIT_RELAYER_QUEUE_DRIVER "$deposit_relayer_queue_driver")"
 withdraw_coordinator_queue_driver="$(normalize_optional_queue_driver WITHDRAW_COORDINATOR_QUEUE_DRIVER "$withdraw_coordinator_queue_driver")"
 withdraw_finalizer_queue_driver="$(normalize_optional_queue_driver WITHDRAW_FINALIZER_QUEUE_DRIVER "$withdraw_finalizer_queue_driver")"
 base_event_scanner_queue_driver="$(normalize_optional_queue_driver BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver")"
+base_event_scanner_shadow_queue_driver="$(normalize_optional_queue_driver BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER "$base_event_scanner_shadow_queue_driver")"
 proof_queue_driver="$(normalize_required_queue_driver PROOF_QUEUE_DRIVER "$proof_queue_driver" kafka)"
 proof_shadow_queue_driver="$(normalize_optional_queue_driver PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver")"
 proof_response_postgres_initial_position="$(printf '%s' "${proof_response_postgres_initial_position:-}" | tr '[:upper:]' '[:lower:]')"
@@ -981,17 +987,27 @@ if [[ "$proof_queue_driver" != "postgres" && -n "$proof_response_postgres_initia
 fi
 
 effective_checkpoint_queue_driver="${checkpoint_queue_driver:-$operator_queue_driver}"
+effective_checkpoint_shadow_queue_driver="$checkpoint_shadow_queue_driver"
 effective_deposit_relayer_queue_driver="${deposit_relayer_queue_driver:-$operator_queue_driver}"
 effective_withdraw_coordinator_queue_driver="${withdraw_coordinator_queue_driver:-$operator_queue_driver}"
 effective_withdraw_finalizer_queue_driver="${withdraw_finalizer_queue_driver:-$operator_queue_driver}"
 effective_base_event_scanner_queue_driver="${base_event_scanner_queue_driver:-$operator_queue_driver}"
+effective_base_event_scanner_shadow_queue_driver="$base_event_scanner_shadow_queue_driver"
+if [[ -n "$effective_checkpoint_shadow_queue_driver" && "$effective_checkpoint_shadow_queue_driver" == "$effective_checkpoint_queue_driver" ]]; then
+  fail "requires CHECKPOINT_SHADOW_QUEUE_DRIVER to differ from the effective checkpoint queue driver"
+fi
+if [[ -n "$effective_base_event_scanner_shadow_queue_driver" && "$effective_base_event_scanner_shadow_queue_driver" == "$effective_base_event_scanner_queue_driver" ]]; then
+  fail "requires BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER to differ from the effective base-event-scanner queue driver"
+fi
 queue_uses_kafka=false
 for effective_queue_driver in \
   "$effective_checkpoint_queue_driver" \
+  "$effective_checkpoint_shadow_queue_driver" \
   "$effective_deposit_relayer_queue_driver" \
   "$effective_withdraw_coordinator_queue_driver" \
   "$effective_withdraw_finalizer_queue_driver" \
   "$effective_base_event_scanner_queue_driver" \
+  "$effective_base_event_scanner_shadow_queue_driver" \
   "$proof_queue_driver" \
   "$proof_shadow_queue_driver"
 do
@@ -1095,10 +1111,12 @@ set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
 set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"
 set_env_value "$tmp_env" CHECKPOINT_QUEUE_DRIVER "$checkpoint_queue_driver"
+set_env_value "$tmp_env" CHECKPOINT_SHADOW_QUEUE_DRIVER "$checkpoint_shadow_queue_driver"
 set_env_value "$tmp_env" DEPOSIT_RELAYER_QUEUE_DRIVER "$deposit_relayer_queue_driver"
 set_env_value "$tmp_env" WITHDRAW_COORDINATOR_QUEUE_DRIVER "$withdraw_coordinator_queue_driver"
 set_env_value "$tmp_env" WITHDRAW_FINALIZER_QUEUE_DRIVER "$withdraw_finalizer_queue_driver"
 set_env_value "$tmp_env" BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver"
+set_env_value "$tmp_env" BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER "$base_event_scanner_shadow_queue_driver"
 set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"
 set_env_value "$tmp_env" PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver"
 set_env_value "$tmp_env" PROOF_RESPONSE_POSTGRES_INITIAL_POSITION "$proof_response_postgres_initial_position"
@@ -1436,6 +1454,47 @@ case "${checkpoint_queue_driver}" in
     exit 1
     ;;
 esac
+checkpoint_shadow_queue_driver="$(printf '%s' "${CHECKPOINT_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_shadow_queue_args=()
+if [[ -n "${checkpoint_shadow_queue_driver}" ]]; then
+  if [[ "${checkpoint_shadow_queue_driver}" == "${checkpoint_queue_driver}" ]]; then
+    echo "checkpoint-signer requires CHECKPOINT_SHADOW_QUEUE_DRIVER to differ from CHECKPOINT_QUEUE_DRIVER" >&2
+    exit 1
+  fi
+  checkpoint_shadow_queue_args=(--shadow-queue-driver "${checkpoint_shadow_queue_driver}")
+  case "${checkpoint_shadow_queue_driver}" in
+    kafka)
+      checkpoint_shadow_queue_brokers="${CHECKPOINT_SHADOW_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+      [[ -n "${checkpoint_shadow_queue_brokers}" ]] || {
+        echo "checkpoint-signer requires CHECKPOINT_SHADOW_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when CHECKPOINT_SHADOW_QUEUE_DRIVER=kafka" >&2
+        exit 1
+      }
+      checkpoint_shadow_queue_args+=(--shadow-queue-brokers "${checkpoint_shadow_queue_brokers}")
+      checkpoint_requires_kafka_auth=true
+      ;;
+    postgres)
+      checkpoint_shadow_queue_args+=(--shadow-queue-postgres-dsn-env "${CHECKPOINT_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+      ;;
+    *)
+      echo "checkpoint-signer supports CHECKPOINT_SHADOW_QUEUE_DRIVER kafka or postgres, got ${checkpoint_shadow_queue_driver}" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${CHECKPOINT_SHADOW_QUEUE_REQUIRED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      checkpoint_shadow_queue_args+=(--shadow-queue-required)
+      ;;
+    0|false|no|off|"")
+      ;;
+    *)
+      echo "checkpoint-signer supports CHECKPOINT_SHADOW_QUEUE_REQUIRED true or false" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -n "${CHECKPOINT_SHADOW_QUEUE_TIMEOUT:-}" ]]; then
+    checkpoint_shadow_queue_args+=(--shadow-queue-timeout "${CHECKPOINT_SHADOW_QUEUE_TIMEOUT}")
+  fi
+fi
 if [[ "$checkpoint_requires_kafka_auth" == true ]]; then
   kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
   case "${kafka_tls_value,,}" in
@@ -1513,6 +1572,7 @@ exec /usr/local/bin/checkpoint-signer \
   --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
   --lease-driver postgres \
   "${checkpoint_queue_args[@]}" \
+  "${checkpoint_shadow_queue_args[@]}" \
   --queue-output-topic "$CHECKPOINT_SIGNATURE_TOPIC" \
   --health-port "${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
 EOF_SIGNER
@@ -1581,6 +1641,47 @@ case "${checkpoint_queue_driver}" in
     exit 1
     ;;
 esac
+checkpoint_shadow_queue_driver="$(printf '%s' "${CHECKPOINT_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_shadow_queue_args=()
+if [[ -n "${checkpoint_shadow_queue_driver}" ]]; then
+  if [[ "${checkpoint_shadow_queue_driver}" == "${checkpoint_queue_driver}" ]]; then
+    echo "checkpoint-aggregator requires CHECKPOINT_SHADOW_QUEUE_DRIVER to differ from CHECKPOINT_QUEUE_DRIVER" >&2
+    exit 1
+  fi
+  checkpoint_shadow_queue_args=(--shadow-queue-driver "${checkpoint_shadow_queue_driver}")
+  case "${checkpoint_shadow_queue_driver}" in
+    kafka)
+      checkpoint_shadow_queue_brokers="${CHECKPOINT_SHADOW_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}"
+      [[ -n "${checkpoint_shadow_queue_brokers}" ]] || {
+        echo "checkpoint-aggregator requires CHECKPOINT_SHADOW_QUEUE_BROKERS or CHECKPOINT_KAFKA_BROKERS when CHECKPOINT_SHADOW_QUEUE_DRIVER=kafka" >&2
+        exit 1
+      }
+      checkpoint_shadow_queue_args+=(--shadow-queue-brokers "${checkpoint_shadow_queue_brokers}")
+      checkpoint_requires_kafka_auth=true
+      ;;
+    postgres)
+      checkpoint_shadow_queue_args+=(--shadow-queue-postgres-dsn-env "${CHECKPOINT_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+      ;;
+    *)
+      echo "checkpoint-aggregator supports CHECKPOINT_SHADOW_QUEUE_DRIVER kafka or postgres, got ${checkpoint_shadow_queue_driver}" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${CHECKPOINT_SHADOW_QUEUE_REQUIRED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      checkpoint_shadow_queue_args+=(--shadow-queue-required)
+      ;;
+    0|false|no|off|"")
+      ;;
+    *)
+      echo "checkpoint-aggregator supports CHECKPOINT_SHADOW_QUEUE_REQUIRED true or false" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -n "${CHECKPOINT_SHADOW_QUEUE_TIMEOUT:-}" ]]; then
+    checkpoint_shadow_queue_args+=(--shadow-queue-timeout "${CHECKPOINT_SHADOW_QUEUE_TIMEOUT}")
+  fi
+fi
 if [[ "$checkpoint_requires_kafka_auth" == true ]]; then
   kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
   case "${kafka_tls_value,,}" in
@@ -1630,6 +1731,7 @@ exec /usr/local/bin/checkpoint-aggregator \
   --ipfs-api-url "$CHECKPOINT_IPFS_API_URL" \
   ${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"} \
   "${checkpoint_queue_args[@]}" \
+  "${checkpoint_shadow_queue_args[@]}" \
   --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
   --queue-output-topic "${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
   --queue-group "${checkpoint_aggregator_queue_group}" \
@@ -2857,6 +2959,47 @@ case "${base_event_queue_driver}" in
     exit 1
     ;;
 esac
+base_event_shadow_queue_driver="$(printf '%s' "${BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
+base_event_shadow_queue_args=()
+if [[ -n "${base_event_shadow_queue_driver}" ]]; then
+  if [[ "${base_event_shadow_queue_driver}" == "${base_event_queue_driver}" ]]; then
+    echo "base-event-scanner requires BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER to differ from BASE_EVENT_SCANNER_QUEUE_DRIVER" >&2
+    exit 1
+  fi
+  base_event_shadow_queue_args=(--shadow-queue-driver "${base_event_shadow_queue_driver}")
+  case "${base_event_shadow_queue_driver}" in
+    kafka)
+      base_event_shadow_queue_brokers="${BASE_EVENT_SCANNER_SHADOW_QUEUE_BROKERS:-${BASE_EVENT_SCANNER_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}}"
+      [[ -n "${base_event_shadow_queue_brokers}" ]] || {
+        echo "base-event-scanner requires BASE_EVENT_SCANNER_SHADOW_QUEUE_BROKERS, BASE_EVENT_SCANNER_QUEUE_BROKERS, or CHECKPOINT_KAFKA_BROKERS when BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER=kafka" >&2
+        exit 1
+      }
+      base_event_shadow_queue_args+=(--shadow-queue-brokers "${base_event_shadow_queue_brokers}")
+      base_event_requires_kafka_auth=true
+      ;;
+    postgres)
+      base_event_shadow_queue_args+=(--shadow-queue-postgres-dsn-env "${BASE_EVENT_SCANNER_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+      ;;
+    *)
+      echo "base-event-scanner supports BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER kafka or postgres, got ${base_event_shadow_queue_driver}" >&2
+      exit 1
+      ;;
+  esac
+  case "$(printf '%s' "${BASE_EVENT_SCANNER_SHADOW_QUEUE_REQUIRED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      base_event_shadow_queue_args+=(--shadow-queue-required)
+      ;;
+    0|false|no|off|"")
+      ;;
+    *)
+      echo "base-event-scanner supports BASE_EVENT_SCANNER_SHADOW_QUEUE_REQUIRED true or false" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -n "${BASE_EVENT_SCANNER_SHADOW_QUEUE_TIMEOUT:-}" ]]; then
+    base_event_shadow_queue_args+=(--shadow-queue-timeout "${BASE_EVENT_SCANNER_SHADOW_QUEUE_TIMEOUT}")
+  fi
+fi
 if [[ "$base_event_requires_kafka_auth" == true ]]; then
   kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
   case "${kafka_tls_value,,}" in
@@ -2897,6 +3040,7 @@ args=(
   --start-block "${BASE_EVENT_SCANNER_START_BLOCK}"
   --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
   "${base_event_queue_args[@]}"
+  "${base_event_shadow_queue_args[@]}"
   --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v2}"
   --health-port "${BASE_EVENT_SCANNER_HEALTH_PORT:-18306}"
 )

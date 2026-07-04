@@ -83,15 +83,25 @@ func main() {
 		ipfsPinBatchSize = flag.Int("ipfs-pin-batch-size", 8, "maximum checkpoint packages pinned per background IPFS pass")
 		persistTimeout   = flag.Duration("persist-timeout", 30*time.Second, "timeout for package persistence (blob + db)")
 
-		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
-		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
-		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
-		queueGroup          = flag.String("queue-group", "checkpoint-aggregator", "queue consumer group (required for kafka/postgres)")
-		queueInTopics       = flag.String("queue-input-topics", "checkpoints.signatures.v1", "comma-separated queue input topics")
-		queueOutTopic       = flag.String("queue-output-topic", "checkpoints.packages.v1", "queue output topic")
-		queueMaxBytes       = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
-		queueAckTimeout     = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+		queueDriver            = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers           = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN       = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
+		queuePostgresDSNEnv    = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+		queueGroup             = flag.String("queue-group", "checkpoint-aggregator", "queue consumer group (required for kafka/postgres)")
+		queueInTopics          = flag.String("queue-input-topics", "checkpoints.signatures.v1", "comma-separated queue input topics")
+		queueOutTopic          = flag.String("queue-output-topic", "checkpoints.packages.v1", "queue output topic")
+		queueMaxBytes          = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
+		queueAckTimeout        = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+		shadowQueueDriver      = flag.String("shadow-queue-driver", "", "optional output shadow queue driver: kafka|postgres|stdio")
+		shadowQueueBrokers     = flag.String("shadow-queue-brokers", "", "comma-separated output shadow queue brokers")
+		shadowQueuePostgresDSN = flag.String(
+			"shadow-queue-postgres-dsn",
+			"",
+			"Postgres DSN for postgres output shadow queue driver (defaults to --postgres-dsn)",
+		)
+		shadowQueuePostgresDSNEnv = flag.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres output shadow queue driver")
+		shadowQueueRequired       = flag.Bool("shadow-queue-required", false, "fail checkpoint packages when the shadow queue publish fails")
+		shadowQueueTimeout        = flag.Duration("shadow-queue-timeout", 2*time.Second, "timeout for optional output shadow queue publishes")
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
@@ -231,15 +241,22 @@ func main() {
 	}
 
 	queueOpts := checkpointAggregatorQueueOptions{
-		Driver:           *queueDriver,
-		Brokers:          queue.SplitCommaList(*queueBrokers),
-		PostgresDSN:      *queuePostgresDSN,
-		PostgresDSNEnv:   *queuePostgresDSNEnv,
-		StorePostgresDSN: *postgresDSN,
-		Group:            *queueGroup,
-		Topics:           queue.SplitCommaList(*queueInTopics),
-		QueueMaxBytes:    *queueMaxBytes,
-		MaxLineBytes:     *maxLineBytes,
+		Driver:               *queueDriver,
+		Brokers:              queue.SplitCommaList(*queueBrokers),
+		PostgresDSN:          *queuePostgresDSN,
+		PostgresDSNEnv:       *queuePostgresDSNEnv,
+		StorePostgresDSN:     *postgresDSN,
+		Group:                *queueGroup,
+		Topics:               queue.SplitCommaList(*queueInTopics),
+		QueueMaxBytes:        *queueMaxBytes,
+		MaxLineBytes:         *maxLineBytes,
+		ShadowDriver:         *shadowQueueDriver,
+		ShadowBrokers:        queue.SplitCommaList(*shadowQueueBrokers),
+		ShadowPostgresDSN:    *shadowQueuePostgresDSN,
+		ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
+		ShadowRequired:       *shadowQueueRequired,
+		ShadowTimeout:        *shadowQueueTimeout,
+		Log:                  log,
 	}
 	consumerCfg, err := checkpointAggregatorConsumerConfig(queueOpts)
 	if err != nil {
@@ -253,14 +270,9 @@ func main() {
 	}
 	defer func() { _ = consumer.Close() }()
 
-	producerCfg, err := checkpointAggregatorProducerConfig(queueOpts)
+	producer, err := checkpointAggregatorQueueProducer(ctx, queueOpts, queue.NewProducerContext)
 	if err != nil {
 		log.Error("configure queue producer", "err", err)
-		os.Exit(2)
-	}
-	producer, err := queue.NewProducerContext(ctx, producerCfg)
-	if err != nil {
-		log.Error("init queue producer", "err", err)
 		os.Exit(2)
 	}
 	defer func() { _ = producer.Close() }()
@@ -642,15 +654,22 @@ func marshalCheckpointPackage(pkg checkpoint.CheckpointPackageV1) ([]byte, error
 }
 
 type checkpointAggregatorQueueOptions struct {
-	Driver           string
-	Brokers          []string
-	PostgresDSN      string
-	PostgresDSNEnv   string
-	StorePostgresDSN string
-	Group            string
-	Topics           []string
-	QueueMaxBytes    int
-	MaxLineBytes     int
+	Driver               string
+	Brokers              []string
+	PostgresDSN          string
+	PostgresDSNEnv       string
+	StorePostgresDSN     string
+	Group                string
+	Topics               []string
+	QueueMaxBytes        int
+	MaxLineBytes         int
+	ShadowDriver         string
+	ShadowBrokers        []string
+	ShadowPostgresDSN    string
+	ShadowPostgresDSNEnv string
+	ShadowRequired       bool
+	ShadowTimeout        time.Duration
+	Log                  *slog.Logger
 }
 
 func checkpointAggregatorConsumerConfig(opts checkpointAggregatorQueueOptions) (queue.ConsumerConfig, error) {
@@ -699,6 +718,118 @@ func checkpointAggregatorProducerConfig(opts checkpointAggregatorQueueOptions) (
 		return queue.ProducerConfig{}, fmt.Errorf("unsupported queue driver %q", opts.Driver)
 	}
 	return cfg, nil
+}
+
+type checkpointAggregatorQueueProducerFactory func(context.Context, queue.ProducerConfig) (queue.Producer, error)
+
+func checkpointAggregatorQueueProducer(ctx context.Context, opts checkpointAggregatorQueueOptions, factory checkpointAggregatorQueueProducerFactory) (queue.Producer, error) {
+	if factory == nil {
+		factory = queue.NewProducerContext
+	}
+	primaryDriver := checkpointAggregatorEffectiveQueueDriver(opts.Driver)
+	shadowDriver := strings.ToLower(strings.TrimSpace(opts.ShadowDriver))
+	if shadowDriver != "" {
+		if !checkpointAggregatorQueueDriverSupported(shadowDriver) {
+			return nil, fmt.Errorf("unsupported shadow queue driver %q", opts.ShadowDriver)
+		}
+		if primaryDriver == shadowDriver {
+			return nil, errors.New("shadow queue driver must differ from primary queue driver")
+		}
+		if !opts.ShadowRequired && opts.ShadowTimeout <= 0 {
+			return nil, errors.New("--shadow-queue-timeout must be > 0 when optional --shadow-queue-driver is set")
+		}
+	} else if opts.ShadowRequired {
+		return nil, errors.New("--shadow-queue-required requires --shadow-queue-driver")
+	}
+
+	primaryCfg, err := checkpointAggregatorProducerConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	primary, err := factory(ctx, primaryCfg)
+	if err != nil {
+		return nil, err
+	}
+	if shadowDriver == "" {
+		return primary, nil
+	}
+
+	shadowCfg, err := checkpointAggregatorProducerConfig(checkpointAggregatorQueueOptions{
+		Driver:           opts.ShadowDriver,
+		Brokers:          opts.ShadowBrokers,
+		PostgresDSN:      opts.ShadowPostgresDSN,
+		PostgresDSNEnv:   opts.ShadowPostgresDSNEnv,
+		StorePostgresDSN: opts.StorePostgresDSN,
+	})
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnShadowQueue("configure", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("configure shadow queue producer: %w", err)
+	}
+	shadowCtx := ctx
+	if !opts.ShadowRequired {
+		var cancel context.CancelFunc
+		shadowCtx, cancel = context.WithTimeout(ctx, opts.ShadowTimeout)
+		defer cancel()
+	}
+	shadow, err := factory(shadowCtx, shadowCfg)
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnShadowQueue("init", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("init shadow queue producer: %w", err)
+	}
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{
+		RequireShadow: opts.ShadowRequired,
+		ShadowTimeout: opts.ShadowTimeout,
+		ShadowErrorHandler: func(topic string, err error) {
+			opts.warnShadowQueue("publish", topic, err)
+		},
+	})
+	if err != nil {
+		_ = primary.Close()
+		_ = shadow.Close()
+		return nil, err
+	}
+	return producer, nil
+}
+
+func checkpointAggregatorEffectiveQueueDriver(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", queue.DriverKafka:
+		return queue.DriverKafka
+	case queue.DriverPostgres:
+		return queue.DriverPostgres
+	case queue.DriverStdio:
+		return queue.DriverStdio
+	default:
+		return strings.ToLower(strings.TrimSpace(driver))
+	}
+}
+
+func checkpointAggregatorQueueDriverSupported(driver string) bool {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case queue.DriverKafka, queue.DriverPostgres, queue.DriverStdio:
+		return true
+	default:
+		return false
+	}
+}
+
+func (opts checkpointAggregatorQueueOptions) warnShadowQueue(stage string, topic string, err error) {
+	if err == nil || opts.Log == nil || opts.ShadowRequired {
+		return
+	}
+	attrs := []any{"stage", stage, "err", err}
+	if strings.TrimSpace(topic) != "" {
+		attrs = append(attrs, "topic", topic)
+	}
+	opts.Log.Warn("checkpoint aggregator shadow queue failed open", attrs...)
 }
 
 func checkpointAggregatorQueuePostgresDSN(opts checkpointAggregatorQueueOptions) (string, error) {

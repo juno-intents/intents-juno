@@ -151,13 +151,24 @@ variable "shared_kafka_port" {
 }
 
 variable "shared_queue_driver" {
-  description = "Shared queue transport that controls production MSK lifecycle. Kafka remains the default until all shared consumers have cut over."
+  description = "Shared queue transport used by production services. Kafka remains the default until all shared consumers have cut over."
   type        = string
   default     = "kafka"
 
   validation {
     condition     = contains(["kafka", "postgres"], lower(trimspace(var.shared_queue_driver)))
     error_message = "shared_queue_driver must be one of kafka or postgres."
+  }
+}
+
+variable "shared_msk_retention_mode" {
+  description = "MSK lifecycle during Postgres queue migration. retain keeps MSK provisioned for rollback and observation after shared_queue_driver moves to postgres; auto removes it once no queue path needs Kafka."
+  type        = string
+  default     = "auto"
+
+  validation {
+    condition     = contains(["auto", "retain"], lower(trimspace(var.shared_msk_retention_mode)))
+    error_message = "shared_msk_retention_mode must be one of auto or retain."
   }
 }
 

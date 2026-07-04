@@ -142,10 +142,16 @@ jobs:
             exit 1
           }
 
+          lock_workflow="$(jq -r '.workflow // empty' "$lock_file")"
+          [[ "$lock_workflow" == "$preview_workflow_name" ]] || {
+            echo "preview release lock workflow does not match preview workflow run" >&2
+            exit 1
+          }
           [[ "$(jq -r '.app_binaries_release_tag' "$lock_file")" == "${{ inputs.app_binaries_release_tag }}" ]] || exit 1
           [[ "$(jq -r '.app_runtime_ami_release_tag' "$lock_file")" == "${{ inputs.app_runtime_ami_release_tag }}" ]] || exit 1
           [[ "$(jq -r '.shared_proof_services_image_release_tag' "$lock_file")" == "${{ inputs.shared_proof_services_image_release_tag }}" ]] || exit 1
           [[ "$(jq -r '.wireguard_role_ami_release_tag' "$lock_file")" == "${{ inputs.wireguard_role_ami_release_tag }}" ]] || exit 1
+          [[ "$(jq -r '.operator_stack_ami_release_tag // empty' "$lock_file")" == "${{ inputs.operator_stack_ami_release_tag }}" ]] || exit 1
 
       - name: Download Released Deployment Binaries
         shell: bash
@@ -188,6 +194,147 @@ jobs:
             --inventory .ci/out/inventory.release-inputs.json \
             --output .ci/out/inventory.resolved.json \
             --github-repo "${{ github.repository }}"
+
+      - name: Verify Preview Queue Topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          lock_file=".ci/out/preview-role-runtime-lock/role-runtime-release-lock.json"
+          resolved_inventory=".ci/out/inventory.resolved.json"
+          normalize_driver() {
+            tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+          require_driver() {
+            local label="$1"
+            local driver="$2"
+            case "$driver" in
+              kafka|postgres) ;;
+              *)
+                printf '%s must be kafka or postgres, got: %s\n' "$label" "$driver" >&2
+                exit 1
+                ;;
+            esac
+          }
+          require_optional_driver() {
+            local label="$1"
+            local driver="$2"
+            case "$driver" in
+              ""|kafka|postgres) ;;
+              *)
+                printf '%s must be kafka, postgres, or empty, got: %s\n' "$label" "$driver" >&2
+                exit 1
+                ;;
+            esac
+          }
+          compare_driver() {
+            local label="$1"
+            local preview_value="$2"
+            local mainnet_value="$3"
+            if [[ "$preview_value" != "$mainnet_value" ]]; then
+              printf 'preview queue topology mismatch for %s: preview=%s mainnet=%s\n' "$label" "$preview_value" "$mainnet_value" >&2
+              exit 1
+            fi
+          }
+          require_lock_output() {
+            local output_name="$1"
+            jq -e --arg output_name "$output_name" '(.shared_infra_e2e_outputs // []) | index($output_name)' "$lock_file" >/dev/null || {
+              printf 'preview lock missing required shared infra e2e output: %s\n' "$output_name" >&2
+              exit 1
+            }
+          }
+          require_msk_retention_mode() {
+            local label="$1"
+            local mode="$2"
+            case "$mode" in
+              auto|retain) ;;
+              *)
+                printf '%s must be auto or retain, got: %s\n' "$label" "$mode" >&2
+                exit 1
+                ;;
+            esac
+          }
+          require_bool() {
+            local label="$1"
+            local value="$2"
+            case "$value" in
+              true|false) ;;
+              *)
+                printf '%s must be true or false, got: %s\n' "$label" "$value" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          preview_lock_workflow="$(jq -r '.workflow // empty' "$lock_file")"
+          preview_shared_terraform_dir="$(jq -r '.shared_terraform_dir // empty' "$lock_file")"
+          preview_queue_driver="$(jq -r '.shared_queue_driver // empty' "$lock_file" | normalize_driver)"
+          preview_queue_shadow_driver="$(jq -r '.shared_queue_shadow_driver // empty' "$lock_file" | normalize_driver)"
+          preview_proof_queue_driver="$(jq -r '.shared_proof_queue_driver // empty' "$lock_file" | normalize_driver)"
+          preview_proof_queue_shadow_driver="$(jq -r '.shared_proof_queue_shadow_driver // empty' "$lock_file" | normalize_driver)"
+          preview_msk_retention_mode="$(jq -r '.shared_msk_retention_mode // empty' "$lock_file" | normalize_driver)"
+          preview_msk_provisioned="$(jq -r 'if has("shared_msk_provisioned") then .shared_msk_provisioned else empty end' "$lock_file")"
+
+          mainnet_shared_terraform_dir="$(jq -r '.shared_services.terraform_dir // empty' "$resolved_inventory")"
+          mainnet_queue_driver="$(jq -r '.shared_services.queue.driver // "kafka"' "$resolved_inventory" | normalize_driver)"
+          mainnet_queue_shadow_driver="$(jq -r '.shared_services.queue.shadow.driver // empty' "$resolved_inventory" | normalize_driver)"
+          mainnet_proof_queue_driver="$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$resolved_inventory" | normalize_driver)"
+          mainnet_proof_queue_shadow_driver="$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$resolved_inventory" | normalize_driver)"
+          mainnet_msk_retention_mode="$(jq -r '.shared_services.msk_retention_mode // .shared_services.msk.retention_mode // "auto"' "$resolved_inventory" | normalize_driver)"
+
+          require_driver "preview shared_queue_driver" "$preview_queue_driver"
+          require_optional_driver "preview shared_queue_shadow_driver" "$preview_queue_shadow_driver"
+          require_driver "preview shared_proof_queue_driver" "$preview_proof_queue_driver"
+          require_optional_driver "preview shared_proof_queue_shadow_driver" "$preview_proof_queue_shadow_driver"
+          require_msk_retention_mode "preview shared_msk_retention_mode" "$preview_msk_retention_mode"
+          require_bool "preview shared_msk_provisioned" "$preview_msk_provisioned"
+          require_driver "mainnet shared queue driver" "$mainnet_queue_driver"
+          require_optional_driver "mainnet shared queue shadow driver" "$mainnet_queue_shadow_driver"
+          require_driver "mainnet shared proof queue driver" "$mainnet_proof_queue_driver"
+          require_optional_driver "mainnet shared proof queue shadow driver" "$mainnet_proof_queue_shadow_driver"
+          require_msk_retention_mode "mainnet shared MSK retention mode" "$mainnet_msk_retention_mode"
+
+          if [[ "$preview_shared_terraform_dir" != "$mainnet_shared_terraform_dir" ]]; then
+            printf 'preview shared terraform dir mismatch: preview=%s mainnet=%s\n' "$preview_shared_terraform_dir" "$mainnet_shared_terraform_dir" >&2
+            exit 1
+          fi
+          compare_driver "shared queue driver" "$preview_queue_driver" "$mainnet_queue_driver"
+          compare_driver "shared queue shadow driver" "$preview_queue_shadow_driver" "$mainnet_queue_shadow_driver"
+          compare_driver "shared proof queue driver" "$preview_proof_queue_driver" "$mainnet_proof_queue_driver"
+          compare_driver "shared proof queue shadow driver" "$preview_proof_queue_shadow_driver" "$mainnet_proof_queue_shadow_driver"
+          compare_driver "shared MSK retention mode" "$preview_msk_retention_mode" "$mainnet_msk_retention_mode"
+
+          require_lock_output "shared-infra-e2e.json"
+          kafka_path_active="false"
+          postgres_path_active="false"
+          for selected_queue_driver in "$mainnet_queue_driver" "$mainnet_queue_shadow_driver" "$mainnet_proof_queue_driver" "$mainnet_proof_queue_shadow_driver"; do
+            [[ "$selected_queue_driver" != "kafka" ]] || kafka_path_active="true"
+            [[ "$selected_queue_driver" != "postgres" ]] || postgres_path_active="true"
+          done
+          if [[ "$mainnet_queue_driver" == "postgres" && "$kafka_path_active" == "true" ]]; then
+            require_lock_output "shared-infra-e2e.kafka-shadow.json"
+          fi
+          if [[ "$mainnet_queue_driver" == "kafka" && "$postgres_path_active" == "true" ]]; then
+            require_lock_output "shared-infra-e2e.postgres-shadow.json"
+          fi
+          mainnet_msk_provisioned="false"
+          if [[ "$mainnet_queue_driver" == "kafka" || ( "$mainnet_queue_driver" == "postgres" && "$mainnet_msk_retention_mode" == "retain" ) ]]; then
+            mainnet_msk_provisioned="true"
+          fi
+          compare_driver "shared MSK provisioned state" "$preview_msk_provisioned" "$mainnet_msk_provisioned"
+          queue_topology_requires_operator_preview="false"
+          if [[ "$mainnet_queue_driver" != "kafka" || "$mainnet_proof_queue_driver" != "kafka" || -n "$mainnet_queue_shadow_driver" || -n "$mainnet_proof_queue_shadow_driver" ]]; then
+            queue_topology_requires_operator_preview="true"
+          fi
+          if [[ "$preview_lock_workflow" == "deploy-preview-role-runtime" ]]; then
+            if [[ -n "${{ inputs.operator_stack_ami_release_tag }}" ]]; then
+              echo "operator_stack_ami_release_tag promotion requires reset-preview-role-runtime because deploy-preview-role-runtime does not roll operators" >&2
+              exit 1
+            fi
+            if [[ "$queue_topology_requires_operator_preview" == "true" ]]; then
+              echo "queue topology promotion requires reset-preview-role-runtime because deploy-preview-role-runtime does not roll operators" >&2
+              exit 1
+            fi
+          fi
 
       - name: Run Deploy Coordinator
         shell: bash

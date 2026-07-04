@@ -128,6 +128,8 @@ locals {
   shared_queue_driver                          = lower(trimspace(var.shared_queue_driver))
   shared_proof_queue_driver                    = trimspace(var.shared_proof_queue_driver) == "" ? local.shared_queue_driver : lower(trimspace(var.shared_proof_queue_driver))
   shared_queue_uses_kafka                      = local.shared_queue_driver == "kafka"
+  shared_msk_retained_for_cutover              = local.shared_queue_driver == "postgres" && lower(trimspace(var.shared_msk_retention_mode)) == "retain"
+  shared_msk_provisioned                       = local.shared_queue_uses_kafka || local.shared_msk_retained_for_cutover
   shared_proof_queue_uses_kafka                = local.shared_proof_queue_driver == "kafka"
   shared_kafka_cluster_arn                     = try(aws_msk_cluster.shared[0].arn, "")
   shared_kafka_bootstrap_brokers               = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, "")
@@ -423,7 +425,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_msk_provisioned ? [1] : []
     content {
       description     = "MSK IAM bootstrap from shared ECS tasks"
       from_port       = var.shared_kafka_port
@@ -434,7 +436,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = local.shared_queue_uses_kafka ? toset(var.shared_service_client_cidr_blocks) : toset([])
+    for_each = local.shared_msk_provisioned ? toset(var.shared_service_client_cidr_blocks) : toset([])
     content {
       description = "MSK IAM bootstrap from shared-service clients"
       from_port   = var.shared_kafka_port
@@ -445,7 +447,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = local.shared_queue_uses_kafka ? toset(var.shared_service_client_security_group_ids) : toset([])
+    for_each = local.shared_msk_provisioned ? toset(var.shared_service_client_security_group_ids) : toset([])
     content {
       description     = "MSK IAM bootstrap from shared-service client security groups"
       from_port       = var.shared_kafka_port
@@ -456,7 +458,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_msk_provisioned ? [1] : []
     content {
       description = "MSK broker mesh"
       from_port   = 9092
@@ -675,7 +677,7 @@ resource "aws_backup_selection" "shared_postgres" {
 }
 
 resource "aws_msk_configuration" "shared" {
-  count          = local.shared_queue_uses_kafka ? 1 : 0
+  count          = local.shared_msk_provisioned ? 1 : 0
   kafka_versions = [var.shared_msk_kafka_version]
   name           = "${local.resource_slug}-shared-msk-config"
 
@@ -687,7 +689,7 @@ resource "aws_msk_configuration" "shared" {
 }
 
 resource "aws_msk_cluster" "shared" {
-  count                  = local.shared_queue_uses_kafka ? 1 : 0
+  count                  = local.shared_msk_provisioned ? 1 : 0
   cluster_name           = "${local.resource_name}-shared-msk"
   kafka_version          = var.shared_msk_kafka_version
   number_of_broker_nodes = length(local.shared_subnets)
@@ -1243,8 +1245,8 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       error_message = "shared_base_chain_id must be > 0 when a shared proof service desired count is > 0."
     }
     precondition {
-      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
-      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_msk_provisioned)
+      error_message = "shared_proof_queue_driver cannot be kafka when MSK is not provisioned."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
@@ -1310,8 +1312,8 @@ resource "aws_ecs_task_definition" "proof_funder" {
       error_message = "shared_sp1_requestor_address must be set when a shared proof service desired count is > 0."
     }
     precondition {
-      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_queue_uses_kafka)
-      error_message = "shared_proof_queue_driver cannot be kafka when shared_queue_driver is postgres because MSK would be absent."
+      condition     = !(local.shared_proof_queue_uses_kafka && !local.shared_msk_provisioned)
+      error_message = "shared_proof_queue_driver cannot be kafka when MSK is not provisioned."
     }
     precondition {
       condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
@@ -1453,7 +1455,7 @@ data "aws_iam_policy_document" "proof_role_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_msk_provisioned ? [1] : []
     content {
       sid = "AllowProofRoleCanaryKafkaRead"
       actions = [
@@ -1492,7 +1494,7 @@ data "aws_iam_policy_document" "proof_role_access" {
   }
 
   dynamic "statement" {
-    for_each = local.shared_queue_uses_kafka ? [1] : []
+    for_each = local.shared_msk_provisioned ? [1] : []
     content {
       sid = "AllowProofRoleKafkaAccess"
       actions = [

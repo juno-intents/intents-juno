@@ -296,6 +296,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"' "config hydrator persists checkpoint signer kms key id"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"' "config hydrator persists checkpoint blob sse kms key id"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"' "config hydrator persists the operator queue driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SHADOW_QUEUE_DRIVER "$checkpoint_shadow_queue_driver"' "config hydrator persists checkpoint shadow queue driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER "$base_event_scanner_shadow_queue_driver"' "config hydrator persists base-event scanner shadow queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"' "config hydrator persists the proof queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver"' "config hydrator persists the proof shadow queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_RESPONSE_POSTGRES_INITIAL_POSITION "$proof_response_postgres_initial_position"' "config hydrator persists proof response postgres initial position"
@@ -402,6 +404,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$signer_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint signer reads base chain id from operator env"
   assert_contains "$signer_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint signer reads bridge address from operator env"
   assert_contains "$signer_wrapper" '--lease-name "${checkpoint_signer_lease_name}"' "checkpoint signer passes the per-operator lease name through to the binary"
+  assert_contains "$signer_wrapper" 'checkpoint_shadow_queue_args=(--shadow-queue-driver "${checkpoint_shadow_queue_driver}")' "checkpoint signer can enable a shadow queue driver"
+  assert_contains "$signer_wrapper" '--shadow-queue-postgres-dsn-env "${CHECKPOINT_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "checkpoint signer passes shadow queue DSN by env indirection"
   assert_contains "$signer_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "checkpoint signer exports the kafka auth region to the binary"
   assert_not_contains "$signer_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint signer does not bake bootstrap bridge address into wrapper"
 
@@ -414,6 +418,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$aggregator_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint aggregator reads bridge address from operator env"
   assert_contains "$aggregator_wrapper" '--queue-group "${checkpoint_aggregator_queue_group}"' "checkpoint aggregator passes the per-operator queue group to the binary"
   assert_contains "$aggregator_wrapper" '${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"}' "checkpoint aggregator forwards the optional IPFS bearer token"
+  assert_contains "$aggregator_wrapper" 'checkpoint_shadow_queue_args=(--shadow-queue-driver "${checkpoint_shadow_queue_driver}")' "checkpoint aggregator can enable a shadow queue driver"
+  assert_contains "$aggregator_wrapper" '--shadow-queue-postgres-dsn-env "${CHECKPOINT_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "checkpoint aggregator passes shadow queue DSN by env indirection"
   assert_contains "$aggregator_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "checkpoint aggregator exports the kafka auth region to the binary"
   assert_not_contains "$aggregator_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint aggregator does not bake bootstrap bridge address into wrapper"
 
@@ -445,6 +451,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$base_event_scanner_wrapper" '[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {' "base-event-scanner requires explicit start block in operator env"
   assert_contains "$base_event_scanner_wrapper" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "base-event-scanner fails closed without start block"
   assert_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK}"' "base-event-scanner wrapper uses rendered start block without a genesis fallback"
+  assert_contains "$base_event_scanner_wrapper" 'base_event_shadow_queue_args=(--shadow-queue-driver "${base_event_shadow_queue_driver}")' "base-event scanner can enable a shadow queue driver"
+  assert_contains "$base_event_scanner_wrapper" '--shadow-queue-postgres-dsn-env "${BASE_EVENT_SCANNER_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "base-event scanner passes shadow queue DSN by env indirection"
   assert_not_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK:-0}"' "base-event-scanner wrapper does not fall back to genesis"
   local base_relayer_wrapper
   base_relayer_wrapper="$(extract_block "cat > /tmp/intents-juno-base-relayer.sh <<'EOF_BASE_RELAYER'" "EOF_BASE_RELAYER")"
@@ -1455,6 +1463,7 @@ EOF
   render_wrapper "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER" "$tmp/withdraw-finalizer.sh" "$env_file"
   render_wrapper "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER" "$tmp/base-event-scanner.sh" "$env_file"
 
+  replace_bin "$tmp/checkpoint-signer.sh" checkpoint-signer "$fake_bin/checkpoint-signer"
   replace_bin "$tmp/checkpoint-aggregator.sh" checkpoint-aggregator "$fake_bin/checkpoint-aggregator"
   replace_bin "$tmp/deposit-relayer.sh" deposit-relayer "$fake_bin/deposit-relayer"
   replace_bin "$tmp/withdraw-finalizer.sh" withdraw-finalizer "$fake_bin/withdraw-finalizer"

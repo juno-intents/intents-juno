@@ -12,6 +12,22 @@ import (
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
+type recordingCheckpointSignerProducer struct {
+	name  string
+	calls *[]string
+}
+
+func (p *recordingCheckpointSignerProducer) Publish(_ context.Context, topic string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+string(payload))
+	}
+	return nil
+}
+
+func (p *recordingCheckpointSignerProducer) Close() error {
+	return nil
+}
+
 func TestLoadDigestSigner_AWSKMSRequiresOperatorAddress(t *testing.T) {
 	_, _, err := loadDigestSigner(context.Background(), "aws-kms", "arn:aws:kms:us-east-1:123:key/test")
 	if err == nil {
@@ -213,5 +229,101 @@ func TestCheckpointSignerQueueProducerConfig_PostgresDSNEnvOverridesStoreDSN(t *
 	}
 	if got, want := cfg.PostgresDSN, "postgres://queue-db"; got != want {
 		t.Fatalf("PostgresDSN = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointSignerQueueProducer_MirrorsToShadowPostgres(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	var configs []queue.ProducerConfig
+	factory := func(_ context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		name := cfg.Driver
+		if len(configs) > 1 {
+			name = "shadow-" + cfg.Driver
+		}
+		return &recordingCheckpointSignerProducer{name: name, calls: &calls}, nil
+	}
+
+	producer, err := checkpointSignerQueueProducer(context.Background(), checkpointSignerQueueProducerOptions{
+		Driver:            queue.DriverKafka,
+		Brokers:           []string{"broker-1:9098"},
+		StorePostgresDSN:  "postgres://state-db",
+		ShadowDriver:      queue.DriverPostgres,
+		ShadowPostgresDSN: "postgres://shadow-db",
+		ShadowRequired:    true,
+		ShadowTimeout:     time.Second,
+	}, factory)
+	if err != nil {
+		t.Fatalf("checkpointSignerQueueProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	if err := producer.Publish(context.Background(), "checkpoints.signatures.v1", []byte("payload")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("producer configs = %d, want 2", len(configs))
+	}
+	if got, want := configs[0].Driver, queue.DriverKafka; got != want {
+		t.Fatalf("primary driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].Driver, queue.DriverPostgres; got != want {
+		t.Fatalf("shadow driver = %q, want %q", got, want)
+	}
+	if got, want := configs[1].PostgresDSN, "postgres://shadow-db"; got != want {
+		t.Fatalf("shadow PostgresDSN = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(calls, ","), "kafka:checkpoints.signatures.v1:payload,shadow-postgres:checkpoints.signatures.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestCheckpointSignerQueueProducer_RejectsDuplicateShadowDriver(t *testing.T) {
+	t.Parallel()
+
+	_, err := checkpointSignerQueueProducer(context.Background(), checkpointSignerQueueProducerOptions{
+		Driver:           queue.DriverPostgres,
+		StorePostgresDSN: "postgres://state-db",
+		ShadowDriver:     queue.DriverPostgres,
+		ShadowRequired:   true,
+		ShadowTimeout:    time.Second,
+	}, nil)
+	if err == nil {
+		t.Fatalf("expected duplicate shadow driver error")
+	}
+	if !strings.Contains(err.Error(), "shadow queue driver must differ") {
+		t.Fatalf("error = %v, want duplicate shadow driver error", err)
+	}
+}
+
+func TestCheckpointSignerQueueProducer_OptionalShadowInitUsesTimeout(t *testing.T) {
+	t.Parallel()
+
+	var configs []queue.ProducerConfig
+	factory := func(ctx context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {
+		configs = append(configs, cfg)
+		if len(configs) == 1 {
+			return &recordingCheckpointSignerProducer{name: "primary"}, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	producer, err := checkpointSignerQueueProducer(context.Background(), checkpointSignerQueueProducerOptions{
+		Driver:            queue.DriverKafka,
+		Brokers:           []string{"broker-1:9098"},
+		StorePostgresDSN:  "postgres://state-db",
+		ShadowDriver:      queue.DriverPostgres,
+		ShadowPostgresDSN: "postgres://shadow-db",
+		ShadowTimeout:     10 * time.Millisecond,
+	}, factory)
+	if err != nil {
+		t.Fatalf("checkpointSignerQueueProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	if len(configs) != 2 {
+		t.Fatalf("producer configs = %d, want 2", len(configs))
 	}
 }

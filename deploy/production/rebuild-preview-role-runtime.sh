@@ -220,18 +220,32 @@ run_shared_infra_e2e() {
   local postgres_dsn="$4"
   local required_topics="$5"
   local output_path="$6"
-  local queue_driver kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
+  local queue_driver queue_shadow_driver proof_queue_driver proof_shadow_queue_driver selected_queue_driver kafka_path_active postgres_path_active kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
   local kafka_tls kafka_auth_mode kafka_auth_region
   local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   local app_role_asg app_aws_profile app_aws_region asg_json instance_id
   local checkpoint_blob_bucket stage_key stage_uri presigned_url stdout_json
-  local url_q output_q remote_env_prefix remote_cmd shared_validation_args remote_args_q
+  local kafka_shadow_output_path postgres_shadow_output_path shadow_stdout_json
+  local url_q output_q kafka_shadow_output_q postgres_shadow_output_q remote_env_prefix remote_cmd remote_shadow_cmd shared_validation_args kafka_shadow_validation_args postgres_shadow_validation_args remote_args_q remote_shadow_args_q
 
   queue_driver="$(trim "$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
   case "$queue_driver" in
     kafka|postgres) ;;
     *) die "shared_services.queue.driver must be kafka or postgres" ;;
   esac
+  queue_shadow_driver="$(trim "$(jq -r '.shared_services.queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+  proof_queue_driver="$(trim "$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+  proof_shadow_queue_driver="$(trim "$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+  kafka_path_active="false"
+  postgres_path_active="false"
+  for selected_queue_driver in "$queue_driver" "$queue_shadow_driver" "$proof_queue_driver" "$proof_shadow_queue_driver"; do
+    case "$selected_queue_driver" in
+      "") ;;
+      kafka) kafka_path_active="true" ;;
+      postgres) postgres_path_active="true" ;;
+      *) die "shared manifest queue drivers must be kafka or postgres (got: $selected_queue_driver)" ;;
+    esac
+  done
   kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers // empty' "$shared_manifest")"
   ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
   shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
@@ -266,6 +280,42 @@ run_shared_infra_e2e() {
     --checkpoint-operators "$checkpoint_operators"
     --checkpoint-threshold "$checkpoint_threshold"
   )
+  kafka_shadow_validation_args=()
+  kafka_shadow_output_path=""
+  postgres_shadow_validation_args=()
+  postgres_shadow_output_path=""
+  if [[ "$queue_driver" == "postgres" && "$kafka_path_active" == "true" ]]; then
+    [[ -n "$kafka_brokers" ]] || die "shared manifest is missing shared_services.kafka.bootstrap_brokers for kafka shadow validation"
+    if [[ "$output_path" == *.json ]]; then
+      kafka_shadow_output_path="${output_path%.json}.kafka-shadow.json"
+    else
+      kafka_shadow_output_path="${output_path}.kafka-shadow.json"
+    fi
+    kafka_shadow_validation_args=(
+      --postgres-dsn "$postgres_dsn"
+      --queue-driver kafka
+      --kafka-brokers "$kafka_brokers"
+      --required-kafka-topics "$required_topics"
+      --checkpoint-ipfs-api-url "$ipfs_api_url"
+      --checkpoint-operators "$checkpoint_operators"
+      --checkpoint-threshold "$checkpoint_threshold"
+    )
+  fi
+  if [[ "$queue_driver" == "kafka" && "$postgres_path_active" == "true" ]]; then
+    if [[ "$output_path" == *.json ]]; then
+      postgres_shadow_output_path="${output_path%.json}.postgres-shadow.json"
+    else
+      postgres_shadow_output_path="${output_path}.postgres-shadow.json"
+    fi
+    postgres_shadow_validation_args=(
+      --postgres-dsn "$postgres_dsn"
+      --queue-driver postgres
+      --queue-postgres-dsn "$postgres_dsn"
+      --checkpoint-ipfs-api-url "$ipfs_api_url"
+      --checkpoint-operators "$checkpoint_operators"
+      --checkpoint-threshold "$checkpoint_threshold"
+    )
+  fi
 
   app_role_asg="$(jq -r '.app_role.asg // empty' "$app_deploy")"
   if [[ -n "$app_role_asg" ]]; then
@@ -296,9 +346,24 @@ run_shared_infra_e2e() {
 
     url_q="$(production_shell_quote "$presigned_url")"
     output_q="$(production_shell_quote "$output_path")"
+    kafka_shadow_output_q=""
+    if [[ -n "$kafka_shadow_output_path" ]]; then
+      kafka_shadow_output_q="$(production_shell_quote "$kafka_shadow_output_path")"
+    fi
+    postgres_shadow_output_q=""
+    if [[ -n "$postgres_shadow_output_path" ]]; then
+      postgres_shadow_output_q="$(production_shell_quote "$postgres_shadow_output_path")"
+    fi
     remote_args_q=""
     for arg in "${shared_validation_args[@]}"; do
       remote_args_q+=" $(production_shell_quote "$arg")"
+    done
+    remote_shadow_args_q=""
+    for arg in "${kafka_shadow_validation_args[@]}"; do
+      remote_shadow_args_q+=" $(production_shell_quote "$arg")"
+    done
+    for arg in "${postgres_shadow_validation_args[@]}"; do
+      remote_shadow_args_q+=" $(production_shell_quote "$arg")"
     done
 
     remote_env_prefix="JUNO_QUEUE_KAFKA_TLS=$(production_shell_quote "$kafka_tls") "
@@ -318,6 +383,24 @@ run_shared_infra_e2e() {
     if ! stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd")"; then
       AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
       die "shared-infra-e2e failed on app role instance $instance_id"
+    fi
+    if [[ ${#kafka_shadow_validation_args[@]} -gt 0 ]]; then
+      remote_shadow_cmd="set -eu; ${remote_env_prefix}/var/tmp/shared-infra-e2e$remote_shadow_args_q --output $kafka_shadow_output_q; cat $kafka_shadow_output_q"
+      if ! shadow_stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_shadow_cmd")"; then
+        AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
+        die "shared-infra-e2e kafka shadow validation failed on app role instance $instance_id"
+      fi
+      [[ -n "$shadow_stdout_json" ]] || die "shared-infra-e2e kafka shadow validation did not return any output from app role instance $instance_id"
+      printf '%s\n' "$shadow_stdout_json" >"$kafka_shadow_output_path"
+    fi
+    if [[ ${#postgres_shadow_validation_args[@]} -gt 0 ]]; then
+      remote_shadow_cmd="set -eu; ${remote_env_prefix}/var/tmp/shared-infra-e2e$remote_shadow_args_q --output $postgres_shadow_output_q; cat $postgres_shadow_output_q"
+      if ! shadow_stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_shadow_cmd")"; then
+        AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
+        die "shared-infra-e2e postgres shadow validation failed on app role instance $instance_id"
+      fi
+      [[ -n "$shadow_stdout_json" ]] || die "shared-infra-e2e postgres shadow validation did not return any output from app role instance $instance_id"
+      printf '%s\n' "$shadow_stdout_json" >"$postgres_shadow_output_path"
     fi
     AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
     [[ -n "$stdout_json" ]] || die "shared-infra-e2e did not return any output from app role instance $instance_id"
@@ -341,6 +424,16 @@ run_shared_infra_e2e() {
     production_run_release_binary "$binary" \
       "${shared_validation_args[@]}" \
       --output "$output_path"
+    if [[ ${#kafka_shadow_validation_args[@]} -gt 0 ]]; then
+      production_run_release_binary "$binary" \
+        "${kafka_shadow_validation_args[@]}" \
+        --output "$kafka_shadow_output_path"
+    fi
+    if [[ ${#postgres_shadow_validation_args[@]} -gt 0 ]]; then
+      production_run_release_binary "$binary" \
+        "${postgres_shadow_validation_args[@]}" \
+        --output "$postgres_shadow_output_path"
+    fi
   )
 }
 
@@ -583,6 +676,20 @@ final_app_canary_path="$output_dir/canaries/app-post-final-rollout.json"
 [[ "$(jq -r '.ready_for_deploy' "$final_app_canary_path")" == "true" ]] || die "app canary failed after final operator rollout"
 
 release_lock="$output_dir/role-runtime-release-lock.json"
+release_lock_shared_terraform_dir="$(trim "$(jq -r '.shared_services.terraform_dir // empty' "$shared_manifest")")"
+release_lock_queue_driver="$(trim "$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+release_lock_queue_shadow_driver="$(trim "$(jq -r '.shared_services.queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+release_lock_proof_queue_driver="$(trim "$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+release_lock_proof_queue_shadow_driver="$(trim "$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+release_lock_msk_retention_mode="$(trim "$(jq -r '.shared_services.msk.retention_mode // "auto"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')")"
+release_lock_msk_provisioned="$(jq -r 'if (.shared_services.msk.provisioned // ((.shared_services.kafka.bootstrap_brokers // "") != "")) then "true" else "false" end' "$shared_manifest")"
+release_lock_e2e_outputs_json="$(
+  find "$output_dir/e2e" -maxdepth 1 -type f -name 'shared-infra-e2e*.json' -exec basename {} \; \
+    | LC_ALL=C sort \
+    | jq -R . \
+    | jq -s .
+)"
+jq -e 'index("shared-infra-e2e.json")' <<<"$release_lock_e2e_outputs_json" >/dev/null || die "shared infra e2e primary output missing from preview release lock"
 jq -n \
   --arg workflow "reset-preview-role-runtime" \
   --arg inventory_path "$inventory" \
@@ -591,6 +698,14 @@ jq -n \
   --arg shared_proof_services_image_release_tag "$shared_proof_services_image_release_tag" \
   --arg wireguard_role_ami_release_tag "$wireguard_role_ami_release_tag" \
   --arg operator_stack_ami_release_tag "$operator_stack_ami_release_tag" \
+  --arg shared_queue_driver "$release_lock_queue_driver" \
+  --arg shared_queue_shadow_driver "$release_lock_queue_shadow_driver" \
+  --arg shared_proof_queue_driver "$release_lock_proof_queue_driver" \
+  --arg shared_proof_queue_shadow_driver "$release_lock_proof_queue_shadow_driver" \
+  --arg shared_terraform_dir "$release_lock_shared_terraform_dir" \
+  --arg shared_msk_retention_mode "$release_lock_msk_retention_mode" \
+  --arg shared_msk_provisioned "$release_lock_msk_provisioned" \
+  --argjson shared_infra_e2e_outputs "$release_lock_e2e_outputs_json" \
   --arg shared_manifest "$shared_manifest" \
   --arg app_deploy "$app_deploy" \
   --arg bridge_summary_path "$bridge_summary_path" \
@@ -608,6 +723,14 @@ jq -n \
       shared_proof_services_image_release_tag: $shared_proof_services_image_release_tag,
       wireguard_role_ami_release_tag: $wireguard_role_ami_release_tag,
       operator_stack_ami_release_tag: $operator_stack_ami_release_tag,
+      shared_queue_driver: $shared_queue_driver,
+      shared_queue_shadow_driver: ($shared_queue_shadow_driver | if length > 0 then . else null end),
+      shared_proof_queue_driver: $shared_proof_queue_driver,
+      shared_proof_queue_shadow_driver: ($shared_proof_queue_shadow_driver | if length > 0 then . else null end),
+      shared_terraform_dir: $shared_terraform_dir,
+      shared_msk_retention_mode: $shared_msk_retention_mode,
+      shared_msk_provisioned: ($shared_msk_provisioned == "true"),
+      shared_infra_e2e_outputs: $shared_infra_e2e_outputs,
       shared_manifest: $shared_manifest,
       app_deploy: $app_deploy,
       bridge_summary_path: $bridge_summary_path,

@@ -323,7 +323,7 @@ EOF
   assert_not_contains "$(cat "$log_file")" "nc -z " "postgres queue canary skips kafka socket checks"
   assert_eq "$(jq -r '.queue_driver' "$output_json")" "postgres" "shared canary reports queue driver"
   assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "skipped" "postgres queue canary skips kafka status"
-  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "postgres" "postgres queue canary explains kafka skip"
+  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "no kafka queue path selected" "postgres queue canary explains kafka skip"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue canary ready flag"
 
   rm -rf "$tmp"
@@ -521,6 +521,204 @@ EOF
   assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "proof shadow canary queue inspect status"
   assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "proof shadow canary keeps kafka health status"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "proof shadow canary remains deployable"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_canary_runs_postgres_queue_inspection_for_shared_shadow() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "kafka",
+      "shadow": {
+        "driver": "postgres"
+      }
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.alpha.internal:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      }
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  cat >"$fake_bin/queue-inspect" <<EOF
+#!/usr/bin/env bash
+printf 'queue-inspect %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws" "$fake_bin/queue-inspect"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "nc -z broker-1.alpha.internal 9098" "shared shadow canary still checks kafka primary"
+  assert_contains "$(cat "$log_file")" "queue-inspect --postgres-dsn-env CANARY_QUEUE_DSN" "shared shadow canary inspects postgres queue"
+  assert_eq "$(jq -r '.queue_driver' "$output_json")" "kafka" "shared shadow canary reports shared queue driver"
+  assert_eq "$(jq -r '.queue_shadow_driver' "$output_json")" "postgres" "shared shadow canary reports shared shadow driver"
+  assert_eq "$(jq -r '.postgres_queue_path_active' "$output_json")" "true" "shared shadow canary marks postgres queue path active"
+  assert_eq "$(jq -r '.kafka_path_active' "$output_json")" "true" "shared shadow canary marks kafka path active"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "shared shadow canary queue inspect status"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "shared shadow canary keeps kafka health status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "shared shadow canary remains deployable"
+
+  rm -rf "$tmp"
+}
+
+test_shared_services_canary_checks_kafka_for_shared_shadow() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "queue": {
+      "driver": "postgres",
+      "shadow": {
+        "driver": "kafka"
+      }
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.alpha.internal:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      }
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  cat >"$fake_bin/queue-inspect" <<EOF
+#!/usr/bin/env bash
+printf 'queue-inspect %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws" "$fake_bin/queue-inspect"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "queue-inspect --postgres-dsn-env CANARY_QUEUE_DSN" "shared kafka shadow canary inspects postgres primary"
+  assert_contains "$(cat "$log_file")" "nc -z broker-1.alpha.internal 9098" "shared kafka shadow canary checks kafka shadow"
+  assert_eq "$(jq -r '.queue_driver' "$output_json")" "postgres" "shared kafka shadow canary reports shared queue driver"
+  assert_eq "$(jq -r '.queue_shadow_driver' "$output_json")" "kafka" "shared kafka shadow canary reports shared shadow driver"
+  assert_eq "$(jq -r '.postgres_queue_path_active' "$output_json")" "true" "shared kafka shadow canary marks postgres queue path active"
+  assert_eq "$(jq -r '.kafka_path_active' "$output_json")" "true" "shared kafka shadow canary marks kafka path active"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "shared kafka shadow canary queue inspect status"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "shared kafka shadow canary keeps kafka health status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "shared kafka shadow canary remains deployable"
 
   rm -rf "$tmp"
 }
@@ -1274,6 +1472,8 @@ main() {
   test_shared_services_canary_accepts_postgres_queue_without_kafka
   test_shared_services_canary_runs_postgres_queue_inspection_when_configured
   test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow
+  test_shared_services_canary_runs_postgres_queue_inspection_for_shared_shadow
+  test_shared_services_canary_checks_kafka_for_shared_shadow
   test_shared_services_canary_allows_instance_profile_without_local_profile
   test_shared_services_canary_resolves_ipfs_auth_for_postgres_queue
   test_shared_services_canary_checks_roles_for_postgres_queue

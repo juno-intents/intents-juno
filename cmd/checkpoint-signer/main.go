@@ -95,11 +95,21 @@ func main() {
 		leaseName   = flag.String("lease-name", "checkpoint-signer", "lease name used for active signer selection")
 		leaseTTL    = flag.Duration("lease-ttl", 15*time.Second, "lease TTL for active signer selection")
 
-		queueDriver         = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
-		queueBrokers        = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
-		queuePostgresDSN    = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
-		queuePostgresDSNEnv = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
-		queueOutTopic       = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
+		queueDriver            = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|postgres|stdio")
+		queueBrokers           = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queuePostgresDSN       = flag.String("queue-postgres-dsn", "", "Postgres DSN for postgres queue driver (defaults to --postgres-dsn)")
+		queuePostgresDSNEnv    = flag.String("queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres queue driver")
+		queueOutTopic          = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
+		shadowQueueDriver      = flag.String("shadow-queue-driver", "", "optional shadow queue driver: kafka|postgres|stdio")
+		shadowQueueBrokers     = flag.String("shadow-queue-brokers", "", "comma-separated shadow queue brokers")
+		shadowQueuePostgresDSN = flag.String(
+			"shadow-queue-postgres-dsn",
+			"",
+			"Postgres DSN for postgres shadow queue driver (defaults to --postgres-dsn)",
+		)
+		shadowQueuePostgresDSNEnv = flag.String("shadow-queue-postgres-dsn-env", "", "env var containing Postgres DSN for postgres shadow queue driver")
+		shadowQueueRequired       = flag.Bool("shadow-queue-required", false, "fail checkpoint signatures when the shadow queue publish fails")
+		shadowQueueTimeout        = flag.Duration("shadow-queue-timeout", 2*time.Second, "timeout for optional shadow queue publishes")
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
@@ -199,20 +209,22 @@ func main() {
 		_ = leaseStore.Release(context.Background(), strings.TrimSpace(*leaseName), strings.TrimSpace(*ownerID))
 	}()
 
-	producerCfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
-		Driver:           *queueDriver,
-		Brokers:          queue.SplitCommaList(*queueBrokers),
-		PostgresDSN:      *queuePostgresDSN,
-		PostgresDSNEnv:   *queuePostgresDSNEnv,
-		StorePostgresDSN: *postgresDSN,
-	})
+	producer, err := checkpointSignerQueueProducer(ctx, checkpointSignerQueueProducerOptions{
+		Driver:               *queueDriver,
+		Brokers:              queue.SplitCommaList(*queueBrokers),
+		PostgresDSN:          *queuePostgresDSN,
+		PostgresDSNEnv:       *queuePostgresDSNEnv,
+		StorePostgresDSN:     *postgresDSN,
+		ShadowDriver:         *shadowQueueDriver,
+		ShadowBrokers:        queue.SplitCommaList(*shadowQueueBrokers),
+		ShadowPostgresDSN:    *shadowQueuePostgresDSN,
+		ShadowPostgresDSNEnv: *shadowQueuePostgresDSNEnv,
+		ShadowRequired:       *shadowQueueRequired,
+		ShadowTimeout:        *shadowQueueTimeout,
+		Log:                  log,
+	}, queue.NewProducerContext)
 	if err != nil {
 		log.Error("configure queue producer", "err", err)
-		os.Exit(2)
-	}
-	producer, err := queue.NewProducerContext(ctx, producerCfg)
-	if err != nil {
-		log.Error("init queue producer", "err", err)
 		os.Exit(2)
 	}
 	defer func() { _ = producer.Close() }()
@@ -409,6 +421,139 @@ type checkpointSignerQueueOptions struct {
 	PostgresDSN      string
 	PostgresDSNEnv   string
 	StorePostgresDSN string
+}
+
+type checkpointSignerQueueProducerOptions struct {
+	Driver               string
+	Brokers              []string
+	PostgresDSN          string
+	PostgresDSNEnv       string
+	StorePostgresDSN     string
+	ShadowDriver         string
+	ShadowBrokers        []string
+	ShadowPostgresDSN    string
+	ShadowPostgresDSNEnv string
+	ShadowRequired       bool
+	ShadowTimeout        time.Duration
+	Log                  *slog.Logger
+}
+
+type checkpointSignerQueueProducerFactory func(context.Context, queue.ProducerConfig) (queue.Producer, error)
+
+func checkpointSignerQueueProducer(ctx context.Context, opts checkpointSignerQueueProducerOptions, factory checkpointSignerQueueProducerFactory) (queue.Producer, error) {
+	if factory == nil {
+		factory = queue.NewProducerContext
+	}
+	primaryDriver := checkpointSignerEffectiveQueueDriver(opts.Driver)
+	shadowDriver := strings.ToLower(strings.TrimSpace(opts.ShadowDriver))
+	if shadowDriver != "" {
+		if !checkpointSignerQueueDriverSupported(shadowDriver) {
+			return nil, fmt.Errorf("unsupported shadow queue driver %q", opts.ShadowDriver)
+		}
+		if primaryDriver == shadowDriver {
+			return nil, errors.New("shadow queue driver must differ from primary queue driver")
+		}
+		if !opts.ShadowRequired && opts.ShadowTimeout <= 0 {
+			return nil, errors.New("--shadow-queue-timeout must be > 0 when optional --shadow-queue-driver is set")
+		}
+	} else if opts.ShadowRequired {
+		return nil, errors.New("--shadow-queue-required requires --shadow-queue-driver")
+	}
+
+	primaryCfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
+		Driver:           opts.Driver,
+		Brokers:          opts.Brokers,
+		PostgresDSN:      opts.PostgresDSN,
+		PostgresDSNEnv:   opts.PostgresDSNEnv,
+		StorePostgresDSN: opts.StorePostgresDSN,
+	})
+	if err != nil {
+		return nil, err
+	}
+	primary, err := factory(ctx, primaryCfg)
+	if err != nil {
+		return nil, err
+	}
+	if shadowDriver == "" {
+		return primary, nil
+	}
+
+	shadowCfg, err := checkpointSignerQueueProducerConfig(checkpointSignerQueueOptions{
+		Driver:           opts.ShadowDriver,
+		Brokers:          opts.ShadowBrokers,
+		PostgresDSN:      opts.ShadowPostgresDSN,
+		PostgresDSNEnv:   opts.ShadowPostgresDSNEnv,
+		StorePostgresDSN: opts.StorePostgresDSN,
+	})
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnShadowQueue("configure", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("configure shadow queue producer: %w", err)
+	}
+	shadowCtx := ctx
+	if !opts.ShadowRequired {
+		var cancel context.CancelFunc
+		shadowCtx, cancel = context.WithTimeout(ctx, opts.ShadowTimeout)
+		defer cancel()
+	}
+	shadow, err := factory(shadowCtx, shadowCfg)
+	if err != nil {
+		if !opts.ShadowRequired {
+			opts.warnShadowQueue("init", "", err)
+			return primary, nil
+		}
+		_ = primary.Close()
+		return nil, fmt.Errorf("init shadow queue producer: %w", err)
+	}
+	producer, err := queue.NewMirrorProducer(primary, shadow, queue.MirrorProducerConfig{
+		RequireShadow: opts.ShadowRequired,
+		ShadowTimeout: opts.ShadowTimeout,
+		ShadowErrorHandler: func(topic string, err error) {
+			opts.warnShadowQueue("publish", topic, err)
+		},
+	})
+	if err != nil {
+		_ = primary.Close()
+		_ = shadow.Close()
+		return nil, err
+	}
+	return producer, nil
+}
+
+func checkpointSignerEffectiveQueueDriver(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", queue.DriverKafka:
+		return queue.DriverKafka
+	case queue.DriverPostgres:
+		return queue.DriverPostgres
+	case queue.DriverStdio:
+		return queue.DriverStdio
+	default:
+		return strings.ToLower(strings.TrimSpace(driver))
+	}
+}
+
+func checkpointSignerQueueDriverSupported(driver string) bool {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case queue.DriverKafka, queue.DriverPostgres, queue.DriverStdio:
+		return true
+	default:
+		return false
+	}
+}
+
+func (opts checkpointSignerQueueProducerOptions) warnShadowQueue(stage string, topic string, err error) {
+	if err == nil || opts.Log == nil || opts.ShadowRequired {
+		return
+	}
+	attrs := []any{"stage", stage, "err", err}
+	if strings.TrimSpace(topic) != "" {
+		attrs = append(attrs, "topic", topic)
+	}
+	opts.Log.Warn("checkpoint signer shadow queue failed open", attrs...)
 }
 
 func checkpointSignerQueueProducerConfig(opts checkpointSignerQueueOptions) (queue.ProducerConfig, error) {

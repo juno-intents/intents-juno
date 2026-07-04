@@ -231,26 +231,104 @@ jobs:
           fi
           production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_deploy")" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
           checkpoint_postgres_dsn="$(production_env_first_value "$resolved_env" CHECKPOINT_POSTGRES_DSN APP_POSTGRES_DSN)"
+          queue_driver="$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')"
+          queue_shadow_driver="$(jq -r '.shared_services.queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')"
+          proof_queue_driver="$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]')"
+          proof_shadow_queue_driver="$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]')"
+          kafka_path_active="false"
+          postgres_path_active="false"
+          for selected_queue_driver in "$queue_driver" "$queue_shadow_driver" "$proof_queue_driver" "$proof_shadow_queue_driver"; do
+            case "$selected_queue_driver" in
+              "") ;;
+              kafka) kafka_path_active="true" ;;
+              postgres) postgres_path_active="true" ;;
+              *)
+                printf 'unsupported queue driver in shared manifest: %s\n' "$selected_queue_driver" >&2
+                exit 1
+                ;;
+            esac
+          done
           kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
           ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
           checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
           checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
           checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
-          required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics}"
+          required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,deposits.event.v2,withdrawals.requested.v2,${checkpoint_topics}"
+          shared_validation_args=(
+            --postgres-dsn "$checkpoint_postgres_dsn"
+          )
+          if [[ "$queue_driver" == "postgres" ]]; then
+            shared_validation_args+=(
+              --queue-driver "$queue_driver"
+              --queue-postgres-dsn "$checkpoint_postgres_dsn"
+            )
+          elif [[ "$queue_driver" == "kafka" ]]; then
+            shared_validation_args+=(
+              --kafka-brokers "$kafka_brokers"
+              --required-kafka-topics "$required_topics"
+            )
+          else
+            printf 'unsupported shared queue driver: %s\n' "$queue_driver" >&2
+            exit 1
+          fi
+          shared_validation_args+=(
+            --checkpoint-ipfs-api-url "$ipfs_api_url"
+            --checkpoint-operators "$checkpoint_operators"
+            --checkpoint-threshold "$checkpoint_threshold"
+          )
           ./.ci/bin/shared-infra-e2e_linux_amd64 \
-            --postgres-dsn "$checkpoint_postgres_dsn" \
-            --kafka-brokers "$kafka_brokers" \
-            --required-kafka-topics "$required_topics" \
-            --checkpoint-ipfs-api-url "$ipfs_api_url" \
-            --checkpoint-operators "$checkpoint_operators" \
-            --checkpoint-threshold "$checkpoint_threshold" \
+            "${shared_validation_args[@]}" \
             --output .ci/out/e2e/shared-infra-e2e.json
+          if [[ "$queue_driver" == "postgres" && "$kafka_path_active" == "true" ]]; then
+            [[ -n "$kafka_brokers" ]] || {
+              printf 'shared manifest is missing shared_services.kafka.bootstrap_brokers for kafka shadow validation\n' >&2
+              exit 1
+            }
+            ./.ci/bin/shared-infra-e2e_linux_amd64 \
+              --postgres-dsn "$checkpoint_postgres_dsn" \
+              --queue-driver kafka \
+              --kafka-brokers "$kafka_brokers" \
+              --required-kafka-topics "$required_topics" \
+              --checkpoint-ipfs-api-url "$ipfs_api_url" \
+              --checkpoint-operators "$checkpoint_operators" \
+              --checkpoint-threshold "$checkpoint_threshold" \
+              --output .ci/out/e2e/shared-infra-e2e.kafka-shadow.json
+          fi
+          if [[ "$queue_driver" == "kafka" && "$postgres_path_active" == "true" ]]; then
+            ./.ci/bin/shared-infra-e2e_linux_amd64 \
+              --postgres-dsn "$checkpoint_postgres_dsn" \
+              --queue-driver postgres \
+              --queue-postgres-dsn "$checkpoint_postgres_dsn" \
+              --checkpoint-ipfs-api-url "$ipfs_api_url" \
+              --checkpoint-operators "$checkpoint_operators" \
+              --checkpoint-threshold "$checkpoint_threshold" \
+              --output .ci/out/e2e/shared-infra-e2e.postgres-shadow.json
+          fi
 
       - name: Write Release Lock
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci/out
+          environment="$(jq -r '.environment' .ci/out/inventory.resolved.json)"
+          shared_manifest=".ci/preview-output/${environment}/shared-manifest.json"
+          shared_terraform_dir="$(jq -r '.shared_services.terraform_dir // empty' "$shared_manifest")"
+          queue_driver="$(jq -r '.shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          queue_shadow_driver="$(jq -r '.shared_services.queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          proof_queue_driver="$(jq -r '.shared_services.proof_queue.driver // .shared_services.queue.driver // "kafka"' "$shared_manifest" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          proof_shadow_queue_driver="$(jq -r '.shared_services.proof_queue.shadow.driver // empty' "$shared_manifest" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          msk_retention_mode="$(jq -r '.shared_services.msk.retention_mode // "auto"' "$shared_manifest" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          msk_provisioned="$(jq -r 'if (.shared_services.msk.provisioned // ((.shared_services.kafka.bootstrap_brokers // "") != "")) then "true" else "false" end' "$shared_manifest")"
+          shared_infra_e2e_outputs_json="$(
+            find .ci/out/e2e -maxdepth 1 -type f -name 'shared-infra-e2e*.json' -exec basename {} \; \
+              | LC_ALL=C sort \
+              | jq -R . \
+              | jq -s .
+          )"
+          jq -e 'index("shared-infra-e2e.json")' <<<"$shared_infra_e2e_outputs_json" >/dev/null || {
+            echo "shared infra e2e primary output missing from preview lock" >&2
+            exit 1
+          }
           jq -n \
             --arg workflow "deploy-preview-role-runtime" \
             --arg inventory_path "${{ inputs.inventory_path }}" \
@@ -259,6 +337,14 @@ jobs:
             --arg shared_proof_services_image_release_tag "${{ inputs.shared_proof_services_image_release_tag }}" \
             --arg wireguard_role_ami_release_tag "${{ inputs.wireguard_role_ami_release_tag }}" \
             --arg operator_stack_ami_release_tag "${{ inputs.operator_stack_ami_release_tag }}" \
+            --arg shared_queue_driver "$queue_driver" \
+            --arg shared_queue_shadow_driver "$queue_shadow_driver" \
+            --arg shared_proof_queue_driver "$proof_queue_driver" \
+            --arg shared_proof_queue_shadow_driver "$proof_shadow_queue_driver" \
+            --arg shared_terraform_dir "$shared_terraform_dir" \
+            --arg shared_msk_retention_mode "$msk_retention_mode" \
+            --arg shared_msk_provisioned "$msk_provisioned" \
+            --argjson shared_infra_e2e_outputs "$shared_infra_e2e_outputs_json" \
             --arg preview_run_id "${{ github.run_id }}" \
             --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             '{
@@ -269,6 +355,14 @@ jobs:
               shared_proof_services_image_release_tag: $shared_proof_services_image_release_tag,
               wireguard_role_ami_release_tag: $wireguard_role_ami_release_tag,
               operator_stack_ami_release_tag: $operator_stack_ami_release_tag,
+              shared_queue_driver: $shared_queue_driver,
+              shared_queue_shadow_driver: ($shared_queue_shadow_driver | if length > 0 then . else null end),
+              shared_proof_queue_driver: $shared_proof_queue_driver,
+              shared_proof_queue_shadow_driver: ($shared_proof_queue_shadow_driver | if length > 0 then . else null end),
+              shared_terraform_dir: $shared_terraform_dir,
+              shared_msk_retention_mode: $shared_msk_retention_mode,
+              shared_msk_provisioned: ($shared_msk_provisioned == "true"),
+              shared_infra_e2e_outputs: $shared_infra_e2e_outputs,
               preview_run_id: $preview_run_id,
               preview_completed_at: $preview_completed_at
             }' > .ci/out/role-runtime-release-lock.json
@@ -281,4 +375,4 @@ jobs:
             .ci/out/role-runtime-release-lock.json
             .ci/out/canaries/shared-services.json
             .ci/out/canaries/app.json
-            .ci/out/e2e/shared-infra-e2e.json
+            .ci/out/e2e/shared-infra-e2e*.json
