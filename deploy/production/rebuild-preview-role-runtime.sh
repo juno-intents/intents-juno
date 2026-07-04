@@ -583,9 +583,11 @@ fi
 app_deploy="$output_root/$env_slug/app/app-deploy.json"
 shared_manifest="$output_root/$env_slug/shared-manifest.json"
 bridge_summary_path="$output_root/$env_slug/bridge-summary.json"
+preview_operator_roles_inventory="$output_root/$env_slug/inventory.preview-operator-roles.json"
 [[ -f "$app_deploy" ]] || die "rebuilt preview app deploy manifest not found: $app_deploy"
 [[ -f "$shared_manifest" ]] || die "rebuilt preview shared manifest not found: $shared_manifest"
 [[ -f "$bridge_summary_path" ]] || die "rebuilt preview bridge summary not found: $bridge_summary_path"
+[[ -f "$preview_operator_roles_inventory" ]] || die "rebuilt preview operator role inventory not found: $preview_operator_roles_inventory"
 
 "$provision_app_edge_bin" --app-deploy "$app_deploy"
 "$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
@@ -618,7 +620,7 @@ checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.pack
 operator_topics="deposits.event.v2,withdrawals.requested.v2"
 required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics},${operator_topics}"
 "$roll_preview_operators_bin" \
-  --inventory "$resolved_inventory" \
+  --inventory "$preview_operator_roles_inventory" \
   --shared-manifest "$shared_manifest" \
   --dkg-summary "$dkg_summary" \
   --operator-stack-ami-release-tag "$operator_stack_ami_release_tag" \
@@ -642,7 +644,7 @@ run_shared_infra_e2e \
 wireguard_backoffice_refresh_path="$output_dir/wireguard-backoffice.json"
 wireguard_backoffice_args=(
   "$refresh_preview_wireguard_backoffice_bin"
-  --inventory "$resolved_inventory" \
+  --inventory "$preview_operator_roles_inventory" \
   --bridge-summary "$bridge_summary_path" \
   --dkg-summary "$dkg_summary" \
   --app-deploy "$app_deploy" \

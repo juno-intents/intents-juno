@@ -63,6 +63,8 @@ data "aws_vpc" "selected" {
   id = var.vpc_id
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_subnet" "shared" {
   for_each = toset(var.shared_subnet_ids)
   id       = each.value
@@ -294,6 +296,73 @@ locals {
   wireguard_lb_name            = trim(substr("${local.resource_slug}-wg", 0, 32), "-")
   wireguard_target_group_name  = trim(substr("${local.resource_slug}-wg-udp", 0, 32), "-")
   wireguard_launch_name_prefix = trim(substr("${local.resource_slug}-wg-", 0, 32), "-")
+
+  preview_operator_fleet_requested   = var.preview_operator_fleet_enabled
+  preview_operator_fleet_enabled     = local.preview_operator_fleet_requested && var.deployment_id == "preview"
+  preview_operator_count             = local.preview_operator_fleet_enabled ? var.preview_operator_count : 0
+  preview_operator_ami_id            = trimspace(var.preview_operator_ami_id)
+  preview_operator_public_subnet_ids = sort(var.preview_operator_public_subnet_ids)
+  preview_operator_launch_name_prefix = trim(substr(
+    "${local.resource_slug}-operator-",
+    0,
+    32,
+  ), "-")
+  preview_operator_security_group_ids = local.preview_operator_count > 0 ? [aws_security_group.preview_operator[0].id] : []
+  shared_service_client_security_group_ids = distinct(concat(
+    var.shared_service_client_security_group_ids,
+    local.preview_operator_security_group_ids,
+  ))
+  shared_ipfs_client_security_group_ids = distinct(concat(
+    var.shared_ipfs_client_security_group_ids,
+    local.preview_operator_security_group_ids,
+  ))
+  preview_operator_runtime_config_secret_arns = [
+    for secret_id in var.preview_operator_runtime_config_secret_ids :
+    startswith(trimspace(secret_id), "arn:") ? trimspace(secret_id) : "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${trimspace(secret_id)}*"
+    if trimspace(secret_id) != ""
+  ]
+  preview_operator_runtime_config_secret_kms_key_arns = sort(distinct([
+    for arn in var.preview_operator_runtime_config_secret_kms_key_arns : trimspace(arn)
+    if trimspace(arn) != ""
+  ]))
+  preview_operator_runtime_material_bucket_names = sort(distinct([
+    for bucket in var.preview_operator_runtime_material_bucket_names : trimspace(bucket)
+    if trimspace(bucket) != ""
+  ]))
+  preview_operator_checkpoint_blob_bucket_names = sort(distinct([
+    for bucket in var.preview_operator_checkpoint_blob_bucket_names : trimspace(bucket)
+    if trimspace(bucket) != ""
+  ]))
+  preview_operator_runtime_material_kms_key_arns = sort(distinct([
+    for arn in var.preview_operator_runtime_material_kms_key_arns : trimspace(arn)
+    if trimspace(arn) != ""
+  ]))
+  preview_operator_checkpoint_blob_kms_key_arns = sort(distinct([
+    for arn in var.preview_operator_checkpoint_blob_kms_key_arns : trimspace(arn)
+    if trimspace(arn) != ""
+  ]))
+  preview_operator_checkpoint_signer_kms_key_arns = sort(distinct([
+    for arn in var.preview_operator_checkpoint_signer_kms_key_arns : trimspace(arn)
+    if trimspace(arn) != ""
+  ]))
+  preview_operator_runtime_material_bucket_arns = [
+    for bucket in local.preview_operator_runtime_material_bucket_names : "arn:aws:s3:::${bucket}"
+  ]
+  preview_operator_runtime_material_object_arns = [
+    for bucket in local.preview_operator_runtime_material_bucket_names : "arn:aws:s3:::${bucket}/*"
+  ]
+  preview_operator_checkpoint_blob_bucket_arns = [
+    for bucket in local.preview_operator_checkpoint_blob_bucket_names : "arn:aws:s3:::${bucket}"
+  ]
+  preview_operator_checkpoint_blob_object_arns = [
+    for bucket in local.preview_operator_checkpoint_blob_bucket_names : "arn:aws:s3:::${bucket}/*"
+  ]
+  preview_operator_kms_key_arns = sort(distinct(concat(
+    local.preview_operator_runtime_config_secret_kms_key_arns,
+    local.preview_operator_runtime_material_kms_key_arns,
+    local.preview_operator_checkpoint_blob_kms_key_arns,
+    local.preview_operator_checkpoint_signer_kms_key_arns,
+  )))
 }
 
 check "distinct_proof_secret_arns" {
@@ -346,6 +415,55 @@ check "shared_wireguard_max_capacity_bounds" {
   assert {
     condition     = var.shared_wireguard_max_size >= var.shared_wireguard_desired_capacity
     error_message = "shared wireguard max size must be >= desired capacity."
+  }
+}
+
+check "preview_operator_fleet_preview_only" {
+  assert {
+    condition     = !local.preview_operator_fleet_requested || var.deployment_id == "preview"
+    error_message = "preview_operator_fleet_enabled can only be true when deployment_id is preview."
+  }
+}
+
+check "preview_operator_fleet_inputs" {
+  assert {
+    condition = !local.preview_operator_fleet_enabled || (
+      local.preview_operator_count > 0 &&
+      local.preview_operator_ami_id != "" &&
+      length(local.preview_operator_public_subnet_ids) > 0 &&
+      (length(var.preview_operator_client_cidr_blocks) + length(var.preview_operator_client_security_group_ids)) > 0 &&
+      length(local.preview_operator_runtime_config_secret_arns) > 0 &&
+      length(local.preview_operator_runtime_material_bucket_names) > 0 &&
+      length(local.preview_operator_checkpoint_signer_kms_key_arns) > 0
+    )
+    error_message = "preview operator fleet requires count, AMI, public subnets, client CIDRs or security groups, runtime config secrets, runtime material buckets, and checkpoint signer KMS keys."
+  }
+}
+
+resource "terraform_data" "preview_operator_fleet_guard" {
+  count = local.preview_operator_fleet_requested ? 1 : 0
+
+  input = {
+    deployment_id = var.deployment_id
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.deployment_id == "preview"
+      error_message = "preview_operator_fleet_enabled can only be true when deployment_id is preview."
+    }
+    precondition {
+      condition = !local.preview_operator_fleet_enabled || (
+        local.preview_operator_count > 0 &&
+        local.preview_operator_ami_id != "" &&
+        length(local.preview_operator_public_subnet_ids) > 0 &&
+        (length(var.preview_operator_client_cidr_blocks) + length(var.preview_operator_client_security_group_ids)) > 0 &&
+        length(local.preview_operator_runtime_config_secret_arns) > 0 &&
+        length(local.preview_operator_runtime_material_bucket_names) > 0 &&
+        length(local.preview_operator_checkpoint_signer_kms_key_arns) > 0
+      )
+      error_message = "preview operator fleet requires count, AMI, public subnets, client CIDRs or security groups, runtime config secrets, runtime material buckets, and checkpoint signer KMS keys."
+    }
   }
 }
 
@@ -414,7 +532,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = toset(var.shared_service_client_security_group_ids)
+    for_each = toset(local.shared_service_client_security_group_ids)
     content {
       description     = "Postgres from shared-service client security groups"
       from_port       = var.shared_postgres_port
@@ -447,7 +565,7 @@ resource "aws_security_group" "shared" {
   }
 
   dynamic "ingress" {
-    for_each = local.shared_msk_provisioned ? toset(var.shared_service_client_security_group_ids) : toset([])
+    for_each = local.shared_msk_provisioned ? toset(local.shared_service_client_security_group_ids) : toset([])
     content {
       description     = "MSK IAM bootstrap from shared-service client security groups"
       from_port       = var.shared_kafka_port
@@ -477,6 +595,413 @@ resource "aws_security_group" "shared" {
   }
 
   tags = local.common_tags
+}
+
+resource "aws_security_group" "preview_operator" {
+  count       = local.preview_operator_count > 0 ? 1 : 0
+  name        = "${local.resource_name}-preview-operator-sg"
+  description = "Security group for intents-juno preview operator hosts"
+  vpc_id      = data.aws_vpc.selected.id
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_cidr_blocks)
+    content {
+      description = "SSH from approved preview operator clients"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_security_group_ids)
+    content {
+      description     = "SSH from approved preview operator client security groups"
+      from_port       = 22
+      to_port         = 22
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_cidr_blocks)
+    content {
+      description = "Juno RPC from approved preview operator clients"
+      from_port   = 18232
+      to_port     = 18232
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_security_group_ids)
+    content {
+      description     = "Juno RPC from approved preview operator client security groups"
+      from_port       = 18232
+      to_port         = 18232
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_cidr_blocks)
+    content {
+      description = "Operator health from approved preview operator clients"
+      from_port   = 8080
+      to_port     = 8080
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_security_group_ids)
+    content {
+      description     = "Operator health from approved preview operator client security groups"
+      from_port       = 8080
+      to_port         = 8080
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_cidr_blocks)
+    content {
+      description = "Operator signer endpoints from approved preview operator clients"
+      from_port   = var.preview_operator_base_port
+      to_port     = var.preview_operator_base_port + local.preview_operator_count - 1
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.preview_operator_client_security_group_ids)
+    content {
+      description     = "Operator signer endpoints from approved preview operator client security groups"
+      from_port       = var.preview_operator_base_port
+      to_port         = var.preview_operator_base_port + local.preview_operator_count - 1
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
+  ingress {
+    description = "Operator distributed DKG admin traffic"
+    from_port   = 8443
+    to_port     = 8443
+    protocol    = "tcp"
+    self        = true
+  }
+
+  ingress {
+    description = "Operator distributed signer traffic"
+    from_port   = var.preview_operator_base_port
+    to_port     = var.preview_operator_base_port + max(local.preview_operator_count, 1) + 4
+    protocol    = "tcp"
+    self        = true
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+data "aws_iam_policy_document" "preview_operator_assume_role" {
+  count = local.preview_operator_count > 0 ? 1 : 0
+
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "preview_operator" {
+  count              = local.preview_operator_count > 0 ? 1 : 0
+  name               = "${local.resource_name}-preview-operator"
+  assume_role_policy = data.aws_iam_policy_document.preview_operator_assume_role[0].json
+  tags               = local.common_tags
+}
+
+data "aws_iam_policy_document" "preview_operator_access" {
+  count = local.preview_operator_count > 0 ? 1 : 0
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_runtime_config_secret_arns) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorRuntimeConfigSecretRead"
+      actions = [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+      ]
+      resources = local.preview_operator_runtime_config_secret_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_runtime_config_secret_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorRuntimeConfigSecretKMS"
+      actions = [
+        "kms:Decrypt",
+        "kms:DescribeKey",
+      ]
+      resources = local.preview_operator_runtime_config_secret_kms_key_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_runtime_material_bucket_names) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorRuntimeMaterialRead"
+      actions = [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+      ]
+      resources = local.preview_operator_runtime_material_bucket_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_runtime_material_bucket_names) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorRuntimeMaterialObjectRead"
+      actions = [
+        "s3:GetObject",
+      ]
+      resources = local.preview_operator_runtime_material_object_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_checkpoint_blob_bucket_names) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorCheckpointBlobBucketAccess"
+      actions = [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads",
+      ]
+      resources = local.preview_operator_checkpoint_blob_bucket_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_checkpoint_blob_bucket_names) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorCheckpointBlobObjectAccess"
+      actions = [
+        "s3:AbortMultipartUpload",
+        "s3:GetObject",
+        "s3:ListMultipartUploadParts",
+        "s3:PutObject",
+      ]
+      resources = local.preview_operator_checkpoint_blob_object_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_runtime_material_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorRuntimeMaterialKMS"
+      actions = [
+        "kms:Decrypt",
+        "kms:DescribeKey",
+      ]
+      resources = local.preview_operator_runtime_material_kms_key_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_checkpoint_blob_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorCheckpointBlobKMS"
+      actions = [
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey*",
+        "kms:ReEncrypt*",
+      ]
+      resources = local.preview_operator_checkpoint_blob_kms_key_arns
+    }
+  }
+
+  dynamic "statement" {
+    for_each = length(local.preview_operator_checkpoint_signer_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid = "AllowPreviewOperatorCheckpointSignerKMS"
+      actions = [
+        "kms:DescribeKey",
+        "kms:GetPublicKey",
+        "kms:Sign",
+      ]
+      resources = local.preview_operator_checkpoint_signer_kms_key_arns
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "preview_operator_access" {
+  count  = local.preview_operator_count > 0 ? 1 : 0
+  name   = "${local.resource_name}-preview-operator-access"
+  role   = aws_iam_role.preview_operator[0].id
+  policy = data.aws_iam_policy_document.preview_operator_access[0].json
+}
+
+resource "aws_iam_role_policy_attachment" "preview_operator_ssm_managed_instance_core" {
+  count      = local.preview_operator_count > 0 ? 1 : 0
+  role       = aws_iam_role.preview_operator[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "preview_operator" {
+  count = local.preview_operator_count > 0 ? 1 : 0
+  name  = "${local.resource_name}-preview-operator"
+  role  = aws_iam_role.preview_operator[0].name
+}
+
+resource "aws_launch_template" "preview_operator" {
+  count = local.preview_operator_count
+
+  name_prefix            = "${local.preview_operator_launch_name_prefix}${count.index + 1}-"
+  image_id               = local.preview_operator_ami_id
+  instance_type          = var.preview_operator_instance_type
+  update_default_version = true
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.preview_operator[0].name
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  network_interfaces {
+    associate_public_ip_address = var.preview_operator_associate_public_ip_address
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.preview_operator[0].id]
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = var.preview_operator_root_volume_size_gb
+      delete_on_termination = true
+      encrypted             = true
+    }
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl jq unzip rsync age
+  EOF
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-operator-${count.index + 1}"
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-operator-${count.index + 1}"
+    })
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_autoscaling_group" "preview_operator" {
+  count = local.preview_operator_count
+
+  name                = "${local.resource_name}-operator-${count.index + 1}"
+  min_size            = 1
+  max_size            = 1
+  desired_capacity    = 1
+  vpc_zone_identifier = local.preview_operator_public_subnet_ids
+
+  health_check_type         = "EC2"
+  health_check_grace_period = 120
+
+  launch_template {
+    id      = aws_launch_template.preview_operator[count.index].id
+    version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+
+    preferences {
+      instance_warmup        = 120
+      min_healthy_percentage = 0
+    }
+
+    triggers = ["launch_template"]
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${local.resource_name}-operator-${count.index + 1}"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = local.common_tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.preview_operator_ssm_managed_instance_core,
+  ]
+}
+
+data "aws_instances" "preview_operator" {
+  count = local.preview_operator_count
+
+  instance_state_names = ["pending", "running", "stopped", "stopping"]
+
+  filter {
+    name   = "tag:aws:autoscaling:groupName"
+    values = [aws_autoscaling_group.preview_operator[count.index].name]
+  }
+
+  depends_on = [aws_autoscaling_group.preview_operator]
+}
+
+data "aws_instance" "preview_operator" {
+  count = local.preview_operator_count
+
+  instance_id = one(data.aws_instances.preview_operator[count.index].ids)
+
+  depends_on = [data.aws_instances.preview_operator]
 }
 
 resource "aws_security_group" "ipfs" {
@@ -520,7 +1045,7 @@ resource "aws_security_group" "ipfs_lb" {
   }
 
   dynamic "ingress" {
-    for_each = toset(var.shared_ipfs_client_security_group_ids)
+    for_each = toset(local.shared_ipfs_client_security_group_ids)
     content {
       description     = "IPFS API from approved client security groups"
       from_port       = var.shared_ipfs_api_port

@@ -35,7 +35,8 @@ write_operator_deploy_fixture() {
     "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/original-runtime-$operator_index"
   },
   "runtime_config_secret_id": "original/op$operator_index/runtime-config",
-  "runtime_config_secret_region": "us-east-1"
+  "runtime_config_secret_region": "us-east-1",
+  "runtime_config_secret_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/original-config-$operator_index"
 }
 JSON
 }
@@ -62,6 +63,7 @@ write_operator_handoff_fixture() {
   },
   "runtime_config_secret_id": "mainnet/op$operator_index/runtime-config",
   "runtime_config_secret_region": "us-east-1",
+  "runtime_config_secret_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/final-config-$operator_index",
   "access": {
     "user_name": "mainnet-op$operator_index-runtime-access",
     "access_key_id": "AKIAEXAMPLE$operator_index",
@@ -114,6 +116,7 @@ JSON
   assert_eq "$(jq -r '.operator_address' "$handoff_dir/operators/$op2/operator-deploy.json")" "0x8888888888888888888888888888888888888888" "apply updates the second operator address"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/final-1" "apply updates the first operator checkpoint signer kms key"
   assert_eq "$(jq -r '.runtime_config_secret_id' "$handoff_dir/operators/$op2/operator-deploy.json")" "mainnet/op2/runtime-config" "apply updates the second runtime config secret id"
+  assert_eq "$(jq -r '.runtime_config_secret_kms_key_id' "$handoff_dir/operators/$op2/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/final-config-2" "apply updates the second runtime config secret kms key id"
   assert_eq "$(jq -r '.withdraw_coordinator_juno_wallet_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "wallet-mainnet-1-coordinator" "apply updates the first coordinator wallet id"
   assert_eq "$(jq -r '.withdraw_finalizer_juno_scan_wallet_id' "$handoff_dir/operators/$op2/operator-deploy.json")" "wallet-mainnet-2-finalizer" "apply updates the second finalizer wallet id"
   assert_eq "$(jq -r '.deposit_scan_juno_scan_wallet_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "wallet-mainnet-1-finalizer" "apply derives the deposit scan wallet id from the returned handoff"

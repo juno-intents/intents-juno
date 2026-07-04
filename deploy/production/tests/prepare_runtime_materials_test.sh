@@ -295,6 +295,7 @@ JSON
   assert_contains "$(cat "$aws_log")" "secretsmanager create-secret --name mainnet/op1/runtime-config --secret-string" "runtime material setup creates the runtime config secret"
   assert_contains "$(cat "$aws_log")" "--kms-key-id arn:aws:kms:us-east-1:021490342184:key/runtime-config-key" "runtime material setup uses the provisioned runtime-config kms key arn for the secret"
   assert_eq "$(jq -r '.runtime_material_ref.kms_key_id' "$output_json")" "arn:aws:kms:us-east-1:021490342184:key/runtime-material-key" "runtime material setup emits the resolved runtime-material kms key arn"
+  assert_eq "$(jq -r '.runtime_config_secret_kms_key_id' "$output_json")" "arn:aws:kms:us-east-1:021490342184:key/runtime-config-key" "runtime material setup emits the resolved runtime-config secret kms key arn"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id // empty' "$output_json")" "" "runtime material setup leaves checkpoint signer kms key empty when not requested"
 
   rm -rf "$tmp"

@@ -275,5 +275,13 @@ jq \
         .shared_services.live_e2e = (.shared_services.live_e2e // {})
         | .shared_services.live_e2e.operator_ami_id = $operator_stack_ami_id
       else .
-      end
+	      end
+	    | if $operator_stack_ami_id != ""
+	         and (.shared_services.terraform_dir // "") == "deploy/shared/terraform/production-shared"
+	         and (.environment // "") == "preview"
+	         and (.shared_services.preview_operator_fleet.enabled // false) == true then
+	        .shared_services.preview_operator_fleet = (.shared_services.preview_operator_fleet // {})
+	        | .shared_services.preview_operator_fleet.ami_id = $operator_stack_ami_id
+	      else .
+	      end
   ' "$inventory" >"$output"

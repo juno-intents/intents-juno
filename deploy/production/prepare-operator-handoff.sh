@@ -350,6 +350,7 @@ jq -n \
     runtime_material_ref: $runtime_manifest[0].runtime_material_ref,
     runtime_config_secret_id: $runtime_manifest[0].runtime_config_secret_id,
     runtime_config_secret_region: $runtime_manifest[0].runtime_config_secret_region,
+    runtime_config_secret_kms_key_id: $runtime_manifest[0].runtime_config_secret_kms_key_id,
     withdraw_coordinator_juno_wallet_id: $withdraw_coordinator_juno_wallet_id,
     withdraw_finalizer_juno_scan_wallet_id: $withdraw_finalizer_juno_scan_wallet_id,
     access: {

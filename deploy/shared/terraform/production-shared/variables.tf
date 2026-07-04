@@ -53,6 +53,123 @@ variable "shared_ipfs_client_security_group_ids" {
   default     = []
 }
 
+variable "preview_operator_fleet_enabled" {
+  description = "Whether to provision preview-only operator ASGs in production-shared."
+  type        = bool
+  default     = false
+}
+
+variable "preview_operator_count" {
+  description = "Number of preview operator hosts to provision when preview_operator_fleet_enabled=true."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.preview_operator_count >= 0
+    error_message = "preview_operator_count must be >= 0."
+  }
+}
+
+variable "preview_operator_ami_id" {
+  description = "Pinned AMI ID for preview operator hosts."
+  type        = string
+  default     = ""
+}
+
+variable "preview_operator_instance_type" {
+  description = "EC2 instance type for preview operator hosts."
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "preview_operator_root_volume_size_gb" {
+  description = "Root EBS size in GiB for each preview operator host."
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.preview_operator_root_volume_size_gb >= 20
+    error_message = "preview_operator_root_volume_size_gb must be at least 20."
+  }
+}
+
+variable "preview_operator_public_subnet_ids" {
+  description = "Public subnet IDs used by preview operator ASGs."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_associate_public_ip_address" {
+  description = "Whether preview operator hosts receive public IPv4 addresses."
+  type        = bool
+  default     = true
+}
+
+variable "preview_operator_base_port" {
+  description = "First preview operator gRPC TCP port used for distributed signer traffic."
+  type        = number
+  default     = 18443
+
+  validation {
+    condition     = var.preview_operator_base_port >= 1 && var.preview_operator_base_port <= 65535
+    error_message = "preview_operator_base_port must be in the range [1, 65535]."
+  }
+}
+
+variable "preview_operator_client_cidr_blocks" {
+  description = "CIDR blocks allowed to reach preview operator SSH, health, Juno RPC, and signer ports."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_client_security_group_ids" {
+  description = "Security groups allowed to reach preview operator SSH, health, Juno RPC, and signer ports."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_runtime_config_secret_ids" {
+  description = "Secrets Manager secret IDs or ARNs the preview operators may read for runtime configuration."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_runtime_config_secret_kms_key_arns" {
+  description = "KMS key ARNs used to decrypt preview operator runtime configuration secrets."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_runtime_material_bucket_names" {
+  description = "S3 bucket names containing preview operator runtime material archives."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_runtime_material_kms_key_arns" {
+  description = "KMS key ARNs used to decrypt preview operator runtime material archives."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_checkpoint_blob_bucket_names" {
+  description = "S3 bucket names used by preview operators for checkpoint blob storage."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_checkpoint_blob_kms_key_arns" {
+  description = "KMS key ARNs used to encrypt preview operator checkpoint blobs."
+  type        = list(string)
+  default     = []
+}
+
+variable "preview_operator_checkpoint_signer_kms_key_arns" {
+  description = "KMS key ARNs preview operators may use for checkpoint signing."
+  type        = list(string)
+  default     = []
+}
+
 variable "shared_postgres_user" {
   description = "Aurora Postgres username for shared services."
   type        = string

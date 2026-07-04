@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block critical_hmac_random critical_hmac_secret critical_hmac_version key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg proof_role_access wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block critical_hmac_random critical_hmac_secret critical_hmac_version key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg proof_role_access wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template preview_operator_launch_template preview_operator_asg preview_operator_access preview_operator_checkpoint_blob_bucket_access preview_operator_checkpoint_blob_object_access
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
@@ -53,6 +53,31 @@ main() {
     /resource "aws_launch_template" "wireguard_role" \{/ { in_block = 1 }
     in_block { print }
     in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  preview_operator_launch_template="$(awk '
+    /resource "aws_launch_template" "preview_operator" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  preview_operator_asg="$(awk '
+    /resource "aws_autoscaling_group" "preview_operator" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  preview_operator_access="$(awk '
+    /data "aws_iam_policy_document" "preview_operator_access" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  preview_operator_checkpoint_blob_bucket_access="$(awk '
+    /sid = "AllowPreviewOperatorCheckpointBlobBucketAccess"/ { in_block = 1 }
+    in_block { print }
+    in_block && /resources = local.preview_operator_checkpoint_blob_bucket_arns/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  preview_operator_checkpoint_blob_object_access="$(awk '
+    /sid = "AllowPreviewOperatorCheckpointBlobObjectAccess"/ { in_block = 1 }
+    in_block { print }
+    in_block && /resources = local.preview_operator_checkpoint_blob_object_arns/ { exit }
   ' "$SCRIPT_DIR/main.tf")"
   password_block="$(awk '
     /variable "shared_postgres_password" \{/ { in_block = 1 }
@@ -407,6 +432,49 @@ main() {
   assert_contains "$monitoring_tf" 'metric_name         = "TSSSessionSaturation"' "production-shared wires the tss session saturation metric name"
   assert_contains "$monitoring_tf" 'operations_metric_namespace = "IntentsJuno/Operations"' "production-shared defines the custom operations metric namespace"
   assert_contains "$monitoring_tf" 'namespace           = local.operations_metric_namespace' "production-shared uses the custom operations metric namespace"
+
+  assert_contains "$variables_tf" 'variable "preview_operator_fleet_enabled"' "production-shared exposes an explicit preview operator fleet gate"
+  assert_contains "$variables_tf" 'variable "preview_operator_count"' "production-shared exposes preview operator count"
+  assert_contains "$variables_tf" 'variable "preview_operator_ami_id"' "production-shared exposes preview operator AMI input"
+  assert_contains "$variables_tf" $'variable "preview_operator_instance_type" {\n  description = "EC2 instance type for preview operator hosts."\n  type        = string\n  default     = "t3.medium"' "production-shared defaults preview operators to t3.medium"
+  assert_contains "$variables_tf" $'variable "preview_operator_root_volume_size_gb" {\n  description = "Root EBS size in GiB for each preview operator host."\n  type        = number\n  default     = 40' "production-shared defaults preview operator roots to 40 GiB"
+  assert_contains "$variables_tf" 'variable "preview_operator_public_subnet_ids"' "production-shared requires explicit preview operator public subnets"
+  assert_contains "$variables_tf" 'variable "preview_operator_runtime_config_secret_ids"' "production-shared accepts scoped runtime config secrets for preview operators"
+  assert_contains "$variables_tf" 'variable "preview_operator_runtime_config_secret_kms_key_arns"' "production-shared accepts scoped runtime config secret KMS keys for preview operators"
+  assert_contains "$variables_tf" 'variable "preview_operator_runtime_material_bucket_names"' "production-shared accepts scoped runtime material buckets for preview operators"
+  assert_contains "$variables_tf" 'variable "preview_operator_checkpoint_signer_kms_key_arns"' "production-shared accepts scoped checkpoint signer KMS keys for preview operators"
+  assert_contains "$main_tf" 'preview_operator_fleet_requested   = var.preview_operator_fleet_enabled' "production-shared tracks explicit preview operator fleet requests"
+  assert_contains "$main_tf" 'preview_operator_fleet_enabled     = local.preview_operator_fleet_requested && var.deployment_id == "preview"' "production-shared disables preview operator resource counts outside preview"
+  assert_contains "$main_tf" 'check "preview_operator_fleet_preview_only"' "production-shared documents preview-only operator fleet guard"
+  assert_contains "$main_tf" 'resource "terraform_data" "preview_operator_fleet_guard"' "production-shared fails closed when preview operator fleet is enabled outside preview"
+  assert_contains "$main_tf" 'count = local.preview_operator_fleet_requested ? 1 : 0' "production-shared evaluates the preview operator guard whenever the fleet is requested"
+  assert_contains "$main_tf" 'condition     = var.deployment_id == "preview"' "production-shared hard-fails non-preview preview operator requests"
+  assert_contains "$main_tf" 'preview_operator_fleet_enabled can only be true when deployment_id is preview.' "production-shared documents preview-only operator fleet guard"
+  assert_contains "$main_tf" 'check "preview_operator_fleet_inputs"' "production-shared validates preview operator fleet inputs"
+  assert_contains "$main_tf" '(length(var.preview_operator_client_cidr_blocks) + length(var.preview_operator_client_security_group_ids)) > 0' "production-shared hard-fails preview operator fleets without approved client ingress"
+  assert_contains "$main_tf" 'resource "aws_security_group" "preview_operator"' "production-shared provisions a dedicated preview operator security group"
+  assert_contains "$main_tf" 'resource "aws_launch_template" "preview_operator"' "production-shared provisions preview operator launch templates"
+  assert_contains "$preview_operator_launch_template" 'metadata_options {' "production-shared preview operator launch templates configure instance metadata options"
+  assert_contains "$preview_operator_launch_template" 'http_tokens   = "required"' "production-shared preview operator launch templates require IMDSv2"
+  assert_contains "$preview_operator_launch_template" 'volume_size           = var.preview_operator_root_volume_size_gb' "production-shared preview operator launch templates use explicit root volume sizing"
+  assert_contains "$main_tf" 'resource "aws_autoscaling_group" "preview_operator"' "production-shared provisions preview operator ASGs"
+  assert_contains "$main_tf" 'Operator signer endpoints from approved preview operator clients' "production-shared opens preview operator signer endpoints to approved clients"
+  assert_contains "$main_tf" 'to_port     = var.preview_operator_base_port + local.preview_operator_count - 1' "production-shared limits approved client signer ingress to the operator endpoint range"
+  assert_contains "$main_tf" 'Operator signer endpoints from approved preview operator client security groups' "production-shared opens preview operator signer endpoints to approved client security groups"
+  assert_contains "$preview_operator_asg" 'triggers = ["launch_template"]' "production-shared refreshes preview operators when launch templates change"
+  assert_contains "$preview_operator_asg" 'propagate_at_launch = true' "production-shared propagates preview operator tags at launch"
+  assert_contains "$main_tf" 'resource "aws_iam_role_policy_attachment" "preview_operator_ssm_managed_instance_core"' "production-shared attaches SSM managed instance core to preview operators"
+  assert_contains "$preview_operator_access" 'AllowPreviewOperatorRuntimeConfigSecretRead' "production-shared preview operator IAM can read scoped runtime config secrets"
+  assert_contains "$preview_operator_access" 'AllowPreviewOperatorRuntimeConfigSecretKMS' "production-shared preview operator IAM can decrypt scoped runtime config secret CMKs"
+  assert_contains "$preview_operator_access" 'AllowPreviewOperatorRuntimeMaterialRead' "production-shared preview operator IAM can read scoped runtime material"
+  assert_contains "$preview_operator_access" 'AllowPreviewOperatorCheckpointSignerKMS' "production-shared preview operator IAM can use scoped checkpoint signer KMS keys"
+  assert_contains "$preview_operator_checkpoint_blob_bucket_access" '"s3:ListBucketMultipartUploads",' "production-shared grants bucket-scoped multipart upload listing on checkpoint blob buckets"
+  assert_contains "$preview_operator_checkpoint_blob_object_access" '"s3:ListMultipartUploadParts",' "production-shared keeps multipart part listing on checkpoint blob objects"
+  assert_not_contains "$preview_operator_checkpoint_blob_object_access" '"s3:ListBucketMultipartUploads",' "production-shared does not grant bucket multipart listing on object-scoped checkpoint blob resources"
+  assert_contains "$outputs_tf" 'output "preview_operator_roles"' "production-shared exports preview operator rollout metadata"
+  assert_contains "$outputs_tf" 'aws_autoscaling_group.preview_operator[index].name' "production-shared preview operator output includes ASG names"
+  assert_contains "$outputs_tf" 'aws_launch_template.preview_operator[index].id' "production-shared preview operator output includes launch template ids"
+  assert_contains "$outputs_tf" 'data.aws_instance.preview_operator[index].public_ip' "production-shared preview operator output includes public endpoints for rollout"
 
   assert_not_contains "$password_block" 'default' "shared postgres password has no default"
   assert_contains "$variables_tf" 'variable "shared_proof_service_image_ecr_repository_arn"' "explicit proof-service ECR repository ARN input"

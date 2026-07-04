@@ -37,7 +37,7 @@ write_roll_inventory_fixture() {
             aws_profile: "juno",
             aws_region: "us-east-1",
             account_id: "021490342184",
-            asg: "preview-op1",
+            asg: "intents-juno-shared-preview-operator-1",
             launch_template: { id: "lt-op1", version: "3" },
             known_hosts_file: $kh1,
             dkg_backup_zip: $backup1,
@@ -56,7 +56,7 @@ write_roll_inventory_fixture() {
             aws_profile: "juno",
             aws_region: "us-east-1",
             account_id: "021490342184",
-            asg: "preview-op2",
+            asg: "intents-juno-shared-preview-operator-2",
             launch_template: { id: "lt-op2", version: "7" },
             known_hosts_file: $kh2,
             dkg_backup_zip: $backup2,
@@ -136,31 +136,31 @@ case "${args[*]}" in
     printf '{"LaunchTemplateVersion":{"VersionNumber":8}}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-1"}]}]}]}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-2"}]}]}]}\n'
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op1 --launch-template LaunchTemplateId=lt-op1,Version=4")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-1 --launch-template LaunchTemplateId=lt-op1,Version=4")
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op2 --launch-template LaunchTemplateId=lt-op2,Version=8")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-2 --launch-template LaunchTemplateId=lt-op2,Version=8")
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op1 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-1 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op1"}\n'
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-2 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op2"}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-1 --instance-refresh-ids refresh-op1 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --instance-refresh-ids refresh-op2 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op2 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-2 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op1 --output json")
@@ -208,22 +208,22 @@ case "${args[*]}" in
     printf '{"LaunchTemplateVersion":{"VersionNumber":8}}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-1"}]}]}]}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-2"}]}]}]}\n'
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op1 --launch-template LaunchTemplateId=lt-op1,Version=4")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-1 --launch-template LaunchTemplateId=lt-op1,Version=4")
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op2 --launch-template LaunchTemplateId=lt-op2,Version=8")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-2 --launch-template LaunchTemplateId=lt-op2,Version=8")
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op1 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-1 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op1"}\n'
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-2 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op2"}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-1 --instance-refresh-ids refresh-op1 --output json")
     refresh_count_file="${SLOW_REFRESH_COUNT_FILE:?missing SLOW_REFRESH_COUNT_FILE}"
     refresh_count=0
     if [[ -f "$refresh_count_file" ]]; then
@@ -237,13 +237,13 @@ case "${args[*]}" in
       printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     fi
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --instance-refresh-ids refresh-op2 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op2 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-2 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op1 --output json")
@@ -291,35 +291,35 @@ case "${args[*]}" in
     printf '{"LaunchTemplateVersion":{"VersionNumber":8}}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-1"}]}]}]}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-2"}]}]}]}\n'
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op1 --launch-template LaunchTemplateId=lt-op1,Version=4")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-1 --launch-template LaunchTemplateId=lt-op1,Version=4")
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op2 --launch-template LaunchTemplateId=lt-op2,Version=8")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-2 --launch-template LaunchTemplateId=lt-op2,Version=8")
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op1 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-1 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op1"}\n'
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-2 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf 'An error occurred (InstanceRefreshInProgress) when calling the StartInstanceRefresh operation: An Instance Refresh is already in progress and blocks the execution of this Instance Refresh.\n' >&2
     exit 254
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-1 --instance-refresh-ids refresh-op1 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --output json")
     printf '{"InstanceRefreshes":[{"InstanceRefreshId":"refresh-op2-existing","Status":"InProgress","StartTime":"2026-03-24T15:11:45+00:00"}]}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2-existing --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --instance-refresh-ids refresh-op2-existing --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op2 --output json")
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-2 --output json")
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op1 --output json")
@@ -375,10 +375,10 @@ case "${args[*]}" in
     printf '{"LaunchTemplateVersion":{"VersionNumber":14}}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-live-op1","Version":"11"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-live-op1","Version":"11"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-1"}]}]}]}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
-    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-live-op2","Version":"13"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-live-op2","Version":"13"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"intents-juno-shared-preview-operator-2"}]}]}]}\n'
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=203.0.113.10 --output json")
     printf '{"Reservations":[]}\n'
@@ -386,27 +386,27 @@ case "${args[*]}" in
   "ec2 describe-instances --filters Name=ip-address,Values=203.0.113.11 --output json")
     printf '{"Reservations":[]}\n'
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op1 --launch-template LaunchTemplateId=lt-live-op1,Version=12")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-1 --launch-template LaunchTemplateId=lt-live-op1,Version=12")
     ;;
-  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op2 --launch-template LaunchTemplateId=lt-live-op2,Version=14")
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name intents-juno-shared-preview-operator-2 --launch-template LaunchTemplateId=lt-live-op2,Version=14")
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op1 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-1 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op1"}\n'
     ;;
-  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2 --preferences {\"MinHealthyPercentage\":100} --output json")
+  "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-2 --preferences {\"MinHealthyPercentage\":100} --output json")
     printf '{"InstanceRefreshId":"refresh-op2"}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-1 --instance-refresh-ids refresh-op1 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2 --output json")
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --instance-refresh-ids refresh-op2 --output json")
     printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json")
-    printf '{"AutoScalingGroups":[{"AutoScalingGroupName":"preview-op1","DesiredCapacity":1,"LaunchTemplate":{"LaunchTemplateId":"lt-live-op1","Version":"11"},"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json")
+    printf '{"AutoScalingGroups":[{"AutoScalingGroupName":"intents-juno-shared-preview-operator-1","DesiredCapacity":1,"LaunchTemplate":{"LaunchTemplateId":"lt-live-op1","Version":"11"},"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
-  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op2 --output json")
-    printf '{"AutoScalingGroups":[{"AutoScalingGroupName":"preview-op2","DesiredCapacity":1,"LaunchTemplate":{"LaunchTemplateId":"lt-live-op2","Version":"13"},"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-2 --output json")
+    printf '{"AutoScalingGroups":[{"AutoScalingGroupName":"intents-juno-shared-preview-operator-2","DesiredCapacity":1,"LaunchTemplate":{"LaunchTemplateId":"lt-live-op2","Version":"13"},"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op1 --output json")
     printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op1","PublicIpAddress":"44.201.10.10","PrivateIpAddress":"10.0.10.10","IamInstanceProfile":{"Arn":"arn:aws:iam::021490342184:instance-profile/juno-live-e2e-preview0316d-instance-profile"}}]}]}\n'
@@ -421,6 +421,41 @@ case "${args[*]}" in
     printf '{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs"}}]}}\n'
     ;;
   iam\ put-role-policy\ --role-name\ juno-live-e2e-preview0316d-instance-role\ --policy-name\ preview-shared-kafka-access\ --policy-document\ *)
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
+write_fake_roll_preview_aws_with_mismatched_rediscovered_asg() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "$*" >>"$TEST_AWS_LOG"
+args=( "$@" )
+if [[ "${args[0]:-}" == "--profile" ]]; then
+  args=( "${args[@]:2}" )
+fi
+if [[ "${args[0]:-}" == "--region" ]]; then
+  args=( "${args[@]:2}" )
+fi
+case "${args[*]}" in
+  "ec2 create-launch-template-version --launch-template-id lt-stale-op1 --source-version 3 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf 'An error occurred (InvalidLaunchTemplateId.NotFound) when calling the CreateLaunchTemplateVersion operation: The specified launch template, with template ID lt-stale-op1, does not exist.\n' >&2
+    exit 254
+    ;;
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json")
+    printf '{"AutoScalingGroups":[{"AutoScalingGroupName":"other-preview-operator-1","DesiredCapacity":1,"LaunchTemplate":{"LaunchTemplateId":"lt-other","Version":"11"},"Instances":[{"InstanceId":"i-other","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  "ec2 create-launch-template-version --launch-template-id lt-other --source-version 11 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf 'unexpected retry against mismatched rediscovered launch template\n' >&2
+    exit 1
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "$*" >&2
@@ -660,7 +695,7 @@ EOF
 
   assert_contains "$(cat "$gh_log")" "release download operator-stack-ami-v2026.03.20-testnet" "preview operator roll downloads the operator ami manifest"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-op1 --source-version 3" "preview operator roll creates a fresh launch template version"
-  assert_contains "$(cat "$aws_log")" "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2" "preview operator roll refreshes the second operator asg"
+  assert_contains "$(cat "$aws_log")" "autoscaling start-instance-refresh --auto-scaling-group-name intents-juno-shared-preview-operator-2" "preview operator roll refreshes the second operator asg"
   assert_contains "$(cat "$aws_log")" "iam put-role-policy --role-name juno-live-e2e-preview0316d-instance-role --policy-name preview-shared-kafka-access" "preview operator roll adds kafka access for the rebuilt shared cluster"
   assert_contains "$(cat "$aws_log")" "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json" "preview operator roll resolves the checkpoint bucket kms key"
   assert_contains "$(cat "$ssh_keyscan_log")" "ssh-keyscan -T 10 -H 44.201.10.10" "preview operator roll bounds ssh-keyscan when collecting known hosts"
@@ -833,7 +868,7 @@ EOF
 
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "true" "preview operator roll waits for a slow but successful refresh"
   assert_eq "$(cat "$refresh_count_file")" "61" "preview operator roll polls until the refresh eventually becomes successful"
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json" "preview operator roll keeps polling the slow refresh"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-1 --instance-refresh-ids refresh-op1 --output json" "preview operator roll keeps polling the slow refresh"
 
   rm -rf "$tmp"
 }
@@ -911,8 +946,8 @@ EOF
   )
 
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "true" "preview operator roll reuses an in-progress refresh instead of failing"
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --output json" "preview operator roll queries the active refresh when aws rejects a second refresh start"
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2-existing --output json" "preview operator roll waits on the existing refresh id"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --output json" "preview operator roll queries the active refresh when aws rejects a second refresh start"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name intents-juno-shared-preview-operator-2 --instance-refresh-ids refresh-op2-existing --output json" "preview operator roll waits on the existing refresh id"
 
   rm -rf "$tmp"
 }
@@ -1165,7 +1200,7 @@ EOF
   assert_contains "$(cat "$aws_log")" "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json" "preview operator roll rediscovers the first operator metadata from its public ip"
   assert_contains "$(cat "$aws_log")" "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json" "preview operator roll rediscovers the second operator metadata from its public ip"
   assert_contains "$(cat "$ssh_keyscan_log")" "ssh-keyscan -T 10 -H 44.201.10.10" "preview operator roll still bounds ssh-keyscan after metadata rediscovery"
-  assert_eq "$(jq -r '.operators[0].asg' "$output_dir/inventory.operators-rolled.json")" "preview-op1" "preview operator roll persists the discovered first operator asg"
+  assert_eq "$(jq -r '.operators[0].asg' "$output_dir/inventory.operators-rolled.json")" "intents-juno-shared-preview-operator-1" "preview operator roll persists the discovered first operator asg"
   assert_eq "$(jq -r '.operators[1].launch_template.id' "$output_dir/inventory.operators-rolled.json")" "lt-op2" "preview operator roll persists the discovered second operator launch template id"
 
   rm -rf "$tmp"
@@ -1249,7 +1284,7 @@ EOF
   )
 
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-stale-op1 --source-version 3" "preview operator roll attempts the persisted first launch template before rediscovery"
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json" "preview operator roll reads the first live asg when its persisted launch template is gone"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json" "preview operator roll reads the first live asg when its persisted launch template is gone"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-live-op1 --source-version 11" "preview operator roll retries the first operator with the live launch template"
   assert_eq "$(jq -r '.operators[0].launch_template.id' "$output_dir/inventory.operators-rolled.json")" "lt-live-op1" "preview operator roll persists the refreshed first launch template id"
   assert_eq "$(jq -r '.operators[1].launch_template.version' "$output_dir/inventory.operators-rolled.json")" "14" "preview operator roll persists the refreshed second launch template version"
@@ -1338,9 +1373,85 @@ EOF
         --github-repo juno-intents/intents-juno >"$tmp/roll-summary.json"
   )
 
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json" "preview operator roll reads the first live asg after a stale launch template failure"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json" "preview operator roll reads the first live asg after a stale launch template failure"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-live-op1 --source-version 11" "preview operator roll retries the first operator with the asg launch template"
   assert_eq "$(jq -r '.operators[0].launch_template.id' "$output_dir/inventory.operators-rolled.json")" "lt-live-op1" "preview operator roll persists the asg launch template id when the public ip is stale"
+
+  rm -rf "$tmp"
+}
+
+test_roll_preview_operators_rejects_mismatched_asg_after_stale_launch_template_rediscovery() {
+  local tmp inventory shared_manifest releases_dir gh_log aws_log stderr_file output_dir aws_log_content
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  releases_dir="$tmp/releases"
+  gh_log="$tmp/gh.log"
+  aws_log="$tmp/aws.log"
+  stderr_file="$tmp/stderr.log"
+  output_dir="$tmp/output"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2" "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  jq '
+    .operators[0].launch_template = {id: "lt-stale-op1", version: "3"}
+    | .operators[1].launch_template = {id: "lt-op2", version: "7"}
+  ' "$inventory" >"$tmp/inventory.next"
+  mv "$tmp/inventory.next" "$inventory"
+  write_shared_manifest_fixture "$shared_manifest"
+
+  cat >"$releases_dir/operator-stack-ami-v2026.03.20-testnet/operator-ami-manifest.json" <<'JSON'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operatorfresh123456"
+    }
+  }
+}
+JSON
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
+
+  write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
+  write_fake_roll_preview_aws_with_mismatched_rediscovered_asg "$tmp/bin/aws" "$aws_log"
+  write_fail_if_called_command "$tmp/bin/deploy-operator.sh" "deploy-operator"
+  write_fail_if_called_command "$tmp/bin/canary-operator-boot.sh" "canary-operator"
+  write_fail_if_called_command "$tmp/bin/ssh-keyscan" "ssh-keyscan"
+
+  if (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$tmp/bin:$PATH" \
+      PRODUCTION_DEPLOY_OPERATOR_BIN="$tmp/bin/deploy-operator.sh" \
+      PRODUCTION_CANARY_OPERATOR_BOOT_BIN="$tmp/bin/canary-operator-boot.sh" \
+      bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+        --inventory "$inventory" \
+        --shared-manifest "$shared_manifest" \
+        --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --output-dir "$output_dir" \
+        --github-repo juno-intents/intents-juno
+  ) >"$tmp/stdout" 2>"$stderr_file"; then
+    printf 'expected roll-preview-operators to reject mismatched rediscovered preview asg\n' >&2
+    exit 1
+  fi
+
+  aws_log_content="$(cat "$aws_log")"
+  assert_contains "$(cat "$stderr_file")" "autoscaling group must be intents-juno-shared-preview-operator-1: other-preview-operator-1" "preview operator roll rejects a mismatched rediscovered asg before retrying rollout"
+  assert_contains "$aws_log_content" "ec2 create-launch-template-version --launch-template-id lt-stale-op1 --source-version 3" "preview operator roll attempts the persisted stale launch template first"
+  assert_contains "$aws_log_content" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names intents-juno-shared-preview-operator-1 --output json" "preview operator roll rediscovers metadata after a stale launch template failure"
+  if grep -q 'lt-other' "$aws_log"; then
+    printf 'expected roll-preview-operators not to retry the mismatched rediscovered launch template\n' >&2
+    exit 1
+  fi
+  if grep -q 'update-auto-scaling-group\|start-instance-refresh\|deploy-operator\|canary-operator\|ssh-keyscan' "$aws_log"; then
+    printf 'expected roll-preview-operators to stop before mutating a mismatched rediscovered asg\n' >&2
+    exit 1
+  fi
 
   rm -rf "$tmp"
 }
@@ -1503,7 +1614,135 @@ EOF
   rm -rf "$tmp"
 }
 
+write_fail_if_called_command() {
+  local target="$1"
+  local name="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf '%s should not be called: %s\n' "$name" "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
+test_roll_preview_operators_rejects_non_preview_inventory_before_mutation() {
+  local tmp inventory shared_manifest output_dir stderr_file
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  output_dir="$tmp/output"
+  stderr_file="$tmp/stderr"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  jq '.environment = "mainnet"' "$inventory" >"$inventory.next"
+  mv "$inventory.next" "$inventory"
+  write_shared_manifest_fixture "$shared_manifest"
+  write_fail_if_called_command "$tmp/bin/gh" "gh"
+  write_fail_if_called_command "$tmp/bin/aws" "aws"
+  write_fail_if_called_command "$tmp/bin/ssh-keyscan" "ssh-keyscan"
+
+  if (
+    cd "$REPO_ROOT"
+    PATH="$tmp/bin:$PATH" bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+      --inventory "$inventory" \
+      --shared-manifest "$shared_manifest" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+      --output-dir "$output_dir" \
+      --github-repo juno-intents/intents-juno
+  ) >"$tmp/stdout" 2>"$stderr_file"; then
+    printf 'expected roll-preview-operators to reject a non-preview inventory\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "roll-preview-operators requires inventory environment=preview" "preview operator roll rejects non-preview inventories before mutation"
+  rm -rf "$tmp"
+}
+
+test_roll_preview_operators_rejects_mismatched_shared_manifest_before_mutation() {
+  local tmp inventory shared_manifest output_dir stderr_file
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  output_dir="$tmp/output"
+  stderr_file="$tmp/stderr"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  write_shared_manifest_fixture "$shared_manifest"
+  jq '.environment = "mainnet"' "$shared_manifest" >"$shared_manifest.next"
+  mv "$shared_manifest.next" "$shared_manifest"
+  write_fail_if_called_command "$tmp/bin/gh" "gh"
+  write_fail_if_called_command "$tmp/bin/aws" "aws"
+  write_fail_if_called_command "$tmp/bin/ssh-keyscan" "ssh-keyscan"
+
+  if (
+    cd "$REPO_ROOT"
+    PATH="$tmp/bin:$PATH" bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+      --inventory "$inventory" \
+      --shared-manifest "$shared_manifest" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+      --output-dir "$output_dir" \
+      --github-repo juno-intents/intents-juno
+  ) >"$tmp/stdout" 2>"$stderr_file"; then
+    printf 'expected roll-preview-operators to reject a shared manifest environment mismatch\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "roll-preview-operators requires shared manifest environment=preview: mainnet" "preview operator roll rejects non-preview shared manifests before mutation"
+  rm -rf "$tmp"
+}
+
+test_roll_preview_operators_rejects_protected_op2_resources_before_mutation() {
+  local tmp inventory shared_manifest output_dir stderr_file
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  output_dir="$tmp/output"
+  stderr_file="$tmp/stderr"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  jq '
+    .operators[0].public_dns_label = "pool2"
+    | .operators[0].instance_id = "i-0a886419721b81020"
+  ' "$inventory" >"$inventory.next"
+  mv "$inventory.next" "$inventory"
+  write_shared_manifest_fixture "$shared_manifest"
+  write_fail_if_called_command "$tmp/bin/gh" "gh"
+  write_fail_if_called_command "$tmp/bin/aws" "aws"
+  write_fail_if_called_command "$tmp/bin/ssh-keyscan" "ssh-keyscan"
+
+  if (
+    cd "$REPO_ROOT"
+    PATH="$tmp/bin:$PATH" bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+      --inventory "$inventory" \
+      --shared-manifest "$shared_manifest" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+      --output-dir "$output_dir" \
+      --github-repo juno-intents/intents-juno
+  ) >"$tmp/stdout" 2>"$stderr_file"; then
+    printf 'expected roll-preview-operators to reject protected op2 resource references\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "protected op2 resource reference is not allowed" "preview operator roll rejects protected op2 resources before mutation"
+  rm -rf "$tmp"
+}
+
 main() {
+  test_roll_preview_operators_rejects_non_preview_inventory_before_mutation
+  test_roll_preview_operators_rejects_mismatched_shared_manifest_before_mutation
+  test_roll_preview_operators_rejects_protected_op2_resources_before_mutation
   test_roll_preview_operators_refreshes_asgs_and_redeploys_handoffs
   test_roll_preview_operators_force_redeploys_refreshed_handoffs
   test_roll_preview_operators_waits_for_slow_but_successful_instance_refreshes
@@ -1513,6 +1752,7 @@ main() {
   test_roll_preview_operators_discovers_missing_asg_and_launch_template_from_public_ip
   test_roll_preview_operators_recovers_from_stale_launch_template_ids
   test_roll_preview_operators_recovers_from_asg_when_public_ip_is_stale
+  test_roll_preview_operators_rejects_mismatched_asg_after_stale_launch_template_rediscovery
   test_roll_preview_operators_redeploys_all_handoffs_when_deploy_consumes_stdin
   test_roll_preview_operators_keeps_summary_json_clean_when_deploy_logs_to_stdout
 }

@@ -319,6 +319,7 @@ result_json="$(jq -n \
   --arg runtime_material_kms_key_id "$resolved_runtime_material_kms_key_id" \
   --arg runtime_config_secret_id "$runtime_config_secret_id" \
   --arg runtime_config_secret_region "$runtime_config_secret_region" \
+  --arg runtime_config_secret_kms_key_id "$resolved_runtime_config_secret_kms_key_id" \
   --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
   '{
     runtime_material_ref: {
@@ -330,6 +331,7 @@ result_json="$(jq -n \
     },
     runtime_config_secret_id: $runtime_config_secret_id,
     runtime_config_secret_region: $runtime_config_secret_region,
+    runtime_config_secret_kms_key_id: (if $runtime_config_secret_kms_key_id == "" then null else $runtime_config_secret_kms_key_id end),
     checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end)
   }')"
 

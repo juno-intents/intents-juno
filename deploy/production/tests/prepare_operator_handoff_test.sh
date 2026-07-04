@@ -189,6 +189,7 @@ JSON
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$output_json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff returns the checkpoint signer kms key id"
   assert_eq "$(jq -r '.runtime_material_ref.mode' "$output_json")" "s3-kms-zip" "handoff returns the runtime material mode"
   assert_eq "$(jq -r '.runtime_config_secret_id' "$output_json")" "mainnet/op1/runtime-config" "handoff returns the runtime config secret id"
+  assert_eq "$(jq -r '.runtime_config_secret_kms_key_id' "$output_json")" "arn:aws:kms:us-east-1:021490342184:key/22222222-3333-4444-5555-666666666666" "handoff returns the runtime config secret kms key id"
   assert_eq "$(jq -r '.withdraw_coordinator_juno_wallet_id' "$output_json")" "wallet-testnet-111111111111" "handoff returns the generated coordinator wallet id"
   assert_eq "$(jq -r '.withdraw_finalizer_juno_scan_wallet_id' "$output_json")" "wallet-testnet-111111111111" "handoff returns the generated finalizer wallet id"
   assert_eq "$(jq -r '.access.user_name' "$output_json")" "mainnet-op1-runtime-access" "handoff returns the access identity name"

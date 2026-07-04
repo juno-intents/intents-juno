@@ -34,6 +34,8 @@ instance_refresh_poll_attempts="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_P
 instance_refresh_poll_interval_seconds="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_INTERVAL_SECONDS:-5}"
 boot_canary_attempts="${PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_ATTEMPTS:-6}"
 boot_canary_interval_seconds="${PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_INTERVAL_SECONDS:-30}"
+inventory_environment=""
+shared_manifest_environment=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -64,6 +66,13 @@ done
 for cmd in jq aws gh ssh-keyscan; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
+
+inventory_environment="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+[[ "$inventory_environment" == "preview" ]] || die "roll-preview-operators requires inventory environment=preview"
+shared_manifest_environment="$(production_json_required "$shared_manifest" '.environment | select(type == "string" and length > 0)')"
+[[ "$shared_manifest_environment" == "$inventory_environment" ]] \
+  || die "roll-preview-operators requires shared manifest environment=$inventory_environment: $shared_manifest_environment"
+production_reject_protected_op2_references "$inventory" "preview operator inventory"
 
 deploy_operator_bin="${PRODUCTION_DEPLOY_OPERATOR_BIN:-$SCRIPT_DIR/deploy-operator.sh}"
 canary_operator_boot_bin="${PRODUCTION_CANARY_OPERATOR_BOOT_BIN:-$SCRIPT_DIR/canary-operator-boot.sh}"
@@ -339,13 +348,30 @@ create_operator_launch_template_version() {
     --output json
 }
 
+require_preview_operator_asg_name() {
+  local operator_id="$1"
+  local operator_index="$2"
+  local operator_asg="$3"
+  local expected_asg
+
+  [[ "$operator_index" =~ ^[0-9]+$ ]] || die "operator $operator_id has invalid preview operator index: $operator_index"
+  expected_asg="intents-juno-shared-preview-operator-$operator_index"
+  [[ "$operator_asg" == "$expected_asg" ]] || die "operator $operator_id autoscaling group must be $expected_asg: $operator_asg"
+}
+
 operator_results_json='[]'
 while IFS= read -r operator_json; do
   operator_id="$(jq -r '.operator_id | select(type == "string" and length > 0)' <<<"$operator_json")"
+  operator_index="$(jq -r '.index | select(type == "number")' <<<"$operator_json")"
   operator_asg="$(jq -r '.asg // empty' <<<"$operator_json")"
   launch_template_id="$(jq -r '.launch_template.id // empty' <<<"$operator_json")"
   launch_template_version="$(jq -r '.launch_template.version // empty' <<<"$operator_json")"
   operator_public_ip="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
+
+  [[ -n "$operator_index" ]] || die "operator $operator_id is missing a numeric preview operator index"
+  if [[ -n "$operator_asg" ]]; then
+    require_preview_operator_asg_name "$operator_id" "$operator_index" "$operator_asg"
+  fi
 
   if [[ -z "$operator_asg" || -z "$launch_template_id" || -z "$launch_template_version" ]]; then
     if [[ -n "$operator_asg" ]]; then
@@ -373,6 +399,7 @@ while IFS= read -r operator_json; do
     fi
   fi
   [[ -n "$operator_asg" ]] || die "operator $operator_id is missing an autoscaling group name"
+  require_preview_operator_asg_name "$operator_id" "$operator_index" "$operator_asg"
   [[ -n "$launch_template_id" ]] || die "operator $operator_id is missing a launch template id"
   [[ -n "$launch_template_version" ]] || die "operator $operator_id is missing a launch template version"
 
@@ -406,6 +433,7 @@ while IFS= read -r operator_json; do
     fi
 
     [[ -n "$refreshed_operator_asg" ]] || die "operator $operator_id metadata rediscovery returned an empty autoscaling group after launch template failure: $lt_error"
+    require_preview_operator_asg_name "$operator_id" "$operator_index" "$refreshed_operator_asg"
     [[ -n "$refreshed_launch_template_id" ]] || die "operator $operator_id metadata rediscovery returned an empty launch template id after launch template failure: $lt_error"
     [[ -n "$refreshed_launch_template_version" ]] || die "operator $operator_id metadata rediscovery returned an empty launch template version after launch template failure: $lt_error"
 

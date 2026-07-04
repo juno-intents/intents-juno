@@ -208,3 +208,21 @@ output "shared_wireguard_backoffice_private_endpoint_ips" {
   description = "Private IPv4 addresses for the internal backoffice load balancer routed over WireGuard."
   value       = local.shared_wireguard_backoffice_private_endpoint_ips
 }
+
+output "preview_operator_roles" {
+  description = "Preview operator rollout metadata emitted for preview role-runtime rebuilds."
+  value = [
+    for index in range(local.preview_operator_count) : {
+      index = index + 1
+      asg   = aws_autoscaling_group.preview_operator[index].name
+      launch_template = {
+        id      = aws_launch_template.preview_operator[index].id
+        version = tostring(aws_launch_template.preview_operator[index].latest_version)
+      }
+      instance_id      = try(data.aws_instance.preview_operator[index].id, null)
+      operator_host    = try(data.aws_instance.preview_operator[index].public_ip, null)
+      public_endpoint  = try(data.aws_instance.preview_operator[index].public_ip, null)
+      private_endpoint = try(data.aws_instance.preview_operator[index].private_ip, null)
+    }
+  ]
+}

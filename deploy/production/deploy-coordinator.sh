@@ -364,6 +364,10 @@ elif [[ -n "$app_terraform_dir" && "$skip_terraform_apply" != "true" ]]; then
   )
 fi
 
+merged_preview_operator_inventory="$output_dir/inventory.preview-operator-roles.json"
+production_merge_preview_operator_roles_from_tf_output "$coordinator_inventory" "$shared_tf_output_json" "$merged_preview_operator_inventory"
+coordinator_inventory="$merged_preview_operator_inventory"
+
 bridge_summary="$output_dir/bridge-summary.json"
 if [[ -n "$existing_bridge_summary" ]]; then
   if [[ ! -e "$bridge_summary" || ! "$existing_bridge_summary" -ef "$bridge_summary" ]]; then

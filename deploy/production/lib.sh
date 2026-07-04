@@ -105,6 +105,38 @@ production_tf_output_json() {
   printf '%s\n' "$value"
 }
 
+production_protected_op2_resource_references() {
+  local file="$1"
+  jq -r '
+    [
+      ..
+      | strings
+      | select(
+          . == "pool2"
+          or . == "nn"
+          or . == "nn2"
+          or . == "i-0a886419721b81020"
+          or . == "i-033cc3a2d107255d3"
+          or . == "i-00d9725a22f0608ea"
+        )
+    ]
+    | unique
+    | .[]
+  ' "$file"
+}
+
+production_reject_protected_op2_references() {
+  local file="$1"
+  local label="$2"
+  local refs refs_inline
+
+  refs="$(production_protected_op2_resource_references "$file")"
+  [[ -z "$refs" ]] && return 0
+
+  refs_inline="$(tr '\n' ' ' <<<"$refs" | sed -E 's/[[:space:]]+$//')"
+  die "protected op2 resource reference is not allowed in $label: $refs_inline"
+}
+
 production_resolve_s3_bucket_sse_kms_key_id() {
   local aws_profile="$1"
   local aws_region="$2"
@@ -670,6 +702,73 @@ production_inventory_live_e2e_operator_ami_id() {
   jq -r '.LaunchTemplateVersions[0].LaunchTemplateData.ImageId // empty' <<<"$lt_json"
 }
 
+production_merge_preview_operator_roles_from_tf_output() {
+  local inventory="$1"
+  local tf_json="$2"
+  local output="$3"
+  local roles_json preview_operator_fleet_enabled env_slug shared_terraform_dir tmp
+
+  preview_operator_fleet_enabled="$(jq -r '.shared_services.preview_operator_fleet.enabled // false' "$inventory")"
+  case "$preview_operator_fleet_enabled" in
+    true | false) ;;
+    *) die "shared_services.preview_operator_fleet.enabled must be a boolean" ;;
+  esac
+  roles_json="$(jq -cer '.preview_operator_roles.value // empty' "$tf_json" 2>/dev/null || true)"
+  if [[ -z "$roles_json" ]] || ! jq -e 'type == "array" and length > 0' <<<"$roles_json" >/dev/null 2>&1; then
+    if [[ "$preview_operator_fleet_enabled" == "true" ]]; then
+      die "preview_operator_roles terraform output is required when shared_services.preview_operator_fleet.enabled=true"
+    fi
+    cp "$inventory" "$output"
+    return 0
+  fi
+  [[ "$preview_operator_fleet_enabled" == "true" ]] \
+    || die "preview_operator_roles terraform output can only be merged when shared_services.preview_operator_fleet.enabled=true"
+
+  env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+  [[ "$env_slug" == "preview" ]] || die "preview_operator_roles terraform output can only be merged for environment=preview"
+  shared_terraform_dir="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+  [[ "$shared_terraform_dir" == "deploy/shared/terraform/production-shared" ]] \
+    || die "preview_operator_roles terraform output requires deploy/shared/terraform/production-shared"
+
+  if ! jq -e --argjson roles "$roles_json" --arg env_slug "$env_slug" '
+    (.operators // [] | type) == "array"
+    and (($roles | type) == "array")
+    and (($roles | length) == (.operators // [] | length))
+    and all(range(0; ($roles | length)); ($roles[.].index // 0) == (. + 1))
+    and all(range(0; ($roles | length)); ($roles[.].asg // "") == ("intents-juno-shared-" + $env_slug + "-operator-" + ((. + 1) | tostring)))
+    and all($roles[]; (
+      (.asg | type == "string" and length > 0)
+      and (.launch_template.id | type == "string" and length > 0)
+      and ((.launch_template.version | tostring) | length > 0)
+      and (((.public_endpoint // .operator_host // "") | type) == "string")
+      and (((.public_endpoint // .operator_host // "") | length) > 0)
+    ))
+  ' "$inventory" >/dev/null 2>&1; then
+    die "preview_operator_roles must match inventory operators by index"
+  fi
+
+  tmp="$(mktemp)"
+  jq --argjson roles "$roles_json" '
+    . as $root
+    | .operators = [
+        range(0; (($root.operators // []) | length)) as $i
+        | $root.operators[$i]
+          + {
+              asg: $roles[$i].asg,
+              instance_id: ($roles[$i].instance_id // null),
+              operator_host: ($roles[$i].operator_host // $roles[$i].public_endpoint),
+              public_endpoint: ($roles[$i].public_endpoint // $roles[$i].operator_host),
+              private_endpoint: ($roles[$i].private_endpoint // null),
+              launch_template: (($root.operators[$i].launch_template // {}) + {
+                id: $roles[$i].launch_template.id,
+                version: ($roles[$i].launch_template.version | tostring)
+              })
+            }
+      ]
+  ' "$inventory" >"$tmp"
+  mv "$tmp" "$output"
+}
+
 production_write_shared_terraform_override_tfvars() {
   local inventory="$1"
   local output_file="$2"
@@ -691,6 +790,12 @@ production_write_shared_terraform_override_tfvars() {
   local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
   local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
   local allowed_checkpoint_signer_kms_key_arns_json operator_ami_id
+  local preview_operator_fleet_json preview_operator_fleet_enabled preview_operator_ami_id preview_operator_instance_type
+  local preview_operator_root_volume_size_gb preview_operator_public_subnet_ids_json preview_operator_client_cidr_blocks_json
+  local preview_operator_client_security_group_ids_json preview_operator_runtime_config_secret_ids_json
+  local preview_operator_runtime_config_secret_kms_key_arns_json
+  local preview_operator_runtime_material_bucket_names_json preview_operator_runtime_material_kms_key_arns_json
+  local preview_operator_checkpoint_blob_bucket_names_json preview_operator_checkpoint_blob_kms_key_arns_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -895,6 +1000,117 @@ production_write_shared_terraform_override_tfvars() {
       '
   )"
   allowed_checkpoint_signer_kms_key_arns_json="$(production_inventory_checkpoint_signer_kms_key_arns_json "$inventory")"
+  preview_operator_fleet_json="$(production_json_optional "$inventory" '.shared_services.preview_operator_fleet // {}')"
+  preview_operator_fleet_enabled="$(jq -r '.enabled // false' <<<"$preview_operator_fleet_json")"
+  case "$preview_operator_fleet_enabled" in
+    true | false) ;;
+    *) die "shared_services.preview_operator_fleet.enabled must be a boolean" ;;
+  esac
+  preview_operator_ami_id=""
+  preview_operator_instance_type="t3.medium"
+  preview_operator_root_volume_size_gb="40"
+  preview_operator_public_subnet_ids_json='[]'
+  preview_operator_client_cidr_blocks_json='[]'
+  preview_operator_client_security_group_ids_json='[]'
+  preview_operator_runtime_config_secret_ids_json='[]'
+  preview_operator_runtime_config_secret_kms_key_arns_json='[]'
+  preview_operator_runtime_material_bucket_names_json='[]'
+  preview_operator_runtime_material_kms_key_arns_json='[]'
+  preview_operator_checkpoint_blob_bucket_names_json='[]'
+  preview_operator_checkpoint_blob_kms_key_arns_json='[]'
+  if [[ "$preview_operator_fleet_enabled" == "true" ]]; then
+    [[ "$env_slug" == "preview" ]] \
+      || die "shared_services.preview_operator_fleet.enabled can only be true when environment=preview"
+    [[ "$shared_terraform_dir" == "deploy/shared/terraform/production-shared" ]] \
+      || die "shared_services.preview_operator_fleet.enabled requires deploy/shared/terraform/production-shared"
+    production_reject_protected_op2_references "$inventory" "preview operator fleet inventory"
+    [[ "$operator_instance_count" -gt 0 ]] || die "shared_services.preview_operator_fleet.enabled requires at least one operator"
+
+    preview_operator_ami_id="$(jq -r '.ami_id // empty' <<<"$preview_operator_fleet_json")"
+    [[ -n "$preview_operator_ami_id" ]] || die "shared_services.preview_operator_fleet.ami_id is required"
+    preview_operator_instance_type="$(jq -r '.instance_type // "t3.medium"' <<<"$preview_operator_fleet_json")"
+    [[ -n "$preview_operator_instance_type" ]] || die "shared_services.preview_operator_fleet.instance_type is required"
+    preview_operator_root_volume_size_gb="$(jq -r '.root_volume_size_gb // 40' <<<"$preview_operator_fleet_json")"
+    [[ "$preview_operator_root_volume_size_gb" =~ ^[1-9][0-9]*$ ]] \
+      || die "shared_services.preview_operator_fleet.root_volume_size_gb must be a positive integer"
+    preview_operator_public_subnet_ids_json="$(jq -c '
+      (.public_subnet_ids // [])
+      | if type == "array" then [ .[] | select(type == "string" and length > 0) ] else [] end
+      | unique
+    ' <<<"$preview_operator_fleet_json")"
+    [[ "$(jq -r 'length' <<<"$preview_operator_public_subnet_ids_json")" -gt 0 ]] \
+      || die "shared_services.preview_operator_fleet.public_subnet_ids must include at least one subnet id"
+    preview_operator_client_cidr_blocks_json="$(jq -c '
+      (.client_cidr_blocks // [])
+      | if type == "array" then [ .[] | select(type == "string" and length > 0) ] else [] end
+      | unique
+    ' <<<"$preview_operator_fleet_json")"
+    preview_operator_client_security_group_ids_json="$(jq -c '
+      (.client_security_group_ids // [])
+      | if type == "array" then [ .[] | select(type == "string" and length > 0) ] else [] end
+      | unique
+    ' <<<"$preview_operator_fleet_json")"
+    preview_operator_runtime_config_secret_ids_json="$(jq -c '
+      [
+        .operators[]?
+        | .runtime_config_secret_id // empty
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    preview_operator_runtime_config_secret_kms_key_arns_json="$(jq -c '
+      [
+        .operators[]?
+        | (
+            .runtime_config_secret_kms_key_arn
+            // .runtime_config_secret_kms_key_id
+            // .runtime_config_secret.kms_key_arn
+            // .runtime_config_secret.kms_key_id
+            // empty
+          )
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    preview_operator_runtime_material_bucket_names_json="$(jq -c '
+      [
+        .operators[]?
+        | .runtime_material_ref.bucket // empty
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    preview_operator_runtime_material_kms_key_arns_json="$(jq -c '
+      [
+        .operators[]?
+        | .runtime_material_ref.kms_key_arn // .runtime_material_ref.kms_key_id // empty
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    preview_operator_checkpoint_blob_bucket_names_json="$(jq -c '
+      [
+        .operators[]?
+        | .checkpoint_blob_bucket // empty
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    preview_operator_checkpoint_blob_kms_key_arns_json="$(jq -c '
+      [
+        .operators[]?
+        | .checkpoint_blob_sse_kms_key_arn // .checkpoint_blob_sse_kms_key_id // empty
+        | select(type == "string" and length > 0)
+      ]
+      | unique
+    ' "$inventory")"
+    [[ "$(jq -r 'length' <<<"$preview_operator_runtime_config_secret_ids_json")" -gt 0 ]] \
+      || die "operators[].runtime_config_secret_id is required for preview operator fleet"
+    [[ "$(jq -r 'length' <<<"$preview_operator_runtime_material_bucket_names_json")" -gt 0 ]] \
+      || die "operators[].runtime_material_ref.bucket is required for preview operator fleet"
+    [[ "$(jq -r 'length' <<<"$allowed_checkpoint_signer_kms_key_arns_json")" -gt 0 ]] \
+      || die "operators[].checkpoint_signer_kms_key_id is required for preview operator fleet"
+  fi
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
     [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required for live-e2e shared terraform"
@@ -1044,6 +1260,21 @@ production_write_shared_terraform_override_tfvars() {
     --argjson shared_service_client_cidr_blocks "$shared_service_client_cidr_blocks_json" \
     --argjson proof_role "$proof_role_json" \
     --argjson shared_services "$shared_services_json" \
+    --argjson preview_operator_fleet_enabled "$preview_operator_fleet_enabled" \
+    --argjson preview_operator_count "$operator_instance_count" \
+    --arg preview_operator_ami_id "$preview_operator_ami_id" \
+    --arg preview_operator_instance_type "$preview_operator_instance_type" \
+    --argjson preview_operator_root_volume_size_gb "$preview_operator_root_volume_size_gb" \
+    --argjson preview_operator_public_subnet_ids "$preview_operator_public_subnet_ids_json" \
+    --argjson preview_operator_client_cidr_blocks "$preview_operator_client_cidr_blocks_json" \
+    --argjson preview_operator_client_security_group_ids "$preview_operator_client_security_group_ids_json" \
+    --argjson preview_operator_runtime_config_secret_ids "$preview_operator_runtime_config_secret_ids_json" \
+    --argjson preview_operator_runtime_config_secret_kms_key_arns "$preview_operator_runtime_config_secret_kms_key_arns_json" \
+    --argjson preview_operator_runtime_material_bucket_names "$preview_operator_runtime_material_bucket_names_json" \
+    --argjson preview_operator_runtime_material_kms_key_arns "$preview_operator_runtime_material_kms_key_arns_json" \
+    --argjson preview_operator_checkpoint_blob_bucket_names "$preview_operator_checkpoint_blob_bucket_names_json" \
+    --argjson preview_operator_checkpoint_blob_kms_key_arns "$preview_operator_checkpoint_blob_kms_key_arns_json" \
+    --argjson preview_operator_checkpoint_signer_kms_key_arns "$allowed_checkpoint_signer_kms_key_arns_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -1109,7 +1340,24 @@ production_write_shared_terraform_override_tfvars() {
     + (if ($shared_service_client_cidr_blocks | length) == 0 then {} else {
       shared_service_client_cidr_blocks: $shared_service_client_cidr_blocks,
       shared_ipfs_client_cidr_blocks: $shared_service_client_cidr_blocks
-    } end)' >"$output_file"
+    } end)
+    + (if $preview_operator_fleet_enabled then {
+      preview_operator_fleet_enabled: true,
+      preview_operator_count: $preview_operator_count,
+      preview_operator_ami_id: $preview_operator_ami_id,
+      preview_operator_instance_type: $preview_operator_instance_type,
+      preview_operator_root_volume_size_gb: $preview_operator_root_volume_size_gb,
+      preview_operator_public_subnet_ids: $preview_operator_public_subnet_ids,
+      preview_operator_client_cidr_blocks: $preview_operator_client_cidr_blocks,
+      preview_operator_client_security_group_ids: $preview_operator_client_security_group_ids,
+      preview_operator_runtime_config_secret_ids: $preview_operator_runtime_config_secret_ids,
+      preview_operator_runtime_config_secret_kms_key_arns: $preview_operator_runtime_config_secret_kms_key_arns,
+      preview_operator_runtime_material_bucket_names: $preview_operator_runtime_material_bucket_names,
+      preview_operator_runtime_material_kms_key_arns: $preview_operator_runtime_material_kms_key_arns,
+      preview_operator_checkpoint_blob_bucket_names: $preview_operator_checkpoint_blob_bucket_names,
+      preview_operator_checkpoint_blob_kms_key_arns: $preview_operator_checkpoint_blob_kms_key_arns,
+      preview_operator_checkpoint_signer_kms_key_arns: $preview_operator_checkpoint_signer_kms_key_arns
+    } else {} end)' >"$output_file"
 }
 
 production_write_app_terraform_override_tfvars() {

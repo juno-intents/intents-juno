@@ -294,7 +294,7 @@ EOF
 }
 
 test_resolve_role_runtime_release_inputs_seeds_live_e2e_operator_ami_from_release_tag() {
-  local workdir fake_bin releases_dir output_inventory inventory
+  local workdir fake_bin releases_dir output_inventory production_shared_output_inventory inventory production_shared_inventory
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
   releases_dir="$workdir/releases"
@@ -382,6 +382,28 @@ EOF
 
   assert_eq "$(jq -r '.shared_services.live_e2e.operator_ami_id' "$output_inventory")" "ami-0operator1234567" "release resolver seeds live-e2e operator ami from the operator stack release"
   assert_contains "$(cat "$workdir/gh.log")" "release download operator-stack-ami-v1.2.3-testnet" "release resolver downloads the operator stack ami manifest"
+
+  production_shared_inventory="$workdir/inventory.production-shared.json"
+  production_shared_output_inventory="$workdir/inventory.production-shared.resolved.json"
+  write_inventory_fixture "$production_shared_inventory"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0staleoperator000",
+        public_subnet_ids: ["subnet-0previewpublica", "subnet-0previewpublicb"]
+      }
+  ' "$production_shared_inventory" >"$production_shared_inventory.tmp"
+  mv "$production_shared_inventory.tmp" "$production_shared_inventory"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/resolve-role-runtime-release-inputs.sh" \
+    --inventory "$production_shared_inventory" \
+    --output "$production_shared_output_inventory" \
+    --operator-stack-ami-release-tag operator-stack-ami-v1.2.3-testnet \
+    --github-repo juno-intents/intents-juno
+
+  assert_eq "$(jq -r '.shared_services.preview_operator_fleet.ami_id' "$production_shared_output_inventory")" "ami-0operator1234567" "release resolver makes the operator stack release ami authoritative for production-shared preview operators"
   rm -rf "$workdir"
 }
 

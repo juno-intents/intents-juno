@@ -70,6 +70,7 @@ find "$operators_dir" -mindepth 1 -maxdepth 1 -type d | sort | while IFS= read -
     | .runtime_material_ref = $handoff.runtime_material_ref
     | .runtime_config_secret_id = $handoff.runtime_config_secret_id
     | .runtime_config_secret_region = $handoff.runtime_config_secret_region
+    | .runtime_config_secret_kms_key_id = ($handoff.runtime_config_secret_kms_key_id // .runtime_config_secret_kms_key_id)
     | .base_relayer_address = ($handoff.base_relayer_address // .base_relayer_address)
     | .withdraw_coordinator_juno_wallet_id = ($handoff.withdraw_coordinator_juno_wallet_id // .withdraw_coordinator_juno_wallet_id)
     | .withdraw_finalizer_juno_scan_wallet_id = ($handoff.withdraw_finalizer_juno_scan_wallet_id // .withdraw_finalizer_juno_scan_wallet_id)

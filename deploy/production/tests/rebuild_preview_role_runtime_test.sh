@@ -76,15 +76,21 @@ write_fake_rebuild_deploy_coordinator() {
 set -euo pipefail
 printf 'deploy-coordinator %s\n' "\$*" >>"$log_file"
 output_dir=""
+inventory=""
 args=( "\$@" )
 for ((i = 0; i < \${#args[@]}; i++)); do
-  if [[ "\${args[i]}" == "--output-dir" ]]; then
-    output_dir="\${args[i+1]}"
-    break
-  fi
+  case "\${args[i]}" in
+    --output-dir) output_dir="\${args[i+1]}" ;;
+    --inventory) inventory="\${args[i+1]}" ;;
+  esac
 done
 env_dir="\$output_dir/preview"
 mkdir -p "\$env_dir/app"
+if [[ -n "\$inventory" && -f "\$inventory" ]]; then
+  jq '.shared_services.preview_operator_roles_merged = true' "\$inventory" >"\$env_dir/inventory.preview-operator-roles.json"
+else
+  printf '{"environment":"preview","shared_services":{"preview_operator_roles_merged":true}}\n' >"\$env_dir/inventory.preview-operator-roles.json"
+fi
 shared_queue_driver="\${TEST_SHARED_QUEUE_DRIVER:-}"
 shared_queue_shadow_driver="\${TEST_SHARED_QUEUE_SHADOW_DRIVER:-}"
 proof_queue_shadow_driver="\${TEST_PROOF_QUEUE_SHADOW_DRIVER:-}"
@@ -488,6 +494,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_eq "${first_roll_line:+present}" "present" "rebuild performs the initial operator rollout"
   assert_eq "${wireguard_refresh_line:+present}" "present" "rebuild refreshes wireguard backoffice routing"
   assert_eq "${final_roll_line:+present}" "present" "rebuild performs the final operator rollout"
+  assert_contains "$(cat "$log_file")" "--inventory $output_root/preview/inventory.preview-operator-roles.json --shared-manifest $output_root/preview/shared-manifest.json --dkg-summary $dkg_summary --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet --output-dir $output_root/preview/operator-rollout" "rebuild seeds the initial operator rollout from coordinator-merged preview operator metadata"
   assert_contains "$(cat "$log_file")" "--inventory $output_root/preview/operator-rollout/inventory.operators-rolled.json --shared-manifest $output_root/preview/shared-manifest.json --dkg-summary $dkg_summary --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet --output-dir $output_root/preview/operator-rollout-final" "rebuild seeds the final operator rollout from the first rolled inventory"
   if (( first_roll_line >= wireguard_refresh_line )); then
     printf 'initial operator rollout must run before wireguard backoffice refresh\n' >&2
@@ -500,7 +507,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_contains "$(cat "$refresh_log")" "--rolled-inventory $output_root/preview/operator-rollout-final/inventory.operators-rolled.json" "rebuild refreshes backoffice from the final rolled inventory"
   assert_contains "$(cat "$refresh_log")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes the live app handoff in place"
   assert_contains "$(cat "$refresh_log")" "--output-dir $output_root/preview/operator-rollout-final" "rebuild refresh stores app refresh evidence beside the final operator rollout evidence"
-  assert_contains "$(cat "$log_file")" "refresh-preview-wireguard-backoffice --inventory $output_root/preview/inventory.resolved.json" "rebuild refreshes wireguard backoffice routing after operator rollout"
+  assert_contains "$(cat "$log_file")" "refresh-preview-wireguard-backoffice --inventory $output_root/preview/inventory.preview-operator-roles.json" "rebuild refreshes wireguard backoffice routing after operator rollout"
   assert_contains "$(cat "$log_file")" "--operator-deploy $output_root/preview/operator-rollout/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "rebuild uses a rendered operator handoff to resolve internal backoffice endpoints"
   assert_contains "$(cat "$refresh_log")" "refresh-preview-app-backoffice" "rebuild refreshes app backoffice after the final operator rollout"
   if (( first_canary_line >= final_roll_line )); then

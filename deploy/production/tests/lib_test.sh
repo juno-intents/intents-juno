@@ -539,6 +539,251 @@ test_write_shared_terraform_override_tfvars_includes_operator_private_network_ci
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_includes_preview_operator_fleet() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .app_role.public_subnet_ids = ["subnet-0previewpublica", "subnet-0previewpublicb"]
+    | .app_role.private_subnet_ids = ["subnet-0previewprivatea", "subnet-0previewprivateb"]
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0previewoperator1234",
+        instance_type: "t3.medium",
+        root_volume_size_gb: 40,
+        public_subnet_ids: ["subnet-0previewpublica", "subnet-0previewpublicb"],
+        client_cidr_blocks: ["203.0.113.10/32"],
+        client_security_group_ids: ["sg-previewclient012345"]
+      }
+    | .operators[0].runtime_material_ref = {
+        mode: "s3-kms-zip",
+        bucket: "preview-operator-material",
+        key: "operators/op1/runtime-material.zip",
+        region: "us-east-1",
+        kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/runtime-material"
+      }
+    | .operators[0].runtime_config_secret_id = "preview/op1/runtime-config"
+    | .operators[0].runtime_config_secret_region = "us-east-1"
+    | .operators[0].runtime_config_secret_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/runtime-config-secret"
+    | .operators[0].checkpoint_signer_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/checkpoint-signer"
+    | .operators[0].checkpoint_blob_bucket = "preview-checkpoint-blobs"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/checkpoint-blobs"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.preview_operator_fleet_enabled' "$override_file")" "true" "production shared tfvars enable preview operator fleet explicitly"
+  assert_eq "$(jq -r '.preview_operator_count' "$override_file")" "1" "production shared tfvars size preview operator fleet from inventory"
+  assert_eq "$(jq -r '.preview_operator_ami_id' "$override_file")" "ami-0previewoperator1234" "production shared tfvars include preview operator ami"
+  assert_eq "$(jq -r '.preview_operator_instance_type' "$override_file")" "t3.medium" "production shared tfvars include preview operator instance type"
+  assert_eq "$(jq -r '.preview_operator_root_volume_size_gb' "$override_file")" "40" "production shared tfvars include preview operator root size"
+  assert_eq "$(jq -r '.preview_operator_public_subnet_ids[0]' "$override_file")" "subnet-0previewpublica" "production shared tfvars include preview operator public subnets"
+  assert_eq "$(jq -r '.preview_operator_client_cidr_blocks[0]' "$override_file")" "203.0.113.10/32" "production shared tfvars include preview operator ingress cidrs"
+  assert_eq "$(jq -r '.preview_operator_client_security_group_ids[0]' "$override_file")" "sg-previewclient012345" "production shared tfvars include preview operator ingress security groups"
+  assert_eq "$(jq -r '.preview_operator_runtime_config_secret_ids[0]' "$override_file")" "preview/op1/runtime-config" "production shared tfvars include preview runtime config secret ids"
+  assert_eq "$(jq -r '.preview_operator_runtime_config_secret_kms_key_arns[0]' "$override_file")" "arn:aws:kms:us-east-1:021490342184:key/runtime-config-secret" "production shared tfvars include preview runtime config secret kms key"
+  assert_eq "$(jq -r '.preview_operator_runtime_material_bucket_names[0]' "$override_file")" "preview-operator-material" "production shared tfvars include preview runtime material bucket"
+  assert_eq "$(jq -r '.preview_operator_runtime_material_kms_key_arns[0]' "$override_file")" "arn:aws:kms:us-east-1:021490342184:key/runtime-material" "production shared tfvars include preview runtime material kms key"
+  assert_eq "$(jq -r '.preview_operator_checkpoint_signer_kms_key_arns[0]' "$override_file")" "arn:aws:kms:us-east-1:021490342184:key/checkpoint-signer" "production shared tfvars include preview checkpoint signer kms key"
+  assert_eq "$(jq -r '.preview_operator_checkpoint_blob_bucket_names[0]' "$override_file")" "preview-checkpoint-blobs" "production shared tfvars include preview checkpoint blob bucket"
+  assert_eq "$(jq -r '.preview_operator_checkpoint_blob_kms_key_arns[0]' "$override_file")" "arn:aws:kms:us-east-1:021490342184:key/checkpoint-blobs" "production shared tfvars include preview checkpoint blob kms key"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_rejects_preview_operator_fleet_outside_preview() {
+  local workdir override_file stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0previewoperator1234",
+        public_subnet_ids: ["subnet-0previewpublica"]
+      }
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  stderr_file="$workdir/stderr"
+  if (production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file") 2>"$stderr_file"; then
+    printf 'expected preview operator fleet to be rejected outside preview\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "shared_services.preview_operator_fleet.enabled can only be true when environment=preview" "production shared tfvars reject preview operator fleet outside preview"
+  rm -rf "$workdir"
+}
+
+test_merge_preview_operator_roles_from_tf_output() {
+  local workdir merged_inventory tf_json
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0previewoperator1234",
+        public_subnet_ids: ["subnet-0previewpublica"]
+      }
+    | .operators[0].asg = null
+    | .operators[0].launch_template = null
+    | .operators[0].operator_host = null
+    | .operators[0].public_endpoint = null
+    | .operators[0].private_endpoint = null
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .preview_operator_roles = {
+      value: [
+        {
+          index: 1,
+          asg: "intents-juno-shared-preview-operator-1",
+          launch_template: { id: "lt-previewop1", version: "4" },
+          operator_host: "44.201.10.10",
+          public_endpoint: "44.201.10.10",
+          private_endpoint: "10.0.10.10",
+          instance_id: "i-previewop1"
+        }
+      ]
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  merged_inventory="$workdir/inventory.merged.json"
+  production_merge_preview_operator_roles_from_tf_output "$workdir/inventory.json" "$tf_json" "$merged_inventory"
+
+  assert_eq "$(jq -r '.operators[0].asg' "$merged_inventory")" "intents-juno-shared-preview-operator-1" "preview operator role merge writes asg"
+  assert_eq "$(jq -r '.operators[0].launch_template.id' "$merged_inventory")" "lt-previewop1" "preview operator role merge writes launch template id"
+  assert_eq "$(jq -r '.operators[0].launch_template.version' "$merged_inventory")" "4" "preview operator role merge writes launch template version"
+  assert_eq "$(jq -r '.operators[0].operator_host' "$merged_inventory")" "44.201.10.10" "preview operator role merge writes operator host"
+  assert_eq "$(jq -r '.operators[0].private_endpoint' "$merged_inventory")" "10.0.10.10" "preview operator role merge writes private endpoint"
+  assert_eq "$(jq -r '.operators[0].instance_id' "$merged_inventory")" "i-previewop1" "preview operator role merge writes instance id"
+  rm -rf "$workdir"
+}
+
+test_merge_preview_operator_roles_rejects_tf_output_when_preview_fleet_disabled() {
+  local workdir merged_inventory tf_json stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_services.preview_operator_fleet = {
+        enabled: false,
+        ami_id: "ami-0previewoperator1234",
+        public_subnet_ids: ["subnet-0previewpublica"]
+      }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .preview_operator_roles = {
+      value: [
+        {
+          index: 1,
+          asg: "intents-juno-shared-preview-operator-1",
+          launch_template: { id: "lt-previewop1", version: "4" },
+          operator_host: "44.201.10.10",
+          public_endpoint: "44.201.10.10",
+          private_endpoint: "10.0.10.10",
+          instance_id: "i-previewop1"
+        }
+      ]
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  merged_inventory="$workdir/inventory.merged.json"
+  stderr_file="$workdir/stderr.log"
+  if (production_merge_preview_operator_roles_from_tf_output "$workdir/inventory.json" "$tf_json" "$merged_inventory") 2>"$stderr_file"; then
+    printf 'expected production_merge_preview_operator_roles_from_tf_output to reject preview_operator_roles when preview fleet is disabled\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "preview_operator_roles terraform output can only be merged when shared_services.preview_operator_fleet.enabled=true" "preview operator role merge rejects stale roles when preview fleet is disabled"
+  rm -rf "$workdir"
+}
+
+test_merge_preview_operator_roles_requires_tf_output_when_preview_fleet_enabled() {
+  local workdir tf_json output_file stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0previewoperator1234",
+        public_subnet_ids: ["subnet-0previewpublica"]
+      }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq 'del(.preview_operator_roles)' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  output_file="$workdir/inventory.merged.json"
+  stderr_file="$workdir/stderr.log"
+  if (production_merge_preview_operator_roles_from_tf_output "$workdir/inventory.json" "$tf_json" "$output_file") 2>"$stderr_file"; then
+    printf 'expected production_merge_preview_operator_roles_from_tf_output to reject missing preview_operator_roles when preview fleet is enabled\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "preview_operator_roles terraform output is required when shared_services.preview_operator_fleet.enabled=true" "preview operator role merge fails closed for enabled preview fleets"
+  rm -rf "$workdir"
+}
+
+test_merge_preview_operator_roles_rejects_stale_asg_names_when_preview_fleet_enabled() {
+  local workdir tf_json output_file stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .shared_services.preview_operator_fleet = {
+        enabled: true,
+        ami_id: "ami-0previewoperator1234",
+        public_subnet_ids: ["subnet-0previewpublica"]
+      }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .preview_operator_roles = {
+      value: [
+        {
+          index: 1,
+          asg: "old-preview-operator-1",
+          launch_template: { id: "lt-staleop1", version: "4" },
+          operator_host: "44.201.10.10",
+          public_endpoint: "44.201.10.10",
+          private_endpoint: "10.0.10.10",
+          instance_id: "i-previewop1"
+        }
+      ]
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  output_file="$workdir/inventory.merged.json"
+  stderr_file="$workdir/stderr.log"
+  if (production_merge_preview_operator_roles_from_tf_output "$workdir/inventory.json" "$tf_json" "$output_file") 2>"$stderr_file"; then
+    printf 'expected production_merge_preview_operator_roles_from_tf_output to reject stale preview asg names\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "preview_operator_roles must match inventory operators by index" "preview operator role merge rejects stale asg names"
+  rm -rf "$workdir"
+}
+
 test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable() {
   local workdir override_file
   workdir="$(mktemp -d)"
@@ -5170,6 +5415,12 @@ main() {
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_with_legacy_pause_alias
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
+  test_write_shared_terraform_override_tfvars_includes_preview_operator_fleet
+  test_write_shared_terraform_override_tfvars_rejects_preview_operator_fleet_outside_preview
+  test_merge_preview_operator_roles_from_tf_output
+  test_merge_preview_operator_roles_rejects_tf_output_when_preview_fleet_disabled
+  test_merge_preview_operator_roles_requires_tf_output_when_preview_fleet_enabled
+  test_merge_preview_operator_roles_rejects_stale_asg_names_when_preview_fleet_enabled
   test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable
   test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
