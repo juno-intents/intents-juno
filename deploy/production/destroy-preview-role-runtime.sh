@@ -43,12 +43,16 @@ done
 
 [[ -n "$inventory" ]] || die "--inventory is required"
 [[ -f "$inventory" ]] || die "inventory not found: $inventory"
-for cmd in jq terraform aws; do
-  have_cmd "$cmd" || die "required command not found: $cmd"
-done
+have_cmd jq || die "required command not found: jq"
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+[[ "$env_slug" == "preview" ]] || die "destroy-preview-role-runtime requires inventory.environment to be preview; got $env_slug"
+
+for cmd in terraform aws; do
+  have_cmd "$cmd" || die "required command not found: $cmd"
+done
+
 shared_terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
 shared_terraform_dir="$(production_abs_path "$REPO_ROOT" "$shared_terraform_dir_rel")"
 app_terraform_dir_rel="$(production_json_required "$inventory" '.app_role.terraform_dir | select(type == "string" and length > 0)')"

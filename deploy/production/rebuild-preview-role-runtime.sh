@@ -455,6 +455,9 @@ if [[ -n "$funder_key_file" && -z "$ephemeral_funding_amount_wei" ]]; then
   ephemeral_funding_amount_wei="15000000000000000"
 fi
 
+env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+[[ "$env_slug" == "preview" ]] || die "rebuild-preview-role-runtime requires inventory.environment to be preview; got $env_slug"
+
 upgrade_preview_inventory_bin="${PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN:-$SCRIPT_DIR/upgrade-preview-inventory.sh}"
 destroy_preview_role_runtime_bin="${PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN:-$SCRIPT_DIR/destroy-preview-role-runtime.sh}"
 resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN:-$SCRIPT_DIR/resolve-role-runtime-release-inputs.sh}"
@@ -482,7 +485,6 @@ for cmd in \
   [[ -x "$cmd" ]] || have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
-env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
 output_dir="$output_root/$env_slug"
 mkdir -p "$output_dir/canaries" "$output_dir/e2e"
 

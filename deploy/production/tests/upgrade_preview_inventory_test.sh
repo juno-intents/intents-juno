@@ -276,13 +276,22 @@ JSON
 JSON
     ;;
   "acm list-certificates --certificate-statuses ISSUED --includes keyTypes=RSA_2048,EC_prime256v1 --output json")
-    cat <<'JSON'
+    if [[ "${TEST_UPGRADE_PREVIEW_WILDCARD_CERTS:-false}" == "true" ]]; then
+      cat <<'JSON'
+{"CertificateSummaryList":[
+  {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/wildcard-junointents","DomainName":"*.junointents.com","SubjectAlternativeNameSummaries":["*.junointents.com"]},
+  {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/deeper-wildcard","DomainName":"*.preview.junointents.com","SubjectAlternativeNameSummaries":["*.preview.junointents.com"]}
+]}
+JSON
+    else
+      cat <<'JSON'
 {"CertificateSummaryList":[
   {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview","DomainName":"bridge.preview.intents-testing.thejunowallet.com"},
   {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/origin-preview","DomainName":"origin.preview.intents-testing.thejunowallet.com"},
   {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/ops-preview","DomainName":"ops.preview.intents-testing.thejunowallet.com"}
 ]}
 JSON
+    fi
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "$*" >&2
@@ -349,6 +358,57 @@ test_upgrade_preview_inventory_translates_legacy_preview_inputs() {
   assert_eq "$(jq -r '.operators[0].asg' "$output")" "preview-op1" "legacy preview upgrade resolves first operator asg"
   assert_eq "$(jq -r '.operators[0].launch_template.id' "$output")" "lt-op1" "legacy preview upgrade resolves first operator launch template"
   assert_contains "$(cat "$aws_log")" "acm list-certificates" "legacy preview upgrade queries ACM certificates"
+
+  rm -rf "$tmp"
+}
+
+test_upgrade_preview_inventory_resolves_single_label_wildcard_certificates() {
+  local tmp inventory state output fake_bin aws_log wildcard_arn
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  state="$tmp/terraform.tfstate"
+  output="$tmp/inventory.upgraded.json"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+  wildcard_arn="arn:aws:acm:us-east-1:021490342184:certificate/wildcard-junointents"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op1/dkg-backup.zip"
+  : >"$tmp/operators/op1/operator-secrets.env"
+  : >"$tmp/operators/op2/known_hosts"
+  : >"$tmp/operators/op2/dkg-backup.zip"
+  : >"$tmp/operators/op2/operator-secrets.env"
+  mkdir -p "$tmp/legacy-live-e2e"
+
+  write_legacy_preview_inventory "$inventory"
+  jq '
+    .shared_services.public_subdomain = "junointents.com"
+    | .app_host.bridge_public_dns_label = "preview"
+    | .app_host.ops_public_dns_label = "ops-preview"
+  ' "$inventory" >"$tmp/inventory.next"
+  mv "$tmp/inventory.next" "$inventory"
+  write_legacy_state_fixture "$state"
+  write_fake_upgrade_preview_aws "$fake_bin/aws" "$aws_log"
+
+  (
+    cd "$tmp"
+    TEST_AWS_LOG="$aws_log" TEST_UPGRADE_PREVIEW_WILDCARD_CERTS=true PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/upgrade-preview-inventory.sh" \
+        --inventory "$inventory" \
+        --legacy-state "$state" \
+        --output "$output" \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet
+  )
+
+  assert_eq "$(jq -r '.app_role.public_bridge_certificate_arn' "$output")" "$wildcard_arn" "preview upgrade allows a single-label wildcard cert for the origin hostname"
+  assert_eq "$(jq -r '.app_role.public_bridge_additional_certificate_arns[0]' "$output")" "$wildcard_arn" "preview upgrade allows a single-label wildcard cert for the bridge hostname"
+  assert_eq "$(jq -r '.app_role.internal_backoffice_certificate_arn' "$output")" "$wildcard_arn" "preview upgrade allows a single-label wildcard cert for the backoffice hostname"
+  assert_contains "$(cat "$aws_log")" "acm list-certificates" "wildcard preview upgrade queries ACM certificates"
 
   rm -rf "$tmp"
 }
@@ -571,6 +631,7 @@ test_upgrade_preview_inventory_preserves_production_shared_v2_inputs() {
 
 main() {
   test_upgrade_preview_inventory_translates_legacy_preview_inputs
+  test_upgrade_preview_inventory_resolves_single_label_wildcard_certificates
   test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs
   test_upgrade_preview_inventory_derives_live_e2e_operator_rollout_metadata_when_instance_tags_are_missing
   test_upgrade_preview_inventory_preserves_production_shared_v2_inputs

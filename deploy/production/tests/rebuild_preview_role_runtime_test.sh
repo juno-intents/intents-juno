@@ -1393,7 +1393,77 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
   rm -rf "$tmp"
 }
 
+test_rebuild_preview_role_runtime_rejects_non_preview_inventory_before_reset() {
+  local tmp fake_bin inventory dkg_summary log_file e2e_log output_root fixture_dir output status
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  e2e_log="$tmp/e2e.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+
+  mkdir -p "$fake_bin"
+  write_rebuild_inventory_fixture "$inventory"
+  jq '.environment = "mainnet"' "$inventory" >"$inventory.next"
+  mv "$inventory.next" "$inventory"
+  printf '{}' >"$dkg_summary"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/deploy-coordinator.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/provision-app-edge.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/canary-shared-services.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/refresh-app-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/canary-app-host.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/roll-preview-operators.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+
+  set +e
+  output="$(
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-binaries-release-tag app-binaries-v2026.03.20-testnet \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root" 2>&1
+  )"
+  status=$?
+  set -e
+
+  assert_eq "$status" "1" "preview rebuild rejects non-preview inventories"
+  assert_contains "$output" "rebuild-preview-role-runtime requires inventory.environment to be preview" "preview rebuild reports the non-preview inventory guard"
+  if [[ -f "$log_file" ]]; then
+    assert_eq "$(cat "$log_file")" "" "preview rebuild rejects non-preview inventories before invoking reset child scripts"
+  fi
+
+  rm -rf "$tmp"
+}
+
 main() {
+  test_rebuild_preview_role_runtime_rejects_non_preview_inventory_before_reset
   test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout
   test_rebuild_preview_role_runtime_uses_postgres_shared_validation
   test_rebuild_preview_role_runtime_runs_kafka_shadow_validation

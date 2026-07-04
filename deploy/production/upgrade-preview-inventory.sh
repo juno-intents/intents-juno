@@ -143,11 +143,26 @@ resolve_cert_arn() {
     --includes keyTypes=RSA_2048,EC_prime256v1 \
     --output json)"
   jq -r --arg domain_name "$domain_name" '
-    .CertificateSummaryList[]
-    | select((.DomainName // "") == $domain_name)
-    | .CertificateArn
-    | select(type == "string" and length > 0)
-  ' <<<"$certificates_json" | head -n 1
+    def certificate_names:
+      [(.DomainName // empty)]
+      + ((.SubjectAlternativeNameSummaries // []) | map(select(type == "string" and length > 0)));
+    def wildcard_matches($candidate; $hostname):
+      ($candidate | startswith("*."))
+      and ($hostname | endswith($candidate[1:]))
+      and (($hostname | split(".") | length) == ($candidate | split(".") | length));
+    [
+      .CertificateSummaryList[]?
+      | certificate_names as $names
+      | {
+          arn: .CertificateArn,
+          exact: ($names | any(. == $domain_name)),
+          wildcard: ($names | any(wildcard_matches(.; $domain_name)))
+        }
+      | select((.arn | type == "string" and length > 0) and (.exact or .wildcard))
+    ]
+    | sort_by(if .exact then 0 else 1 end)
+    | .[0].arn // empty
+  ' <<<"$certificates_json"
 }
 
 inventory_aws_profile() {
