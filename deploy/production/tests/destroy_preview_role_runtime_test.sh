@@ -466,6 +466,50 @@ test_destroy_preview_role_runtime_rejects_non_preview_inventory_before_mutation(
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_rejects_protected_op2_before_mutation() {
+  local tmp inventory fake_bin combined_log output status
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+
+  mkdir -p "$fake_bin"
+  write_destroy_inventory_fixture "$inventory"
+  jq '
+    .operators = [
+      {
+        operator_id: "0x9483a411f84f3a965104a2d47badd578eed4d0f4",
+        account_name: "pool2",
+        instance_id: "i-0a886419721b81020"
+      }
+    ]
+  ' "$inventory" >"$inventory.next"
+  mv "$inventory.next" "$inventory"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log"
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log"
+
+  set +e
+  output="$(
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output" 2>&1
+  )"
+  status=$?
+  set -e
+
+  assert_eq "$status" "1" "preview destroy rejects protected op2 references"
+  assert_contains "$output" "protected op2 resource reference is not allowed in preview destroy inventory" "preview destroy reports the protected op2 guard"
+  assert_contains "$output" "pool2" "preview destroy reports the protected op2 account name"
+  assert_contains "$output" "i-0a886419721b81020" "preview destroy reports the protected op2 instance id"
+  if [[ -f "$combined_log" ]]; then
+    assert_eq "$(cat "$combined_log")" "" "preview destroy rejects protected op2 references before terraform or aws calls"
+  fi
+
+  rm -rf "$tmp"
+}
+
 test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   local tmp inventory app_deploy fake_bin tf_log aws_log edge_state cloudfront_state_dir
   tmp="$(mktemp -d)"
@@ -769,6 +813,7 @@ test_destroy_preview_role_runtime_deletes_stale_shared_final_snapshot() {
 
 main() {
   test_destroy_preview_role_runtime_rejects_non_preview_inventory_before_mutation
+  test_destroy_preview_role_runtime_rejects_protected_op2_before_mutation
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
   test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
   test_destroy_preview_role_runtime_ignores_stale_terminated_app_asg_members

@@ -48,6 +48,7 @@ have_cmd jq || die "required command not found: jq"
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
 [[ "$env_slug" == "preview" ]] || die "destroy-preview-role-runtime requires inventory.environment to be preview; got $env_slug"
+production_reject_protected_op2_references "$inventory" "preview destroy inventory"
 
 for cmd in terraform aws; do
   have_cmd "$cmd" || die "required command not found: $cmd"
