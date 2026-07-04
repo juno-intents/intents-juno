@@ -4452,6 +4452,26 @@ test_write_app_terraform_override_tfvars_preserves_explicit_instance_type() {
   rm -rf "$workdir"
 }
 
+test_write_app_terraform_override_tfvars_preserves_explicit_capacity() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.min_size = 1
+    | .app_role.desired_capacity = 1
+    | .app_role.max_size = 2
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/app-terraform.auto.tfvars.json"
+  production_write_app_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.app_min_size' "$override_file")" "1" "app runtime tfvars preserve the explicit inventory app minimum capacity"
+  assert_eq "$(jq -r '.app_desired_capacity' "$override_file")" "1" "app runtime tfvars preserve the explicit inventory app desired capacity"
+  assert_eq "$(jq -r '.app_max_size' "$override_file")" "2" "app runtime tfvars preserve the explicit inventory app maximum capacity"
+  rm -rf "$workdir"
+}
+
 test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root() {
   local workdir fakebin log_file output_file expected_repo_root
   workdir="$(mktemp -d)"
@@ -4957,6 +4977,7 @@ main() {
   test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
   test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates
   test_write_app_terraform_override_tfvars_preserves_explicit_instance_type
+  test_write_app_terraform_override_tfvars_preserves_explicit_capacity
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
   test_production_run_release_binary_executes_directly_on_host_when_runner_not_required
   test_production_run_release_binary_uses_docker_runner_when_forced

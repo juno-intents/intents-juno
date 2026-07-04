@@ -1046,7 +1046,7 @@ production_write_app_terraform_override_tfvars() {
   local aws_region vpc_id public_subnet_ids_json private_subnet_ids_json
   local app_ami_id app_instance_profile_name app_instance_type public_bridge_certificate_arn internal_backoffice_certificate_arn
   local public_bridge_additional_certificate_arns_json
-  local alarm_actions_json
+  local alarm_actions_json app_capacity_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   app_role_json="$(production_inventory_app_role_json "$inventory")"
@@ -1065,6 +1065,12 @@ production_write_app_terraform_override_tfvars() {
   app_instance_profile_name="$(jq -r '.app_instance_profile_name // empty' <<<"$app_role_json")"
   [[ -n "$app_instance_profile_name" ]] || die "app_role.app_instance_profile_name is required for app runtime terraform"
   app_instance_type="$(jq -r 'if (.instance_type? | type) == "string" then .instance_type else "" end' <<<"$app_role_json")"
+  app_capacity_json="$(jq -c '
+    {}
+    + (if (.min_size? | type) == "number" then {app_min_size: .min_size} else {} end)
+    + (if (.desired_capacity? | type) == "number" then {app_desired_capacity: .desired_capacity} else {} end)
+    + (if (.max_size? | type) == "number" then {app_max_size: .max_size} else {} end)
+  ' <<<"$app_role_json")"
   public_bridge_certificate_arn="$(jq -r '.public_bridge_certificate_arn // empty' <<<"$app_role_json")"
   [[ -n "$public_bridge_certificate_arn" ]] || die "app_role.public_bridge_certificate_arn is required for app runtime terraform"
   public_bridge_additional_certificate_arns_json="$(jq -c '
@@ -1095,6 +1101,7 @@ production_write_app_terraform_override_tfvars() {
     --argjson public_bridge_additional_certificate_arns "$public_bridge_additional_certificate_arns_json" \
     --arg internal_backoffice_certificate_arn "$internal_backoffice_certificate_arn" \
     --argjson alarm_actions "$alarm_actions_json" \
+    --argjson app_capacity "$app_capacity_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -1108,7 +1115,8 @@ production_write_app_terraform_override_tfvars() {
       internal_backoffice_certificate_arn: $internal_backoffice_certificate_arn,
       alarm_actions: $alarm_actions
     }
-    + (if $app_instance_type == "" then {} else {app_instance_type: $app_instance_type} end)' >"$output_file"
+    + (if $app_instance_type == "" then {} else {app_instance_type: $app_instance_type} end)
+    + $app_capacity' >"$output_file"
 }
 
 production_parse_postgres_dsn_field() {
