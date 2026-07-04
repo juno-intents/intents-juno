@@ -298,6 +298,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_QUEUE_DRIVER "$operator_queue_driver"' "config hydrator persists the operator queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"' "config hydrator persists the proof queue driver"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver"' "config hydrator persists the proof shadow queue driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" PROOF_RESPONSE_POSTGRES_INITIAL_POSITION "$proof_response_postgres_initial_position"' "config hydrator persists proof response postgres initial position"
+  assert_contains "$hydrator_script" 'proof_response_postgres_initial_position="latest"' "config hydrator defaults postgres proof response consumers to latest"
   assert_contains "$hydrator_script" 'for effective_queue_driver in \' "config hydrator evaluates effective queue drivers"
   assert_contains "$hydrator_script" 'if [[ "$queue_uses_kafka" == true ]]; then' "config hydrator validates kafka auth only when an effective queue driver uses kafka"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
@@ -456,6 +458,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'OPERATOR_QUEUE_DRIVER=kafka' "bootstrap env defaults operator main queues to kafka"
   assert_contains "$script_text" 'PROOF_QUEUE_DRIVER=kafka' "bootstrap env defaults proof queues to kafka"
   assert_contains "$script_text" 'PROOF_SHADOW_QUEUE_DRIVER=' "bootstrap env leaves proof shadow queue disabled until Phase 5 shadowing"
+  assert_contains "$script_text" 'PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=' "bootstrap env leaves postgres proof response start position unset until cutover"
   assert_contains "$script_text" 'DEPOSIT_RELAYER_BASE_RPC_URL=' "bootstrap env leaves the dedicated deposit relayer rpc url unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
   assert_contains "$script_text" 'JUNO_SCAN_BACKFILL_FROM_HEIGHT=0' "bootstrap env pins the scanner backfill floor"
@@ -628,6 +631,7 @@ EOF
   PATH="$fake_bin:$PATH" "$hydrator" 2>"$stderr_file"
   assert_contains "$(cat "$env_file")" 'OPERATOR_QUEUE_DRIVER=postgres' "hydrator preserves full-postgres operator queue mode"
   assert_contains "$(cat "$env_file")" 'PROOF_QUEUE_DRIVER=postgres' "hydrator preserves explicit proof queue postgres mode"
+  assert_contains "$(cat "$env_file")" 'PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=latest' "hydrator defaults postgres proof response consumers to latest"
   assert_contains "$(cat "$env_file")" 'CHECKPOINT_KAFKA_BROKERS=' "hydrator can leave kafka brokers empty in full-postgres mode"
   assert_contains "$(cat "$junocashd_conf_file")" 'rpcbind=127.0.0.1' "hydrator still rewrites junocashd config in full-postgres mode"
   assert_contains "$(cat "$stderr_file")" 'hydrated operator stack config from existing' "hydrator succeeds without kafka env in full-postgres mode"
@@ -1472,6 +1476,7 @@ EOF
   for name in deposit-relayer withdraw-finalizer; do
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-driver postgres' "$name wrapper can cut proof queues over explicitly"
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name wrapper passes proof queue DSN by env indirection"
+    assert_contains "$(cat "$output_prefix.$name.args")" '--proof-response-postgres-initial-position latest' "$name wrapper starts postgres proof responses after existing artifacts"
     assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-brokers' "$name wrapper does not pass proof kafka brokers for postgres proof queue mode"
   done
 
@@ -1529,6 +1534,7 @@ EOF
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-driver postgres' "$name enables postgres proof shadow queue"
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "$name passes proof shadow queue DSN by env indirection"
     assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-shadow-queue-required' "$name leaves optional shadow fail-open by default"
+    assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-response-postgres-initial-position' "$name does not set postgres response start position while proof primary is kafka"
   done
 
   cat >"$env_file" <<EOF

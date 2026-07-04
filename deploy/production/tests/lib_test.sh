@@ -270,6 +270,7 @@ test_write_shared_terraform_override_tfvars_writes_proof_queue_driver() {
     | .shared_postgres_password = "mainnet-postgres-password"
     | .shared_services.queue.driver = "kafka"
     | .shared_services.proof_queue.driver = "postgres"
+    | .shared_services.proof_queue.coordinated_operator_cutover = true
     | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
     | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
     | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
@@ -281,6 +282,32 @@ test_write_shared_terraform_override_tfvars_writes_proof_queue_driver() {
 
   assert_eq "$(jq -r '.shared_queue_driver' "$override_file")" "kafka" "production shared tfvars keep MSK lifecycle on kafka"
   assert_eq "$(jq -r '.shared_proof_queue_driver' "$override_file")" "postgres" "production shared tfvars include proof queue transport override"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_rejects_uncoordinated_proof_queue_cutover() {
+  local workdir override_file stderr_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .shared_services.queue.driver = "kafka"
+    | .shared_services.proof_queue.driver = "postgres"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  stderr_file="$workdir/stderr"
+  if (production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file") 2>"$stderr_file"; then
+    printf 'expected uncoordinated proof queue postgres cutover to fail\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$(cat "$stderr_file")" "shared_services.proof_queue.driver=postgres requires shared_services.proof_queue.coordinated_operator_cutover=true" "production shared tfvars reject uncoordinated proof queue cutover"
   rm -rf "$workdir"
 }
 
@@ -1309,6 +1336,7 @@ EOF
   assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=kafka" "checkpoint env keeps kafka during proof shadowing"
   assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=kafka" "proof env keeps kafka as proof primary during shadowing"
   assert_contains "$(cat "$output_env")" "PROOF_SHADOW_QUEUE_DRIVER=postgres" "proof env enables postgres shadow writes"
+  assert_contains "$(cat "$output_env")" "PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=" "proof response initial position stays empty while proof primary is kafka"
   rm -rf "$workdir"
 }
 
@@ -1349,6 +1377,7 @@ EOF
   assert_contains "$(cat "$output_env")" "OPERATOR_QUEUE_DRIVER=kafka" "operator env keeps shared queue driver on kafka"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_QUEUE_DRIVER=kafka" "checkpoint env keeps shared queue driver on kafka"
   assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=postgres" "proof env follows proof queue primary override"
+  assert_contains "$(cat "$output_env")" "PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=latest" "proof postgres response consumers skip existing shadow artifacts on first cutover"
   assert_not_contains "$(cat "$output_env")" "PROOF_SHADOW_QUEUE_DRIVER=" "proof queue primary override does not imply shadow writes"
   rm -rf "$workdir"
 }
@@ -4966,6 +4995,7 @@ main() {
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
   test_write_shared_terraform_override_tfvars_rejects_invalid_queue_driver
   test_write_shared_terraform_override_tfvars_writes_proof_queue_driver
+  test_write_shared_terraform_override_tfvars_rejects_uncoordinated_proof_queue_cutover
   test_write_shared_terraform_override_tfvars_rejects_invalid_proof_queue_driver
   test_write_shared_terraform_override_tfvars_writes_right_sizing_controls
   test_write_shared_terraform_override_tfvars_pauses_proof_requestor_when_bridge_paused

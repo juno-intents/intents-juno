@@ -252,6 +252,22 @@ func TestWithdrawProofQueueConsumerConfiguresPostgres(t *testing.T) {
 	}
 }
 
+func TestWithdrawProofQueueConsumerConfiguresPostgresInitialLatest(t *testing.T) {
+	cfg, err := proofQueueConsumerConfig(proofQueueConsumerOptions{
+		Driver:                  queue.DriverPostgres,
+		StorePostgresDSN:        "postgres://state-db",
+		PostgresInitialPosition: queue.PostgresInitialPositionLatest,
+		Group:                   "withdraw-proof-group",
+		Topics:                  []string{"proof.fulfillments.v1", "proof.failures.v1"},
+	})
+	if err != nil {
+		t.Fatalf("proofQueueConsumerConfig: %v", err)
+	}
+	if got, want := cfg.PostgresInitialPosition, queue.PostgresInitialPositionLatest; got != want {
+		t.Fatalf("PostgresInitialPosition = %q, want %q", got, want)
+	}
+}
+
 func TestWithdrawProofQueueProducerConfiguresPostgresPrimary(t *testing.T) {
 	var configs []queue.ProducerConfig
 	factory := func(ctx context.Context, cfg queue.ProducerConfig) (queue.Producer, error) {

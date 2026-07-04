@@ -930,6 +930,11 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
+  if [[ "$shared_proof_queue_driver" == "postgres" ]]; then
+    jq -e '.shared_services.proof_queue.coordinated_operator_cutover == true' "$inventory" >/dev/null 2>&1 \
+      || die "shared_services.proof_queue.driver=postgres requires shared_services.proof_queue.coordinated_operator_cutover=true so proof ECS is not cut over without operator proof consumers"
+  fi
+
   [[ -n "$vpc_id" ]] || die "app_role.vpc_id is required for production shared terraform"
   [[ "$(jq -r 'length' <<<"$private_subnet_ids_json")" -ge 2 ]] || die "app_role.private_subnet_ids must include at least two subnet ids for production shared terraform"
   [[ -n "$shared_postgres_password" ]] || die "shared_postgres_password is required for production shared terraform"
@@ -3945,6 +3950,7 @@ production_render_operator_stack_env() {
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
   local shared_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver proof_shadow_queue_driver_env_line
+  local proof_response_postgres_initial_position
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
   deposit_scan_wallet_id=""
@@ -4021,6 +4027,10 @@ production_render_operator_stack_env() {
   if [[ -n "$proof_shadow_queue_driver" ]]; then
     proof_shadow_queue_driver_env_line="PROOF_SHADOW_QUEUE_DRIVER=$proof_shadow_queue_driver"
   fi
+  proof_response_postgres_initial_position=""
+  if [[ "$effective_proof_queue_driver" == "postgres" ]]; then
+    proof_response_postgres_initial_position="latest"
+  fi
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
   kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   if [[ -z "$kafka_critical_hmac_key" ]]; then
@@ -4096,6 +4106,7 @@ OPERATOR_QUEUE_DRIVER=$shared_queue_driver
 CHECKPOINT_QUEUE_DRIVER=$shared_queue_driver
 PROOF_QUEUE_DRIVER=$effective_proof_queue_driver
 $proof_shadow_queue_driver_env_line
+PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=$proof_response_postgres_initial_position
 JUNO_QUEUE_KAFKA_TLS=true
 JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode // ""' "$shared_manifest")
 JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region // ""' "$shared_manifest")

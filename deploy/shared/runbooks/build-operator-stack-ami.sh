@@ -568,6 +568,7 @@ PROOF_RESULT_TOPIC=proof.fulfillments.v1
 PROOF_FAILURE_TOPIC=proof.failures.v1
 PROOF_QUEUE_DRIVER=kafka
 PROOF_SHADOW_QUEUE_DRIVER=
+PROOF_RESPONSE_POSTGRES_INITIAL_POSITION=
 DEPOSIT_IMAGE_ID=
 DEPOSIT_OWALLET_IVK=
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=200
@@ -923,6 +924,7 @@ withdraw_finalizer_queue_driver="$(resolve_value "WITHDRAW_FINALIZER_QUEUE_DRIVE
 base_event_scanner_queue_driver="$(resolve_value "BASE_EVENT_SCANNER_QUEUE_DRIVER" "$(read_env_value BASE_EVENT_SCANNER_QUEUE_DRIVER || true)" || true)"
 proof_queue_driver="$(resolve_value "PROOF_QUEUE_DRIVER" "$(read_env_value PROOF_QUEUE_DRIVER || printf 'kafka')" || printf 'kafka')"
 proof_shadow_queue_driver="$(resolve_value "PROOF_SHADOW_QUEUE_DRIVER" "$(read_env_value PROOF_SHADOW_QUEUE_DRIVER || true)" || true)"
+proof_response_postgres_initial_position="$(resolve_value "PROOF_RESPONSE_POSTGRES_INITIAL_POSITION" "$(read_env_value PROOF_RESPONSE_POSTGRES_INITIAL_POSITION || true)" || true)"
 checkpoint_blob_bucket="$(resolve_value "CHECKPOINT_BLOB_BUCKET" "$(read_env_value CHECKPOINT_BLOB_BUCKET || true)" || true)"
 checkpoint_blob_prefix="$(resolve_value "CHECKPOINT_BLOB_PREFIX" "$(read_env_value CHECKPOINT_BLOB_PREFIX || true)" || true)"
 checkpoint_blob_sse_kms_key_id="$(resolve_value "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$(read_env_value CHECKPOINT_BLOB_SSE_KMS_KEY_ID || true)" || true)"
@@ -963,8 +965,19 @@ withdraw_finalizer_queue_driver="$(normalize_optional_queue_driver WITHDRAW_FINA
 base_event_scanner_queue_driver="$(normalize_optional_queue_driver BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver")"
 proof_queue_driver="$(normalize_required_queue_driver PROOF_QUEUE_DRIVER "$proof_queue_driver" kafka)"
 proof_shadow_queue_driver="$(normalize_optional_queue_driver PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver")"
+proof_response_postgres_initial_position="$(printf '%s' "${proof_response_postgres_initial_position:-}" | tr '[:upper:]' '[:lower:]')"
+case "$proof_response_postgres_initial_position" in
+  ""|earliest|latest) ;;
+  *) fail "requires PROOF_RESPONSE_POSTGRES_INITIAL_POSITION to be empty, earliest, or latest" ;;
+esac
 if [[ "$proof_queue_driver" == "postgres" && "$proof_shadow_queue_driver" == "postgres" ]]; then
   fail "requires PROOF_SHADOW_QUEUE_DRIVER to be empty when PROOF_QUEUE_DRIVER=postgres"
+fi
+if [[ "$proof_queue_driver" == "postgres" && -z "$proof_response_postgres_initial_position" ]]; then
+  proof_response_postgres_initial_position="latest"
+fi
+if [[ "$proof_queue_driver" != "postgres" && -n "$proof_response_postgres_initial_position" ]]; then
+  fail "requires PROOF_RESPONSE_POSTGRES_INITIAL_POSITION to be empty unless PROOF_QUEUE_DRIVER=postgres"
 fi
 
 effective_checkpoint_queue_driver="${checkpoint_queue_driver:-$operator_queue_driver}"
@@ -1088,6 +1101,7 @@ set_env_value "$tmp_env" WITHDRAW_FINALIZER_QUEUE_DRIVER "$withdraw_finalizer_qu
 set_env_value "$tmp_env" BASE_EVENT_SCANNER_QUEUE_DRIVER "$base_event_scanner_queue_driver"
 set_env_value "$tmp_env" PROOF_QUEUE_DRIVER "$proof_queue_driver"
 set_env_value "$tmp_env" PROOF_SHADOW_QUEUE_DRIVER "$proof_shadow_queue_driver"
+set_env_value "$tmp_env" PROOF_RESPONSE_POSTGRES_INITIAL_POSITION "$proof_response_postgres_initial_position"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
@@ -2091,20 +2105,34 @@ case "${deposit_proof_queue_driver}" in
     ;;
   postgres)
     deposit_proof_queue_args+=(--proof-queue-postgres-dsn-env "${PROOF_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+    deposit_proof_response_initial_position="$(printf '%s' "${PROOF_RESPONSE_POSTGRES_INITIAL_POSITION:-latest}" | tr '[:upper:]' '[:lower:]')"
+    case "${deposit_proof_response_initial_position}" in
+      earliest|latest)
+        deposit_proof_queue_args+=(--proof-response-postgres-initial-position "${deposit_proof_response_initial_position}")
+        ;;
+      *)
+        echo "deposit-relayer supports PROOF_RESPONSE_POSTGRES_INITIAL_POSITION earliest or latest, got ${deposit_proof_response_initial_position}" >&2
+        exit 1
+        ;;
+    esac
     ;;
-	  *)
-	    echo "deposit-relayer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${deposit_proof_queue_driver}" >&2
-	    exit 1
-	    ;;
-	esac
-	deposit_proof_shadow_queue_driver="$(printf '%s' "${PROOF_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
-	deposit_proof_shadow_queue_args=()
-	if [[ -n "${deposit_proof_shadow_queue_driver}" ]]; then
-	  deposit_proof_shadow_queue_args=(--proof-shadow-queue-driver "${deposit_proof_shadow_queue_driver}")
-	  case "${deposit_proof_shadow_queue_driver}" in
-	    kafka)
-	      deposit_proof_shadow_queue_brokers="${PROOF_SHADOW_QUEUE_BROKERS:-${PROOF_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}}"
-	      [[ -n "${deposit_proof_shadow_queue_brokers}" ]] || {
+  *)
+    echo "deposit-relayer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${deposit_proof_queue_driver}" >&2
+    exit 1
+    ;;
+esac
+if [[ "${deposit_proof_queue_driver}" != "postgres" && -n "${PROOF_RESPONSE_POSTGRES_INITIAL_POSITION:-}" ]]; then
+  echo "deposit-relayer requires PROOF_RESPONSE_POSTGRES_INITIAL_POSITION to be empty unless PROOF_QUEUE_DRIVER=postgres" >&2
+  exit 1
+fi
+deposit_proof_shadow_queue_driver="$(printf '%s' "${PROOF_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
+deposit_proof_shadow_queue_args=()
+if [[ -n "${deposit_proof_shadow_queue_driver}" ]]; then
+  deposit_proof_shadow_queue_args=(--proof-shadow-queue-driver "${deposit_proof_shadow_queue_driver}")
+  case "${deposit_proof_shadow_queue_driver}" in
+    kafka)
+      deposit_proof_shadow_queue_brokers="${PROOF_SHADOW_QUEUE_BROKERS:-${PROOF_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}}"
+      [[ -n "${deposit_proof_shadow_queue_brokers}" ]] || {
 	        echo "deposit-relayer requires PROOF_SHADOW_QUEUE_BROKERS, PROOF_QUEUE_BROKERS, or CHECKPOINT_KAFKA_BROKERS when PROOF_SHADOW_QUEUE_DRIVER=kafka" >&2
 	        exit 1
 	      }
@@ -2634,16 +2662,30 @@ case "${withdraw_finalizer_proof_queue_driver}" in
     ;;
   postgres)
     withdraw_finalizer_proof_queue_args+=(--proof-queue-postgres-dsn-env "${PROOF_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}")
+    withdraw_finalizer_proof_response_initial_position="$(printf '%s' "${PROOF_RESPONSE_POSTGRES_INITIAL_POSITION:-latest}" | tr '[:upper:]' '[:lower:]')"
+    case "${withdraw_finalizer_proof_response_initial_position}" in
+      earliest|latest)
+        withdraw_finalizer_proof_queue_args+=(--proof-response-postgres-initial-position "${withdraw_finalizer_proof_response_initial_position}")
+        ;;
+      *)
+        echo "withdraw-finalizer supports PROOF_RESPONSE_POSTGRES_INITIAL_POSITION earliest or latest, got ${withdraw_finalizer_proof_response_initial_position}" >&2
+        exit 1
+        ;;
+    esac
     ;;
-	  *)
-	    echo "withdraw-finalizer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${withdraw_finalizer_proof_queue_driver}" >&2
-	    exit 1
-	    ;;
-	esac
-	withdraw_finalizer_proof_shadow_queue_driver="$(printf '%s' "${PROOF_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
-	withdraw_finalizer_proof_shadow_queue_args=()
-	if [[ -n "${withdraw_finalizer_proof_shadow_queue_driver}" ]]; then
-	  withdraw_finalizer_proof_shadow_queue_args=(--proof-shadow-queue-driver "${withdraw_finalizer_proof_shadow_queue_driver}")
+  *)
+    echo "withdraw-finalizer supports PROOF_QUEUE_DRIVER kafka or postgres, got ${withdraw_finalizer_proof_queue_driver}" >&2
+    exit 1
+    ;;
+esac
+if [[ "${withdraw_finalizer_proof_queue_driver}" != "postgres" && -n "${PROOF_RESPONSE_POSTGRES_INITIAL_POSITION:-}" ]]; then
+  echo "withdraw-finalizer requires PROOF_RESPONSE_POSTGRES_INITIAL_POSITION to be empty unless PROOF_QUEUE_DRIVER=postgres" >&2
+  exit 1
+fi
+withdraw_finalizer_proof_shadow_queue_driver="$(printf '%s' "${PROOF_SHADOW_QUEUE_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
+withdraw_finalizer_proof_shadow_queue_args=()
+if [[ -n "${withdraw_finalizer_proof_shadow_queue_driver}" ]]; then
+  withdraw_finalizer_proof_shadow_queue_args=(--proof-shadow-queue-driver "${withdraw_finalizer_proof_shadow_queue_driver}")
 	  case "${withdraw_finalizer_proof_shadow_queue_driver}" in
 	    kafka)
 	      withdraw_finalizer_proof_shadow_queue_brokers="${PROOF_SHADOW_QUEUE_BROKERS:-${PROOF_QUEUE_BROKERS:-${CHECKPOINT_KAFKA_BROKERS:-}}}"
