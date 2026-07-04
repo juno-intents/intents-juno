@@ -33,7 +33,12 @@ func TestParseArgsValidation(t *testing.T) {
 		{name: "missing dsn", args: nil, wantErr: true},
 		{name: "dsn env ok", args: []string{"--postgres-dsn-env", "QUEUE_DSN"}, wantErr: false},
 		{name: "dsn ok", args: []string{"--postgres-dsn", "postgres://example"}, wantErr: false},
+		{name: "kafka ok", args: []string{"--queue-driver", "kafka", "--kafka-brokers", "b-1:9098", "--topics", "proof.requests.v1", "--groups", "proof-requestor"}, wantErr: false},
+		{name: "kafka missing brokers", args: []string{"--queue-driver", "kafka", "--topics", "proof.requests.v1", "--groups", "proof-requestor"}, wantErr: true},
+		{name: "kafka missing topics", args: []string{"--queue-driver", "kafka", "--kafka-brokers", "b-1:9098", "--groups", "proof-requestor"}, wantErr: true},
+		{name: "kafka missing groups", args: []string{"--queue-driver", "kafka", "--kafka-brokers", "b-1:9098", "--topics", "proof.requests.v1"}, wantErr: true},
 		{name: "bad format", args: []string{"--postgres-dsn", "postgres://example", "--format", "xml"}, wantErr: true},
+		{name: "bad queue driver", args: []string{"--queue-driver", "stdio"}, wantErr: true},
 		{name: "negative max backlog", args: []string{"--postgres-dsn", "postgres://example", "--max-backlog", "-2"}, wantErr: true},
 		{name: "negative max expired leases", args: []string{"--postgres-dsn", "postgres://example", "--max-expired-leases", "-2"}, wantErr: true},
 	}
@@ -79,6 +84,33 @@ func TestParseArgsFilters(t *testing.T) {
 	}
 	if cfg.Timeout != 5*time.Second {
 		t.Fatalf("Timeout = %s, want 5s", cfg.Timeout)
+	}
+}
+
+func TestParseArgsKafkaFilters(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--queue-driver", "kafka",
+		"--kafka-brokers", " b-1:9098, b-2:9098 ",
+		"--topics", "proof.requests.v1, proof.fulfillments.v1",
+		"--groups", "proof-requestor, deposit-relayer",
+		"--format", "json",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if got, want := cfg.QueueDriver, "kafka"; got != want {
+		t.Fatalf("QueueDriver = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.KafkaBrokers, ","), "b-1:9098,b-2:9098"; got != want {
+		t.Fatalf("KafkaBrokers = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Topics, ","), "proof.requests.v1,proof.fulfillments.v1"; got != want {
+		t.Fatalf("Topics = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(cfg.Groups, ","), "proof-requestor,deposit-relayer"; got != want {
+		t.Fatalf("Groups = %q, want %q", got, want)
 	}
 }
 
@@ -177,6 +209,38 @@ func TestRunMainThresholdFailures(t *testing.T) {
 				t.Fatalf("expected diagnostic report on threshold failure, got %q", got)
 			}
 		})
+	}
+}
+
+func TestBuildKafkaLagRowsConservativeMissingOffsets(t *testing.T) {
+	t.Parallel()
+
+	rows := buildKafkaLagRows([]kafkaGroupLag{{
+		Topic: "proof.requests.v1",
+		Group: "proof-requestor",
+		Partitions: []kafkaPartitionLag{
+			{Topic: "proof.requests.v1", Partition: 0, FirstOffset: 10, LastOffset: 13, CommittedOffset: 12},
+			{Topic: "proof.requests.v1", Partition: 1, FirstOffset: 20, LastOffset: 22, CommittedOffset: -1},
+		},
+	}})
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if got, want := row.Backlog, int64(3); got != want {
+		t.Fatalf("Backlog = %d, want %d", got, want)
+	}
+	if got, want := row.FirstSeq, int64(10); got != want {
+		t.Fatalf("FirstSeq = %d, want %d", got, want)
+	}
+	if got, want := row.LastSeq, int64(21); got != want {
+		t.Fatalf("LastSeq = %d, want %d", got, want)
+	}
+	if got, want := row.NextSeq, int64(12); got != want {
+		t.Fatalf("NextSeq = %d, want %d", got, want)
+	}
+	if got, want := row.MessageCount, int64(5); got != want {
+		t.Fatalf("MessageCount = %d, want %d", got, want)
 	}
 }
 
