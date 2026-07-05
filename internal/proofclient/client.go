@@ -78,6 +78,10 @@ type QueueConfig struct {
 
 	Producer queue.Producer
 	Consumer queue.Consumer
+	// ConsumerFactory creates a short-lived response consumer for each active
+	// proof request. Long-running services should prefer this over Consumer so
+	// idle clients do not hold queue leases for proof responses.
+	ConsumerFactory func(context.Context) (queue.Consumer, error)
 
 	AckTimeout      time.Duration
 	DefaultDeadline time.Duration
@@ -94,8 +98,13 @@ type QueueClient struct {
 }
 
 func NewQueueClient(cfg QueueConfig) (*QueueClient, error) {
-	if cfg.Producer == nil || cfg.Consumer == nil {
-		return nil, fmt.Errorf("%w: producer and consumer are required", ErrInvalidConfig)
+	if cfg.Producer == nil {
+		return nil, fmt.Errorf("%w: producer is required", ErrInvalidConfig)
+	}
+	hasConsumer := cfg.Consumer != nil
+	hasConsumerFactory := cfg.ConsumerFactory != nil
+	if hasConsumer == hasConsumerFactory {
+		return nil, fmt.Errorf("%w: exactly one response consumer or consumer factory is required", ErrInvalidConfig)
 	}
 	if strings.TrimSpace(cfg.RequestTopic) == "" || strings.TrimSpace(cfg.ResultTopic) == "" || strings.TrimSpace(cfg.FailureTopic) == "" {
 		return nil, fmt.Errorf("%w: request/result/failure topics are required", ErrInvalidConfig)
@@ -129,6 +138,11 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	consumer, cleanupConsumer, err := c.responseConsumer(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer cleanupConsumer()
 	requestStartedAt := c.cfg.Now().UTC()
 
 	deadline := req.Deadline.UTC()
@@ -159,14 +173,14 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 		select {
 		case <-ctx.Done():
 			return Result{}, ctx.Err()
-		case err, ok := <-c.cfg.Consumer.Errors():
+		case err, ok := <-consumer.Errors():
 			if !ok {
 				continue
 			}
 			if err != nil {
 				return Result{}, fmt.Errorf("proofclient: consume error: %w", err)
 			}
-		case msg, ok := <-c.cfg.Consumer.Messages():
+		case msg, ok := <-consumer.Messages():
 			if !ok {
 				return Result{}, fmt.Errorf("proofclient: response consumer closed")
 			}
@@ -182,6 +196,25 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 			}
 		}
 	}
+}
+
+func (c *QueueClient) responseConsumer(ctx context.Context) (queue.Consumer, func(), error) {
+	if c.cfg.ConsumerFactory == nil {
+		return c.cfg.Consumer, func() {}, nil
+	}
+	consumer, err := c.cfg.ConsumerFactory(ctx)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("proofclient: create response consumer: %w", err)
+	}
+	if consumer == nil {
+		return nil, func() {}, fmt.Errorf("%w: response consumer factory returned nil", ErrInvalidConfig)
+	}
+	cleanup := func() {
+		if err := consumer.Close(); err != nil {
+			c.cfg.Log.Warn("proofclient: close response consumer", "err", err)
+		}
+	}
+	return consumer, cleanup, nil
 }
 
 func (c *QueueClient) acquire(ctx context.Context) error {

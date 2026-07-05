@@ -66,7 +66,7 @@ func TestPostgresQueueDeliversPerTopicInPublishOrder(t *testing.T) {
 func TestPostgresQueueRetriesUnackedAfterLeaseExpires(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	backend := newTestPostgresQueueBackend(func() time.Time { return now })
 	producer, err := newPostgresProducerWithBackend(backend)
 	if err != nil {
@@ -94,9 +94,7 @@ func TestPostgresQueueRetriesUnackedAfterLeaseExpires(t *testing.T) {
 	if got, want := string(first.Value), "retry-me"; got != want {
 		t.Fatalf("first value = %q, want %q", got, want)
 	}
-	if err := consumerA.Close(); err != nil {
-		t.Fatalf("close consumer a: %v", err)
-	}
+	stopPostgresConsumerWithoutRelease(t, consumerA)
 
 	now = now.Add(11 * time.Millisecond)
 	consumerB, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
@@ -118,6 +116,75 @@ func TestPostgresQueueRetriesUnackedAfterLeaseExpires(t *testing.T) {
 	}
 	if err := retry.Ack(ctx); err != nil {
 		t.Fatalf("ack retry: %v", err)
+	}
+}
+
+func TestPostgresQueueConsumerCloseReleasesUnackedMessages(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	backend := newTestPostgresQueueBackend(func() time.Time { return now })
+	producer, err := newPostgresProducerWithBackend(backend)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	ctx := context.Background()
+	if err := producer.Publish(ctx, "proof.fulfillments.v1", []byte("release-me")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	consumerA, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "deposit-relayer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+		PostgresOwner:         "a",
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer a: %v", err)
+	}
+	first := readQueueMessage(t, consumerA)
+	if got, want := string(first.Value), "release-me"; got != want {
+		t.Fatalf("first value = %q, want %q", got, want)
+	}
+	if err := consumerA.Close(); err != nil {
+		t.Fatalf("close consumer a: %v", err)
+	}
+	backend.mu.Lock()
+	delivery := backend.deliveries[testPostgresQueueDeliveryKey{group: "deposit-relayer-proof", topic: "proof.fulfillments.v1", seq: 1}]
+	if delivery == nil {
+		backend.mu.Unlock()
+		t.Fatal("delivery missing after close")
+	}
+	leaseOwner := delivery.leaseOwner
+	leaseExpiresZero := delivery.leaseExpires.IsZero()
+	backend.mu.Unlock()
+	if leaseOwner != "" || !leaseExpiresZero {
+		t.Fatalf("lease after close: owner=%q expires_zero=%t", leaseOwner, leaseExpiresZero)
+	}
+
+	consumerB, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "deposit-relayer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+		PostgresOwner:         "b",
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer b: %v", err)
+	}
+	defer func() { _ = consumerB.Close() }()
+
+	released := readQueueMessage(t, consumerB)
+	if got, want := string(released.Value), "release-me"; got != want {
+		t.Fatalf("released value = %q, want %q", got, want)
+	}
+	if err := released.Ack(ctx); err != nil {
+		t.Fatalf("ack released: %v", err)
 	}
 }
 
@@ -583,6 +650,52 @@ func TestPostgresQueueInitialPositionLatestSkipsExistingMessages(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueInitialPositionLatestPreparedBeforeConsumerReturns(t *testing.T) {
+	t.Parallel()
+
+	base := newTestPostgresQueueBackend(time.Now)
+	producer, err := newPostgresProducerWithBackend(base)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	ctx := context.Background()
+	if err := producer.Publish(ctx, "proof.fulfillments.v1", []byte("old")); err != nil {
+		t.Fatalf("Publish old: %v", err)
+	}
+
+	backend := newClaimBlockingPostgresQueueBackend(base)
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                  DriverPostgres,
+		Group:                   "deposit-relayer-proof",
+		Topics:                  []string{"proof.fulfillments.v1"},
+		PostgresInitialPosition: PostgresInitialPositionLatest,
+		PostgresLeaseDuration:   time.Minute,
+		PostgresPollInterval:    time.Hour,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	if got := backend.prepareCount(); got != 1 {
+		t.Fatalf("prepare count = %d, want 1", got)
+	}
+	if got, want := backend.offsetFor("deposit-relayer-proof", "proof.fulfillments.v1"), int64(2); got != want {
+		t.Fatalf("prepared offset = %d, want %d", got, want)
+	}
+
+	if err := producer.Publish(ctx, "proof.fulfillments.v1", []byte("new")); err != nil {
+		t.Fatalf("Publish new: %v", err)
+	}
+	backend.unblockClaims()
+	got := readQueueMessage(t, consumer)
+	if string(got.Value) != "new" {
+		t.Fatalf("prepared latest consumer value = %q, want new", string(got.Value))
+	}
+}
+
 func TestPostgresQueueExplicitInitialSequence(t *testing.T) {
 	t.Parallel()
 
@@ -1005,6 +1118,17 @@ func readQueueMessage(t *testing.T, consumer Consumer) Message {
 	}
 }
 
+func stopPostgresConsumerWithoutRelease(t *testing.T, consumer Consumer) {
+	t.Helper()
+
+	pc, ok := consumer.(*postgresConsumer)
+	if !ok {
+		t.Fatalf("consumer type = %T, want *postgresConsumer", consumer)
+	}
+	pc.cancel()
+	<-pc.done
+}
+
 func assertNoQueueMessage(t *testing.T, consumer Consumer, wait time.Duration) {
 	t.Helper()
 
@@ -1064,6 +1188,60 @@ type scriptedPostgresQueueBackend struct {
 	mu           sync.Mutex
 	ensureErrors []error
 	claimErrors  []error
+}
+
+type claimBlockingPostgresQueueBackend struct {
+	*testPostgresQueueBackend
+
+	mu             sync.Mutex
+	prepares       int
+	unblockClaimCh chan struct{}
+	unblockOnce    sync.Once
+}
+
+func newClaimBlockingPostgresQueueBackend(base *testPostgresQueueBackend) *claimBlockingPostgresQueueBackend {
+	return &claimBlockingPostgresQueueBackend{
+		testPostgresQueueBackend: base,
+		unblockClaimCh:           make(chan struct{}),
+	}
+}
+
+func (b *claimBlockingPostgresQueueBackend) prepare(_ context.Context, cfg postgresQueueClaimConfig) error {
+	b.mu.Lock()
+	b.prepares++
+	b.mu.Unlock()
+
+	b.testPostgresQueueBackend.mu.Lock()
+	defer b.testPostgresQueueBackend.mu.Unlock()
+	b.testPostgresQueueBackend.prepareLocked(cfg)
+	return nil
+}
+
+func (b *claimBlockingPostgresQueueBackend) claim(ctx context.Context, cfg postgresQueueClaimConfig) ([]postgresQueueRecord, error) {
+	select {
+	case <-b.unblockClaimCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.testPostgresQueueBackend.claim(ctx, cfg)
+}
+
+func (b *claimBlockingPostgresQueueBackend) prepareCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.prepares
+}
+
+func (b *claimBlockingPostgresQueueBackend) offsetFor(group, topic string) int64 {
+	b.testPostgresQueueBackend.mu.Lock()
+	defer b.testPostgresQueueBackend.mu.Unlock()
+	return b.testPostgresQueueBackend.offsets[testPostgresQueueOffsetKey{group: group, topic: topic}]
+}
+
+func (b *claimBlockingPostgresQueueBackend) unblockClaims() {
+	b.unblockOnce.Do(func() {
+		close(b.unblockClaimCh)
+	})
 }
 
 func (b *scriptedPostgresQueueBackend) ensureSchema(ctx context.Context) error {
@@ -1138,27 +1316,19 @@ func (b *testPostgresQueueBackend) enqueueTarget(_ context.Context, topic string
 	return nil
 }
 
+func (b *testPostgresQueueBackend) prepare(_ context.Context, cfg postgresQueueClaimConfig) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.prepareLocked(cfg)
+	return nil
+}
+
 func (b *testPostgresQueueBackend) claim(_ context.Context, cfg postgresQueueClaimConfig) ([]postgresQueueRecord, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	now := b.now().UTC()
-	for _, topic := range cfg.topics {
-		b.ensureOffsetLocked(cfg, topic)
-		nextSeq := b.offsets[testPostgresQueueOffsetKey{group: cfg.group, topic: topic}]
-		for _, msg := range b.messages[topic] {
-			if msg.seq < nextSeq {
-				continue
-			}
-			if !testMessageVisibleToGroup(msg, cfg.group) {
-				continue
-			}
-			key := testPostgresQueueDeliveryKey{group: cfg.group, topic: topic, seq: msg.seq}
-			if _, ok := b.deliveries[key]; !ok {
-				b.deliveries[key] = &testPostgresQueueDelivery{}
-			}
-		}
-	}
+	b.prepareLocked(cfg)
 
 	var out []postgresQueueRecord
 	for _, topic := range cfg.topics {
@@ -1195,6 +1365,25 @@ func (b *testPostgresQueueBackend) claim(_ context.Context, cfg postgresQueueCla
 		}
 	}
 	return out, nil
+}
+
+func (b *testPostgresQueueBackend) prepareLocked(cfg postgresQueueClaimConfig) {
+	for _, topic := range cfg.topics {
+		b.ensureOffsetLocked(cfg, topic)
+		nextSeq := b.offsets[testPostgresQueueOffsetKey{group: cfg.group, topic: topic}]
+		for _, msg := range b.messages[topic] {
+			if msg.seq < nextSeq {
+				continue
+			}
+			if !testMessageVisibleToGroup(msg, cfg.group) {
+				continue
+			}
+			key := testPostgresQueueDeliveryKey{group: cfg.group, topic: topic, seq: msg.seq}
+			if _, ok := b.deliveries[key]; !ok {
+				b.deliveries[key] = &testPostgresQueueDelivery{}
+			}
+		}
+	}
 }
 
 func (b *testPostgresQueueBackend) ensureOffsetLocked(cfg postgresQueueClaimConfig, topic string) {
@@ -1247,6 +1436,23 @@ func (b *testPostgresQueueBackend) ack(_ context.Context, group, topic string, s
 	delivery.leaseOwner = ""
 	delivery.leaseExpires = time.Time{}
 	b.advanceOffsetLocked(group, topic)
+	return nil
+}
+
+func (b *testPostgresQueueBackend) release(_ context.Context, group, topic string, seq int64, owner string, attempt int) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	key := testPostgresQueueDeliveryKey{group: group, topic: topic, seq: seq}
+	delivery := b.deliveries[key]
+	if delivery == nil {
+		return errPostgresQueueStaleLease
+	}
+	if delivery.acked || delivery.leaseOwner != owner || delivery.attempts != attempt {
+		return errPostgresQueueStaleLease
+	}
+	delivery.leaseOwner = ""
+	delivery.leaseExpires = time.Time{}
 	return nil
 }
 

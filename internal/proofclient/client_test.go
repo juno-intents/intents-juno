@@ -60,6 +60,29 @@ func (c *fakeConsumer) Close() error {
 	return nil
 }
 
+type closeTrackingConsumer struct {
+	msgCh  chan queue.Message
+	errCh  chan error
+	closed chan struct{}
+}
+
+func newCloseTrackingConsumer() *closeTrackingConsumer {
+	return &closeTrackingConsumer{
+		msgCh:  make(chan queue.Message, 2),
+		errCh:  make(chan error, 1),
+		closed: make(chan struct{}),
+	}
+}
+
+func (c *closeTrackingConsumer) Messages() <-chan queue.Message { return c.msgCh }
+func (c *closeTrackingConsumer) Errors() <-chan error           { return c.errCh }
+func (c *closeTrackingConsumer) Close() error {
+	close(c.closed)
+	close(c.msgCh)
+	close(c.errCh)
+	return nil
+}
+
 type fakeDLQStore struct {
 	proofs []dlq.ProofDLQRecord
 	err    error
@@ -316,6 +339,73 @@ func TestQueueClient_RequestProofWaitForSharedConsumerSlotHonorsContext(t *testi
 	assertNoPublishedRequest(t, producer.published, 50*time.Millisecond)
 }
 
+func TestQueueClient_RequestProofUsesResponseConsumerFactoryPerRequest(t *testing.T) {
+	t.Parallel()
+
+	producer := &channelProducer{published: make(chan publishedRequest, 2)}
+	createdConsumers := make(chan *closeTrackingConsumer, 2)
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic:  "proof.requests.v1",
+		ResultTopic:   "proof.fulfillments.v1",
+		FailureTopic:  "proof.failures.v1",
+		ResponseGroup: "deposit-relayer-proof",
+		Producer:      producer,
+		ConsumerFactory: func(ctx context.Context) (queue.Consumer, error) {
+			consumer := newCloseTrackingConsumer()
+			select {
+			case createdConsumers <- consumer:
+				return consumer, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+	assertNoConsumerCreated(t, createdConsumers, 50*time.Millisecond)
+
+	jobA := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctx, validProofRequest(jobA))
+		doneA <- err
+	}()
+	firstConsumer := readCreatedConsumer(t, createdConsumers)
+	first := readPublishedRequest(t, producer.published)
+	if got, want := publishedJobID(t, first.payload), jobA.Hex(); got != want {
+		t.Fatalf("first published job_id = %q, want %q", got, want)
+	}
+	firstConsumer.msgCh <- fulfillmentMessage(jobA)
+	if err := readRequestProofError(t, doneA); err != nil {
+		t.Fatalf("request A error: %v", err)
+	}
+	waitConsumerClosed(t, firstConsumer)
+	assertNoConsumerCreated(t, createdConsumers, 50*time.Millisecond)
+
+	jobB := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctx, validProofRequest(jobB))
+		doneB <- err
+	}()
+	secondConsumer := readCreatedConsumer(t, createdConsumers)
+	if secondConsumer == firstConsumer {
+		t.Fatal("expected a fresh response consumer for the second proof request")
+	}
+	second := readPublishedRequest(t, producer.published)
+	if got, want := publishedJobID(t, second.payload), jobB.Hex(); got != want {
+		t.Fatalf("second published job_id = %q, want %q", got, want)
+	}
+	secondConsumer.msgCh <- fulfillmentMessage(jobB)
+	if err := readRequestProofError(t, doneB); err != nil {
+		t.Fatalf("request B error: %v", err)
+	}
+	waitConsumerClosed(t, secondConsumer)
+}
+
 func validProofRequest(jobID common.Hash) Request {
 	return Request{
 		JobID:        jobID,
@@ -354,6 +444,38 @@ func assertNoPublishedRequest(t *testing.T, published <-chan publishedRequest, w
 	case req := <-published:
 		t.Fatalf("unexpected published request before prior request completed: topic=%s job_id=%s", req.topic, publishedJobID(t, req.payload))
 	case <-time.After(wait):
+	}
+}
+
+func readCreatedConsumer(t *testing.T, created <-chan *closeTrackingConsumer) *closeTrackingConsumer {
+	t.Helper()
+
+	select {
+	case consumer := <-created:
+		return consumer
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for response consumer factory")
+		return nil
+	}
+}
+
+func assertNoConsumerCreated(t *testing.T, created <-chan *closeTrackingConsumer, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case <-created:
+		t.Fatal("response consumer factory ran while no proof request was active")
+	case <-time.After(wait):
+	}
+}
+
+func waitConsumerClosed(t *testing.T, consumer *closeTrackingConsumer) {
+	t.Helper()
+
+	select {
+	case <-consumer.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for response consumer to close")
 	}
 }
 

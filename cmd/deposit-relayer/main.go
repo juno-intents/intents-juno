@@ -860,29 +860,24 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 			_ = producer.Close()
 			return nil, func() {}, err
 		}
-		consumer, err := queue.NewConsumer(ctx, consumerCfg)
-		if err != nil {
-			_ = producer.Close()
-			return nil, func() {}, err
-		}
 		client, err := proofclient.NewQueueClient(proofclient.QueueConfig{
 			RequestTopic:  cfg.proofRequestTopic,
 			ResultTopic:   cfg.proofResultTopic,
 			FailureTopic:  cfg.proofFailureTopic,
 			ResponseGroup: group,
 			Producer:      producer,
-			Consumer:      consumer,
-			AckTimeout:    cfg.ackTimeout,
-			DLQStore:      cfg.dlqStore,
-			Log:           cfg.log,
+			ConsumerFactory: func(ctx context.Context) (queue.Consumer, error) {
+				return queue.NewConsumer(ctx, consumerCfg)
+			},
+			AckTimeout: cfg.ackTimeout,
+			DLQStore:   cfg.dlqStore,
+			Log:        cfg.log,
 		})
 		if err != nil {
 			_ = producer.Close()
-			_ = consumer.Close()
 			return nil, func() {}, err
 		}
 		cleanup := func() {
-			_ = consumer.Close()
 			_ = producer.Close()
 		}
 		return client, cleanup, nil

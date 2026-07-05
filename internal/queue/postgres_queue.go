@@ -23,6 +23,7 @@ const (
 	postgresQueueRetryInitialBackoff = 10 * time.Millisecond
 	postgresQueueRetryMaxBackoff     = 500 * time.Millisecond
 	postgresQueueSchemaAdvisoryLock  = 0x4a554e4f51554555
+	postgresQueueCloseReleaseTimeout = 5 * time.Second
 
 	postgresQueueClaimAdvisoryLockNamespace = "intents-juno/postgres-queue/claim\x00"
 )
@@ -128,8 +129,10 @@ type postgresQueueBackend interface {
 	ensureSchema(context.Context) error
 	enqueue(context.Context, string, []byte) error
 	enqueueTarget(context.Context, string, string, []byte) error
+	prepare(context.Context, postgresQueueClaimConfig) error
 	claim(context.Context, postgresQueueClaimConfig) ([]postgresQueueRecord, error)
 	ack(context.Context, string, string, int64, string, int) error
+	release(context.Context, string, string, int64, string, int) error
 	renew(context.Context, string, string, int64, string, int, time.Duration) error
 	close() error
 }
@@ -294,35 +297,76 @@ func EnqueuePostgresTxToGroup(ctx context.Context, tx pgx.Tx, topic string, cons
 	return nil
 }
 
-func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimConfig) ([]postgresQueueRecord, error) {
+func normalizePostgresQueueClaimConfig(cfg postgresQueueClaimConfig, requireOwner bool) (postgresQueueClaimConfig, error) {
 	cfg.group = strings.TrimSpace(cfg.group)
 	cfg.topics = normalizeDedupedList(cfg.topics)
 	cfg.owner = strings.TrimSpace(cfg.owner)
 	initialPosition, err := normalizePostgresInitialPosition(cfg.initialPosition)
 	if err != nil {
-		return nil, err
+		return postgresQueueClaimConfig{}, err
 	}
 	cfg.initialPosition = initialPosition
 	if cfg.group == "" {
-		return nil, errors.New("postgres queue consumer requires group")
+		return postgresQueueClaimConfig{}, errors.New("postgres queue consumer requires group")
 	}
 	if len(cfg.topics) == 0 {
-		return nil, errors.New("postgres queue consumer requires at least one topic")
+		return postgresQueueClaimConfig{}, errors.New("postgres queue consumer requires at least one topic")
 	}
-	if cfg.owner == "" {
-		return nil, errors.New("postgres queue consumer requires owner")
-	}
-	if cfg.leaseDuration <= 0 {
-		return nil, errors.New("postgres queue lease duration must be > 0")
-	}
-	if cfg.limit <= 0 {
-		cfg.limit = 1
+	if requireOwner {
+		if cfg.owner == "" {
+			return postgresQueueClaimConfig{}, errors.New("postgres queue consumer requires owner")
+		}
+		if cfg.leaseDuration <= 0 {
+			return postgresQueueClaimConfig{}, errors.New("postgres queue lease duration must be > 0")
+		}
+		if cfg.limit <= 0 {
+			cfg.limit = 1
+		}
 	}
 	if cfg.materializeLimit <= 0 {
 		cfg.materializeLimit = defaultPostgresMaterializeLimit
 	}
-	if cfg.materializeLimit < cfg.limit {
+	if requireOwner && cfg.materializeLimit < cfg.limit {
 		cfg.materializeLimit = cfg.limit
+	}
+	return cfg, nil
+}
+
+func (s *postgresQueueStore) prepare(ctx context.Context, cfg postgresQueueClaimConfig) error {
+	cfg, err := normalizePostgresQueueClaimConfig(cfg, false)
+	if err != nil {
+		return err
+	}
+	if s == nil || s.pool == nil {
+		return errors.New("postgres queue: nil store")
+	}
+	claimLockKey1, claimLockKey2, err := postgresQueueClaimAdvisoryLockKeys(cfg.group)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres queue: begin prepare tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, claimLockKey1, claimLockKey2); err != nil {
+		return fmt.Errorf("postgres queue: lock prepare transaction: %w", err)
+	}
+	if err := preparePostgresQueueClaimTx(ctx, tx, cfg); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres queue: commit prepare tx: %w", err)
+	}
+	return nil
+}
+
+func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimConfig) ([]postgresQueueRecord, error) {
+	cfg, err := normalizePostgresQueueClaimConfig(cfg, true)
+	if err != nil {
+		return nil, err
 	}
 	if s == nil || s.pool == nil {
 		return nil, errors.New("postgres queue: nil store")
@@ -341,70 +385,8 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, claimLockKey1, claimLockKey2); err != nil {
 		return nil, fmt.Errorf("postgres queue: lock claim transaction: %w", err)
 	}
-
-	for _, topic := range cfg.topics {
-		initialSeq := cfg.initialSequences[topic]
-		if initialSeq < 0 {
-			return nil, fmt.Errorf("postgres queue: initial sequence for topic %q must be > 0", topic)
-		}
-		if initialSeq > 0 {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
-				VALUES ($1, $2, $3, now(), now())
-				ON CONFLICT (consumer_group, topic) DO NOTHING
-			`, cfg.group, topic, initialSeq); err != nil {
-				return nil, fmt.Errorf("postgres queue: ensure explicit group offset: %w", err)
-			}
-			continue
-		}
-		if cfg.initialPosition == PostgresInitialPositionLatest {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
-				SELECT $1, $2, COALESCE(MAX(seq) + 1, 1), now(), now()
-				FROM queue_messages
-				WHERE topic = $2
-				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
-				ON CONFLICT (consumer_group, topic) DO NOTHING
-			`, cfg.group, topic); err != nil {
-				return nil, fmt.Errorf("postgres queue: ensure latest group offset: %w", err)
-			}
-			continue
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
-			VALUES ($1, $2, 1, now(), now())
-			ON CONFLICT (consumer_group, topic) DO NOTHING
-		`, cfg.group, topic); err != nil {
-			return nil, fmt.Errorf("postgres queue: ensure earliest group offset: %w", err)
-		}
-	}
-
-	if _, err := tx.Exec(ctx, `
-		WITH target_topics AS (
-			SELECT topic, next_seq
-			FROM queue_group_offsets
-			WHERE consumer_group = $1
-			  AND topic = ANY($2::text[])
-		),
-		to_materialize AS (
-			SELECT m.topic, m.seq
-			FROM target_topics o
-			JOIN LATERAL (
-				SELECT topic, seq
-				FROM queue_messages
-				WHERE topic = o.topic
-				  AND seq >= o.next_seq
-				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
-				ORDER BY seq
-				LIMIT $3
-			) m ON true
-		)
-		INSERT INTO queue_deliveries (topic, seq, consumer_group, created_at, updated_at)
-		SELECT topic, seq, $1, now(), now()
-		FROM to_materialize
-		ON CONFLICT (topic, seq, consumer_group) DO NOTHING
-	`, cfg.group, cfg.topics, cfg.materializeLimit); err != nil {
-		return nil, fmt.Errorf("postgres queue: ensure deliveries: %w", err)
+	if err := preparePostgresQueueClaimTx(ctx, tx, cfg); err != nil {
+		return nil, err
 	}
 
 	rows, err := tx.Query(ctx, `
@@ -465,6 +447,74 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 		return nil, fmt.Errorf("postgres queue: commit claim tx: %w", err)
 	}
 	return records, nil
+}
+
+func preparePostgresQueueClaimTx(ctx context.Context, tx pgx.Tx, cfg postgresQueueClaimConfig) error {
+	for _, topic := range cfg.topics {
+		initialSeq := cfg.initialSequences[topic]
+		if initialSeq < 0 {
+			return fmt.Errorf("postgres queue: initial sequence for topic %q must be > 0", topic)
+		}
+		if initialSeq > 0 {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
+				VALUES ($1, $2, $3, now(), now())
+				ON CONFLICT (consumer_group, topic) DO NOTHING
+			`, cfg.group, topic, initialSeq); err != nil {
+				return fmt.Errorf("postgres queue: ensure explicit group offset: %w", err)
+			}
+			continue
+		}
+		if cfg.initialPosition == PostgresInitialPositionLatest {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
+				SELECT $1, $2, COALESCE(MAX(seq) + 1, 1), now(), now()
+				FROM queue_messages
+				WHERE topic = $2
+				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
+				ON CONFLICT (consumer_group, topic) DO NOTHING
+			`, cfg.group, topic); err != nil {
+				return fmt.Errorf("postgres queue: ensure latest group offset: %w", err)
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
+			VALUES ($1, $2, 1, now(), now())
+			ON CONFLICT (consumer_group, topic) DO NOTHING
+		`, cfg.group, topic); err != nil {
+			return fmt.Errorf("postgres queue: ensure earliest group offset: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH target_topics AS (
+			SELECT topic, next_seq
+			FROM queue_group_offsets
+			WHERE consumer_group = $1
+			  AND topic = ANY($2::text[])
+		),
+		to_materialize AS (
+			SELECT m.topic, m.seq
+			FROM target_topics o
+			JOIN LATERAL (
+				SELECT topic, seq
+				FROM queue_messages
+				WHERE topic = o.topic
+				  AND seq >= o.next_seq
+				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
+				ORDER BY seq
+				LIMIT $3
+			) m ON true
+		)
+		INSERT INTO queue_deliveries (topic, seq, consumer_group, created_at, updated_at)
+		SELECT topic, seq, $1, now(), now()
+		FROM to_materialize
+		ON CONFLICT (topic, seq, consumer_group) DO NOTHING
+	`, cfg.group, cfg.topics, cfg.materializeLimit); err != nil {
+		return fmt.Errorf("postgres queue: ensure deliveries: %w", err)
+	}
+	return nil
 }
 
 func (s *postgresQueueStore) ack(ctx context.Context, group, topic string, seq int64, owner string, attempt int) error {
@@ -543,6 +593,46 @@ func (s *postgresQueueStore) ack(ctx context.Context, group, topic string, seq i
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres queue: commit ack tx: %w", err)
+	}
+	return nil
+}
+
+func (s *postgresQueueStore) release(ctx context.Context, group, topic string, seq int64, owner string, attempt int) error {
+	if s == nil || s.pool == nil {
+		return errors.New("postgres queue: nil store")
+	}
+	group = strings.TrimSpace(group)
+	topic = strings.TrimSpace(topic)
+	owner = strings.TrimSpace(owner)
+	if group == "" || topic == "" || owner == "" || seq <= 0 || attempt <= 0 {
+		return errors.New("postgres queue: invalid release token")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		WITH locked AS MATERIALIZED (
+			SELECT consumer_group, topic, seq
+			FROM queue_deliveries
+			WHERE consumer_group = $1
+			  AND topic = $2
+			  AND seq = $3
+			  AND lease_owner = $4
+			  AND attempt_count = $5
+			  AND acked_at IS NULL
+			FOR UPDATE
+		)
+		UPDATE queue_deliveries
+		SET lease_owner = NULL,
+			lease_expires_at = NULL,
+			updated_at = clock_timestamp()
+		FROM locked
+		WHERE queue_deliveries.consumer_group = locked.consumer_group
+		  AND queue_deliveries.topic = locked.topic
+		  AND queue_deliveries.seq = locked.seq
+	`, group, topic, seq, owner, attempt)
+	if err != nil {
+		return fmt.Errorf("postgres queue: release lease: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w for group=%q topic=%q seq=%d", errPostgresQueueStaleLease, group, topic, seq)
 	}
 	return nil
 }
@@ -758,6 +848,17 @@ func newPostgresConsumerWithBackend(parent context.Context, cfg ConsumerConfig, 
 	if err := ensurePostgresQueueSchema(parent, backend); err != nil {
 		return nil, err
 	}
+	if err := retryPostgresQueueOperation(parent, func() error {
+		return backend.prepare(parent, postgresQueueClaimConfig{
+			group:            group,
+			topics:           topics,
+			initialPosition:  initialPosition,
+			initialSequences: initialSequences,
+			materializeLimit: materializeLimit,
+		})
+	}); err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithCancel(parent)
 	c := &postgresConsumer{
@@ -857,7 +958,6 @@ func (c *postgresConsumer) run(ctx context.Context) {
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
-				c.untrackInflight(rec)
 				return
 			}
 		}
@@ -928,6 +1028,32 @@ func (c *postgresConsumer) renewInflight(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+func (c *postgresConsumer) releaseInflight(ctx context.Context) error {
+	c.mu.Lock()
+	records := make([]postgresQueueRecord, 0, len(c.inflight))
+	for _, rec := range c.inflight {
+		records = append(records, rec)
+	}
+	c.mu.Unlock()
+
+	var errs []error
+	for _, rec := range records {
+		err := retryPostgresQueueOperation(ctx, func() error {
+			return c.backend.release(ctx, c.group, rec.topic, rec.seq, rec.owner, rec.attempt)
+		})
+		if err != nil {
+			if errors.Is(err, errPostgresQueueStaleLease) {
+				c.untrackInflight(rec)
+				continue
+			}
+			errs = append(errs, err)
+			continue
+		}
+		c.untrackInflight(rec)
+	}
+	return errors.Join(errs...)
+}
+
 func (c *postgresConsumer) nextSleepDuration() time.Duration {
 	wait := c.pollInterval
 	if wait <= 0 {
@@ -958,7 +1084,9 @@ func (c *postgresConsumer) Close() error {
 	c.once.Do(func() {
 		c.cancel()
 		<-c.done
-		err = c.backend.close()
+		releaseCtx, cancel := context.WithTimeout(context.Background(), postgresQueueCloseReleaseTimeout)
+		defer cancel()
+		err = errors.Join(c.releaseInflight(releaseCtx), c.backend.close())
 	})
 	return err
 }
