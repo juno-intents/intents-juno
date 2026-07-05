@@ -262,7 +262,26 @@ canary_retry_sleep_seconds="${PRODUCTION_CANARY_RETRY_SLEEP_SECONDS:-15}"
 canary_curl_max_time_seconds="${PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS:-10}"
 queue_inspect_bin="${PRODUCTION_CANARY_QUEUE_INSPECT_BIN:-}"
 queue_inspect_dsn_env="${PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
-queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-proof.requests.v1|proof-requestor;deposits.event.v2,checkpoints.packages.v1|deposit-relayer;withdrawals.requested.v2|withdraw-coordinator;checkpoints.packages.v1|withdraw-finalizer;proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|}"
+queue_inspect_default_targets=()
+if [[ "$proof_queue_driver" == "postgres" ]]; then
+  queue_inspect_default_targets+=("proof.requests.v1|proof-requestor")
+fi
+if [[ "$queue_driver" == "postgres" ]]; then
+  queue_inspect_default_targets+=(
+    "deposits.event.v2,checkpoints.packages.v1|deposit-relayer"
+    "withdrawals.requested.v2|withdraw-coordinator"
+    "checkpoints.packages.v1|withdraw-finalizer"
+  )
+elif [[ "$queue_shadow_driver" == "postgres" ]]; then
+  queue_inspect_default_targets+=("deposits.event.v2,checkpoints.packages.v1,withdrawals.requested.v2|")
+fi
+if [[ "$proof_queue_driver" == "postgres" ]]; then
+  queue_inspect_default_targets+=("proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|")
+elif [[ "$proof_shadow_queue_driver" == "postgres" ]]; then
+  queue_inspect_default_targets+=("proof.requests.v1|")
+fi
+queue_inspect_default_targets_joined="$(IFS=';'; printf '%s' "${queue_inspect_default_targets[*]}")"
+queue_inspect_targets="${PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS:-$queue_inspect_default_targets_joined}"
 queue_inspect_max_expired_leases="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES:-0}"
 queue_inspect_max_backlog="${PRODUCTION_CANARY_QUEUE_INSPECT_MAX_BACKLOG:-0}"
 postgres_queue_inspection_enabled="false"
@@ -279,7 +298,7 @@ fi
 [[ "$canary_curl_max_time_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be numeric"
 (( canary_retry_attempts >= 1 )) || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be at least 1"
 (( canary_curl_max_time_seconds >= 1 )) || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be at least 1"
-if [[ -n "$queue_inspect_bin" ]]; then
+if [[ -n "$queue_inspect_bin" && "$postgres_queue_path_active" == "true" ]]; then
   [[ "$queue_inspect_dsn_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV must be an environment variable name"
   [[ -n "$(trim "$queue_inspect_targets")" ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS must not be empty"
   [[ "$queue_inspect_max_expired_leases" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_QUEUE_INSPECT_MAX_EXPIRED_LEASES must be numeric"
@@ -383,6 +402,7 @@ else
     else
       IFS=';' read -r -a queue_inspect_target_array <<<"$queue_inspect_targets"
       queue_inspect_target_count=0
+      queue_inspect_failed_targets=()
       queue_status="passed"
       for queue_inspect_target in "${queue_inspect_target_array[@]}"; do
         queue_inspect_target="$(trim "$queue_inspect_target")"
@@ -415,13 +435,15 @@ else
         fi
         if ! "$queue_inspect_bin" "${queue_inspect_args[@]}" >/dev/null 2>&1; then
           queue_status="failed"
-          queue_detail="queue-inspect failed topics=${queue_inspect_topics} groups=${queue_inspect_groups:-actual}"
-          break
+          queue_inspect_failed_targets+=("topics=${queue_inspect_topics} groups=${queue_inspect_groups:-actual}")
+          continue
         fi
         queue_inspect_target_count=$((queue_inspect_target_count + 1))
       done
       if [[ "$queue_status" == "passed" ]]; then
         queue_detail="queue-inspect passed for ${queue_inspect_target_count} targets"
+      elif ((${#queue_inspect_failed_targets[@]} > 0)); then
+        queue_detail="queue-inspect failed $(IFS='; '; printf '%s' "${queue_inspect_failed_targets[*]}")"
       fi
     fi
   fi
