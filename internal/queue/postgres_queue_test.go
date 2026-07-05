@@ -311,6 +311,46 @@ func TestPostgresQueueRetryableErrorClassification(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueClaimAdvisoryLockKeys(t *testing.T) {
+	t.Parallel()
+
+	a1, a2, err := postgresQueueClaimAdvisoryLockKeys(" checkpoint-aggregator-0x7b5e3Ca6F5CF528200714E407B206E0475f48A04 ")
+	if err != nil {
+		t.Fatalf("postgresQueueClaimAdvisoryLockKeys: %v", err)
+	}
+	b1, b2, err := postgresQueueClaimAdvisoryLockKeys("checkpoint-aggregator-0x7b5e3Ca6F5CF528200714E407B206E0475f48A04")
+	if err != nil {
+		t.Fatalf("postgresQueueClaimAdvisoryLockKeys trimmed: %v", err)
+	}
+	if a1 != b1 || a2 != b2 {
+		t.Fatalf("trimmed group changed lock keys: (%d,%d) != (%d,%d)", a1, a2, b1, b2)
+	}
+
+	groups := []string{
+		"checkpoint-aggregator-0x7b5e3Ca6F5CF528200714E407B206E0475f48A04",
+		"checkpoint-aggregator-0x9106F404d34BCf61eCBB140Ce23213F4cb268202",
+		"checkpoint-aggregator-0xa944D584dA1E66137fD97dA74c06A293d7ec2d5B",
+		"checkpoint-aggregator-0xcc90a2a562996DaD6FC90650DCc59B090f3ec50f",
+		"checkpoint-aggregator-0xd8cf7C625E8644aC2B1623813318Ae79F862f212",
+	}
+	seen := make(map[[2]int32]string, len(groups))
+	for _, group := range groups {
+		key1, key2, err := postgresQueueClaimAdvisoryLockKeys(group)
+		if err != nil {
+			t.Fatalf("postgresQueueClaimAdvisoryLockKeys(%q): %v", group, err)
+		}
+		key := [2]int32{key1, key2}
+		if prev, ok := seen[key]; ok {
+			t.Fatalf("lock key collision between %q and %q: (%d,%d)", prev, group, key1, key2)
+		}
+		seen[key] = group
+	}
+
+	if _, _, err := postgresQueueClaimAdvisoryLockKeys("   "); err == nil {
+		t.Fatal("empty group returned nil error")
+	}
+}
+
 func TestPostgresQueueConsumerRetriesRetryableClaimErrors(t *testing.T) {
 	t.Parallel()
 

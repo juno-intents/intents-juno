@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strings"
 	"sync"
@@ -22,7 +23,8 @@ const (
 	postgresQueueRetryInitialBackoff = 10 * time.Millisecond
 	postgresQueueRetryMaxBackoff     = 500 * time.Millisecond
 	postgresQueueSchemaAdvisoryLock  = 0x4a554e4f51554555
-	postgresQueueClaimAdvisoryLock   = 0x4a554e4f51434c4d
+
+	postgresQueueClaimAdvisoryLockNamespace = "intents-juno/postgres-queue/claim\x00"
 )
 
 var (
@@ -217,6 +219,18 @@ func isRetryablePostgresQueueError(err error) bool {
 	}
 }
 
+func postgresQueueClaimAdvisoryLockKeys(group string) (int32, int32, error) {
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return 0, 0, errors.New("postgres queue claim lock requires group")
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(postgresQueueClaimAdvisoryLockNamespace))
+	_, _ = h.Write([]byte(group))
+	sum := h.Sum64()
+	return int32(uint32(sum >> 32)), int32(uint32(sum)), nil
+}
+
 func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload []byte) error {
 	return s.enqueueTarget(ctx, topic, "", payload)
 }
@@ -313,6 +327,10 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 	if s == nil || s.pool == nil {
 		return nil, errors.New("postgres queue: nil store")
 	}
+	claimLockKey1, claimLockKey2, err := postgresQueueClaimAdvisoryLockKeys(cfg.group)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -320,7 +338,7 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(postgresQueueClaimAdvisoryLock)); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, claimLockKey1, claimLockKey2); err != nil {
 		return nil, fmt.Errorf("postgres queue: lock claim transaction: %w", err)
 	}
 

@@ -858,7 +858,7 @@ func TestPostgresQueueIntegration_ConcurrentSchemaCreation(t *testing.T) {
 	}
 }
 
-func TestPostgresQueueIntegration_ClaimWaitsForMaterializationLock(t *testing.T) {
+func TestPostgresQueueIntegration_SameGroupClaimWaitsForScopedClaimLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -873,14 +873,7 @@ func TestPostgresQueueIntegration_ClaimWaitsForMaterializationLock(t *testing.T)
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	lockTx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(postgresQueueClaimAdvisoryLock)); err != nil {
-		_ = lockTx.Rollback(ctx)
-		t.Fatalf("lock claim tx: %v", err)
-	}
+	lockTx := lockPostgresQueueClaimGroup(t, ctx, pool, "withdraw-finalizer")
 
 	claimCh := make(chan error, 1)
 	go func() {
@@ -921,6 +914,93 @@ func TestPostgresQueueIntegration_ClaimWaitsForMaterializationLock(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for claim after materialization lock release")
+	}
+}
+
+func TestPostgresQueueIntegration_DifferentGroupClaimDoesNotWaitForScopedClaimLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	store := &postgresQueueStore{pool: pool}
+	if err := store.ensureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	if err := store.enqueue(ctx, "checkpoints.signatures.v1", []byte("signature")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	lockTx := lockPostgresQueueClaimGroup(t, ctx, pool, "checkpoint-aggregator-a")
+	defer func() { _ = lockTx.Rollback(ctx) }()
+
+	records, err := store.claim(ctx, postgresQueueClaimConfig{
+		group:            "checkpoint-aggregator-b",
+		topics:           []string{"checkpoints.signatures.v1"},
+		owner:            "different-group-lock-test",
+		initialPosition:  PostgresInitialPositionEarliest,
+		leaseDuration:    time.Minute,
+		materializeLimit: 1,
+		limit:            1,
+	})
+	if err != nil {
+		t.Fatalf("claim different group: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if got, want := string(records[0].payload), "signature"; got != want {
+		t.Fatalf("payload = %q, want %q", got, want)
+	}
+}
+
+func TestPostgresQueueIntegration_CheckpointAggregatorGroupsClaimWhileOneGroupLocked(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	store := &postgresQueueStore{pool: pool}
+	if err := store.ensureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.enqueue(ctx, "checkpoints.signatures.v1", []byte(fmt.Sprintf("signature-%d", i))); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	groups := []string{
+		"checkpoint-aggregator-0x7b5e3Ca6F5CF528200714E407B206E0475f48A04",
+		"checkpoint-aggregator-0x9106F404d34BCf61eCBB140Ce23213F4cb268202",
+		"checkpoint-aggregator-0xa944D584dA1E66137fD97dA74c06A293d7ec2d5B",
+		"checkpoint-aggregator-0xcc90a2a562996DaD6FC90650DCc59B090f3ec50f",
+		"checkpoint-aggregator-0xd8cf7C625E8644aC2B1623813318Ae79F862f212",
+	}
+	lockTx := lockPostgresQueueClaimGroup(t, ctx, pool, groups[0])
+	defer func() { _ = lockTx.Rollback(ctx) }()
+
+	for _, group := range groups[1:] {
+		records, err := store.claim(ctx, postgresQueueClaimConfig{
+			group:            group,
+			topics:           []string{"checkpoints.signatures.v1"},
+			owner:            group,
+			initialPosition:  PostgresInitialPositionEarliest,
+			leaseDuration:    time.Minute,
+			materializeLimit: 3,
+			limit:            1,
+		})
+		if err != nil {
+			t.Fatalf("claim %s: %v", group, err)
+		}
+		if len(records) != 1 {
+			t.Fatalf("records for %s = %d, want 1", group, len(records))
+		}
+		if got, want := string(records[0].payload), "signature-0"; got != want {
+			t.Fatalf("payload for %s = %q, want %q", group, got, want)
+		}
 	}
 }
 
@@ -981,6 +1061,24 @@ func lockPostgresIntegrationDelivery(t *testing.T, ctx context.Context, pool *pg
 	`, "proof-requestor", rec.topic, rec.seq); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("lock delivery: %v", err)
+	}
+	return tx
+}
+
+func lockPostgresQueueClaimGroup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, group string) pgx.Tx {
+	t.Helper()
+
+	key1, key2, err := postgresQueueClaimAdvisoryLockKeys(group)
+	if err != nil {
+		t.Fatalf("claim lock keys: %v", err)
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, key1, key2); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("lock claim group %q: %v", group, err)
 	}
 	return tx
 }
