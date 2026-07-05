@@ -3065,6 +3065,70 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_stack_env_replaces_mainnet_quicknode_rpc_with_guarded_default_base_rpc() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .contracts.base_chain_id = 8453
+    | .contracts.base_rpc_url = "https://maximum-attentive-mansion.base-mainnet.quiknode.pro/redacted"
+  ' "$workdir/inventory.json" >"$workdir/inventory.tmp"
+  mv "$workdir/inventory.tmp" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_eq "$(jq -r '.contracts.base_rpc_url' "$shared_manifest")" "https://mainnet.base.org" "shared manifest replaces mainnet quicknode rpc with default Base rpc"
+  assert_contains "$(cat "$output_env")" "BASE_RELAYER_RPC_URL=https://mainnet.base.org" "rendered env uses default Base rpc for base relayer"
+  assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://mainnet.base.org" "rendered env uses one default Base rpc for deposit relayer"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_BASE_RPC_URL=https://mainnet.base.org" "rendered env uses default Base rpc for event scanner"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_ENABLED=true" "rendered env enables the scanner after deploy"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_POLL_INTERVAL=30s" "rendered env slows scanner polling on default public Base rpc"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=200" "rendered env caps scanner block range on default public Base rpc"
+  assert_not_contains "$(cat "$output_env")" "quiknode.pro" "rendered env omits deprecated QuickNode rpc"
+
+  jq '.contracts.base_rpc_url = "https://maximum-attentive-mansion.base-mainnet.quiknode.pro/stale-shared-manifest"' "$shared_manifest" >"$workdir/shared-manifest.stale"
+  mv "$workdir/shared-manifest.stale" "$shared_manifest"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "BASE_RELAYER_RPC_URL=https://mainnet.base.org" "rendered env resolves stale shared manifest base relayer rpc"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_BASE_RPC_URL=https://mainnet.base.org" "rendered env resolves stale shared manifest scanner rpc"
+  assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://mainnet.base.org" "rendered env resolves stale shared manifest deposit rpc"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_POLL_INTERVAL=30s" "rendered env keeps stale shared manifest public rpc throttle"
+  assert_not_contains "$(cat "$output_env")" "stale-shared-manifest" "rendered env omits stale shared manifest QuickNode rpc"
+  rm -rf "$workdir"
+}
+
 test_render_operator_handoffs_refresh_withdraw_change_address_from_shared_manifest() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -5561,6 +5625,7 @@ main() {
   test_render_operator_stack_env_prefers_inline_ipfs_bearer_token
   test_render_operator_stack_env_prefers_inline_queueauth_hmac_key
   test_render_operator_stack_env_adds_base_sepolia_deposit_relayer_fallback
+  test_render_operator_stack_env_replaces_mainnet_quicknode_rpc_with_guarded_default_base_rpc
   test_render_operator_stack_env_allows_missing_juno_rpc_credentials
   test_render_operator_stack_env_ignores_withdraw_expiry_overrides
   test_render_operator_stack_env_omits_private_key_with_kms_contract

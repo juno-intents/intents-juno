@@ -594,6 +594,7 @@ BASE_EVENT_SCANNER_SHADOW_QUEUE_DRIVER=
 BASE_EVENT_SCANNER_BASE_RPC_URL=
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
+BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=1000
 BASE_EVENT_SCANNER_START_BLOCK=
 JUNO_SCAN_BACKFILL_FROM_HEIGHT=0
 BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC=withdrawals.requested.v2
@@ -2921,6 +2922,23 @@ export_optional_env_vars() {
   done
 }
 export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
+base_event_scanner_enabled="$(printf '%s' "${BASE_EVENT_SCANNER_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
+case "${base_event_scanner_enabled}" in
+  1|true|yes|on)
+    ;;
+  0|false|no|off|"")
+    echo "base-event-scanner disabled by BASE_EVENT_SCANNER_ENABLED=false" >&2
+    disabled_sleep_seconds="${BASE_EVENT_SCANNER_DISABLED_SLEEP_SECONDS:-3600}"
+    while (( disabled_sleep_seconds > 0 )); do
+      sleep "${disabled_sleep_seconds}"
+    done
+    exit 0
+    ;;
+  *)
+    echo "base-event-scanner supports BASE_EVENT_SCANNER_ENABLED true or false" >&2
+    exit 1
+    ;;
+esac
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "base-event-scanner requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -3033,12 +3051,20 @@ else
   [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]] || export JUNO_QUEUE_KAFKA_AWS_REGION
 fi
 
+base_event_max_blocks_args=()
+if /usr/local/bin/base-event-scanner --help 2>&1 | grep -q -- 'max-blocks-per-poll'; then
+  base_event_max_blocks_args=(--max-blocks-per-poll "${BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL:-1000}")
+else
+  echo "base-event-scanner binary does not support --max-blocks-per-poll; using poll interval throttle only" >&2
+fi
+
 args=(
   --base-rpc-url "${BASE_EVENT_SCANNER_BASE_RPC_URL}"
   --bridge-address "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS}"
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
   --start-block "${BASE_EVENT_SCANNER_START_BLOCK}"
   --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
+  "${base_event_max_blocks_args[@]}"
   "${base_event_queue_args[@]}"
   "${base_event_shadow_queue_args[@]}"
   --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v2}"

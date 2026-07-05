@@ -3079,7 +3079,7 @@ production_require_registered_operator() {
 
   base_rpc_url="${PRODUCTION_OPERATOR_REGISTRY_RPC_URL:-}"
   if [[ -z "$base_rpc_url" ]]; then
-    base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+    base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
   fi
   operator_registry="$(production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and test("^0x[0-9a-fA-F]{40}$"))')"
   operator_address="$(production_effective_operator_address "$operator_deploy")"
@@ -3133,12 +3133,87 @@ production_resolve_base_event_scanner_start_block() {
   printf '%s\n' "$max_block"
 }
 
+production_default_base_rpc_url_for_chain() {
+  local base_chain_id="$1"
+  case "$base_chain_id" in
+    8453) printf '%s\n' "https://mainnet.base.org" ;;
+    84532) printf '%s\n' "https://sepolia.base.org" ;;
+  esac
+}
+
+production_is_retired_base_rpc_url() {
+  local base_rpc_url base_rpc_url_lc
+  base_rpc_url="$(trim "${1:-}")"
+  base_rpc_url_lc="$(lower "$base_rpc_url")"
+  case "$base_rpc_url_lc" in
+    *quicknode*|*quiknode*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+production_resolve_base_rpc_url() {
+  local base_rpc_url="$1"
+  local base_chain_id="$2"
+  local default_base_rpc_url
+
+  base_rpc_url="$(trim "$base_rpc_url")"
+  default_base_rpc_url="$(production_default_base_rpc_url_for_chain "$base_chain_id")"
+  if [[ -z "$base_rpc_url" ]]; then
+    printf '%s\n' "$default_base_rpc_url"
+    return 0
+  fi
+  if [[ -n "$default_base_rpc_url" ]] && production_is_retired_base_rpc_url "$base_rpc_url"; then
+    printf '%s\n' "$default_base_rpc_url"
+    return 0
+  fi
+  printf '%s\n' "$base_rpc_url"
+}
+
+production_shared_manifest_base_rpc_url() {
+  local shared_manifest="$1"
+  local base_rpc_url_raw base_chain_id base_rpc_url
+
+  base_rpc_url_raw="$(production_json_optional "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+  base_chain_id="$(production_json_required "$shared_manifest" '.contracts.base_chain_id')"
+  base_rpc_url="$(production_resolve_base_rpc_url "$base_rpc_url_raw" "$base_chain_id")"
+  [[ -n "$base_rpc_url" ]] || die "shared manifest contracts.base_rpc_url is required for unsupported Base chain id $base_chain_id"
+  printf '%s\n' "$base_rpc_url"
+}
+
+production_shared_manifest_uses_default_public_base_rpc() {
+  local shared_manifest="$1"
+  local base_rpc_url base_chain_id default_base_rpc_url
+
+  base_chain_id="$(production_json_required "$shared_manifest" '.contracts.base_chain_id')"
+  base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
+  default_base_rpc_url="$(production_default_base_rpc_url_for_chain "$base_chain_id")"
+  [[ -n "$default_base_rpc_url" && "$base_rpc_url" == "$default_base_rpc_url" ]]
+}
+
+production_base_event_scanner_poll_interval() {
+  local shared_manifest="$1"
+  if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest"; then
+    printf '%s\n' "30s"
+    return 0
+  fi
+  printf '%s\n' "3s"
+}
+
+production_base_event_scanner_max_blocks_per_poll() {
+  local shared_manifest="$1"
+  if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest"; then
+    printf '%s\n' "200"
+    return 0
+  fi
+  printf '%s\n' "1000"
+}
+
 production_deposit_relayer_base_rpc_urls() {
   local shared_manifest="$1"
   local base_rpc_url base_chain_id fallback_url
 
-  base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
   base_chain_id="$(production_json_required "$shared_manifest" '.contracts.base_chain_id')"
+  base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
   fallback_url="https://base-sepolia-rpc.publicnode.com"
 
   if [[ "$base_chain_id" == "84532" && "$base_rpc_url" == "https://sepolia.base.org" ]]; then
@@ -3185,8 +3260,9 @@ production_render_shared_manifest() {
       [[ "$juno_network" == "$dkg_completion_network" ]] || die "inventory contracts.juno_network ($juno_network) does not match dkg completion network ($dkg_completion_network)"
     fi
   fi
-  base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
+  base_rpc_url="$(production_resolve_base_rpc_url "$(production_json_optional "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')" "$base_chain_id")"
+  [[ -n "$base_rpc_url" ]] || die "inventory contracts.base_rpc_url is required for unsupported Base chain id $base_chain_id"
   base_event_scanner_start_block="$(production_resolve_base_event_scanner_start_block "$bridge_summary" "$base_rpc_url")"
   deposit_image_id="$(production_json_optional "$inventory" '.contracts.deposit_image_id')"
   withdraw_image_id="$(production_json_optional "$inventory" '.contracts.withdraw_image_id')"
@@ -4372,12 +4448,12 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
-  local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
+  local deposit_scan_wallet_id base_event_scanner_start_block base_event_scanner_poll_interval base_event_scanner_max_blocks_per_poll withdraw_juno_fee_add_zat
   local withdraw_operator_endpoints owallet_ua signer_ufvk
   local juno_rpc_bind juno_rpc_allow_ips
   local min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  local deposit_relayer_base_rpc_url
+  local base_rpc_url deposit_relayer_base_rpc_url
   local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
@@ -4502,6 +4578,9 @@ production_render_operator_stack_env() {
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
+  base_event_scanner_poll_interval="$(production_base_event_scanner_poll_interval "$shared_manifest")"
+  base_event_scanner_max_blocks_per_poll="$(production_base_event_scanner_max_blocks_per_poll "$shared_manifest")"
+  base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
   deposit_relayer_base_rpc_url="$(production_deposit_relayer_base_rpc_urls "$shared_manifest")"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
@@ -4574,15 +4653,18 @@ JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region // "
 OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
-BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+BASE_RELAYER_RPC_URL=$base_rpc_url
 DEPOSIT_RELAYER_BASE_RPC_URL=$deposit_relayer_base_rpc_url
 BASE_RELAYER_MIN_READY_BALANCE_WEI=$min_base_relayer_balance_wei
 BASE_RELAYER_ALLOWED_SELECTORS=$(production_base_relayer_allowed_selectors)
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
 RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
-BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+BASE_EVENT_SCANNER_BASE_RPC_URL=$base_rpc_url
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
+BASE_EVENT_SCANNER_ENABLED=true
+BASE_EVENT_SCANNER_POLL_INTERVAL=$base_event_scanner_poll_interval
+BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=$base_event_scanner_max_blocks_per_poll
 BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block
 WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
 WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080
@@ -4684,7 +4766,7 @@ production_render_bridge_api_env() {
   local output_file="$4"
 
   local owallet_ua listen_addr withdrawal_expiry_window_seconds min_deposit_amount min_withdraw_amount fee_bps
-  local bridge_paused bridge_pause_message app_postgres_dsn
+  local bridge_paused bridge_pause_message app_postgres_dsn base_rpc_url
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
 
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -4698,6 +4780,7 @@ production_render_bridge_api_env() {
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
   runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
+  base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
   app_postgres_dsn=""
   if [[ "${PRODUCTION_TEST_ALLOW_LOCAL_SECRET_CONTRACTS:-false}" == "true" ]]; then
     app_postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
@@ -4706,7 +4789,7 @@ production_render_bridge_api_env() {
   cat >"$output_file" <<EOF
 BRIDGE_API_LISTEN_ADDR=$listen_addr
 BRIDGE_API_POSTGRES_DSN=$app_postgres_dsn
-BRIDGE_API_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+BRIDGE_API_BASE_RPC_URL=$base_rpc_url
 BRIDGE_API_BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_API_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BRIDGE_API_OWALLET_UA=$owallet_ua
@@ -4736,7 +4819,7 @@ production_render_backoffice_env() {
 
   local juno_rpc_url juno_rpc_urls juno_scan_url juno_scan_wallet_id
   local listen_addr operator_addresses service_urls operator_endpoints
-  local base_relayer_signer_addresses base_relayer_gas_min_wei
+  local base_relayer_signer_addresses base_relayer_gas_min_wei base_rpc_url
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local sp1_requestor_address sp1_rpc_url render_juno_rpc app_postgres_dsn backoffice_auth_secret
   local ipfs_api_bearer_token cloudflare_tunnel_token juno_rpc_user juno_rpc_pass min_deposit_admin_private_key
@@ -4751,6 +4834,7 @@ production_render_backoffice_env() {
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
   runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
+  base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
   sp1_requestor_address="$(production_json_optional "$shared_manifest" '.shared_services.proof.requestor_address')"
   sp1_rpc_url="$(production_json_optional "$shared_manifest" '.shared_services.proof.rpc_url')"
   [[ -n "$sp1_requestor_address" ]] || die "shared manifest is missing shared_services.proof.requestor_address"
@@ -4784,7 +4868,7 @@ production_render_backoffice_env() {
   cat >"$output_file" <<EOF
 BACKOFFICE_LISTEN_ADDR=$listen_addr
 BACKOFFICE_POSTGRES_DSN=$app_postgres_dsn
-BACKOFFICE_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+BACKOFFICE_BASE_RPC_URL=$base_rpc_url
 BACKOFFICE_AUTH_SECRET=$backoffice_auth_secret
 BACKOFFICE_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BACKOFFICE_WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$shared_manifest")

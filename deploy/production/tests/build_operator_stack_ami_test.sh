@@ -448,9 +448,17 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   base_event_scanner_wrapper="$(extract_block "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER")"
   assert_contains "$base_event_scanner_wrapper" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports queueauth env to the binary"
   assert_contains "$base_event_scanner_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports the kafka auth region to the binary"
+  assert_contains "$base_event_scanner_wrapper" 'base_event_scanner_enabled="$(printf '\''%s'\'' "${BASE_EVENT_SCANNER_ENABLED:-false}" | tr '\''[:upper:]'\'' '\''[:lower:]'\'')"' "base-event-scanner wrapper reads the enable gate"
+  assert_contains "$base_event_scanner_wrapper" 'base-event-scanner disabled by BASE_EVENT_SCANNER_ENABLED=false' "base-event-scanner wrapper reports disabled mode"
+  assert_contains "$base_event_scanner_wrapper" 'disabled_sleep_seconds="${BASE_EVENT_SCANNER_DISABLED_SLEEP_SECONDS:-3600}"' "base-event-scanner wrapper defaults disabled sleep to avoid restart loops"
+  assert_contains "$base_event_scanner_wrapper" 'while (( disabled_sleep_seconds > 0 )); do' "base-event-scanner wrapper keeps disabled services quiet on legacy restart policies"
+  assert_contains "$base_event_scanner_wrapper" 'if /usr/local/bin/base-event-scanner --help 2>&1 | grep -q -- '\''max-blocks-per-poll'\''; then' "base-event-scanner wrapper probes binary flag compatibility"
+  assert_contains "$base_event_scanner_wrapper" 'base_event_max_blocks_args=(--max-blocks-per-poll "${BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL:-1000}")' "base-event-scanner wrapper builds max block args when supported"
+  assert_contains "$base_event_scanner_wrapper" 'base-event-scanner binary does not support --max-blocks-per-poll; using poll interval throttle only' "base-event-scanner wrapper warns and avoids restart loops for old binaries"
   assert_contains "$base_event_scanner_wrapper" '[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {' "base-event-scanner requires explicit start block in operator env"
   assert_contains "$base_event_scanner_wrapper" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "base-event-scanner fails closed without start block"
   assert_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK}"' "base-event-scanner wrapper uses rendered start block without a genesis fallback"
+  assert_contains "$base_event_scanner_wrapper" '"${base_event_max_blocks_args[@]}"' "base-event-scanner wrapper passes compatible max block args"
   assert_contains "$base_event_scanner_wrapper" 'base_event_shadow_queue_args=(--shadow-queue-driver "${base_event_shadow_queue_driver}")' "base-event scanner can enable a shadow queue driver"
   assert_contains "$base_event_scanner_wrapper" '--shadow-queue-postgres-dsn-env "${BASE_EVENT_SCANNER_SHADOW_QUEUE_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "base-event scanner passes shadow queue DSN by env indirection"
   assert_not_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK:-0}"' "base-event-scanner wrapper does not fall back to genesis"
@@ -1385,6 +1393,13 @@ Usage of /usr/local/bin/checkpoint-signer:
 EOF_HELP
   exit 0
 fi
+if [[ "\${1:-}" == "--help" && "$name" == "base-event-scanner" ]]; then
+  cat <<'EOF_HELP'
+Usage of /usr/local/bin/base-event-scanner:
+  -max-blocks-per-poll int
+EOF_HELP
+  exit 0
+fi
 printf '%s\n' "\$*" >"$output_file"
 env | sort >"${output_file%.args}.env"
 exit 0
@@ -1454,7 +1469,10 @@ JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 BASE_EVENT_SCANNER_BASE_RPC_URL=https://127.0.0.1:8545
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 BASE_EVENT_SCANNER_START_BLOCK=12345
+BASE_EVENT_SCANNER_ENABLED=true
+BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=200
 EOF
+  cp "$env_file" "$tmp/operator-stack.enabled.env"
 
   render_wrapper "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER" "$tmp/checkpoint-signer.sh" "$env_file"
   render_wrapper "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "EOF_AGG" "$tmp/checkpoint-aggregator.sh" "$env_file"
@@ -1468,6 +1486,20 @@ EOF
   replace_bin "$tmp/deposit-relayer.sh" deposit-relayer "$fake_bin/deposit-relayer"
   replace_bin "$tmp/withdraw-finalizer.sh" withdraw-finalizer "$fake_bin/withdraw-finalizer"
   replace_bin "$tmp/base-event-scanner.sh" base-event-scanner "$fake_bin/base-event-scanner"
+
+  cat >"$env_file" <<EOF
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+BASE_EVENT_SCANNER_ENABLED=false
+BASE_EVENT_SCANNER_DISABLED_SLEEP_SECONDS=0
+EOF
+  rm -f "$output_prefix.base-event-scanner.args"
+  PATH="$fake_bin:$PATH" "$tmp/base-event-scanner.sh" >"$tmp/base-event-scanner.disabled.stdout" 2>"$tmp/base-event-scanner.disabled.stderr"
+  assert_contains "$(cat "$tmp/base-event-scanner.disabled.stderr")" "base-event-scanner disabled by BASE_EVENT_SCANNER_ENABLED=false" "base-event-scanner wrapper reports disabled mode"
+  [[ ! -f "$output_prefix.base-event-scanner.args" ]] || {
+    printf 'base-event-scanner binary should not execute when disabled\n' >&2
+    exit 1
+  }
+  cp "$tmp/operator-stack.enabled.env" "$env_file"
 
   PATH="$fake_bin:$PATH" "$tmp/checkpoint-signer.sh"
   PATH="$fake_bin:$PATH" "$tmp/checkpoint-aggregator.sh"
@@ -1488,6 +1520,7 @@ EOF
     assert_contains "$(cat "$output_prefix.$name.args")" '--proof-response-postgres-initial-position latest' "$name wrapper starts postgres proof responses after existing artifacts"
     assert_not_contains "$(cat "$output_prefix.$name.args")" '--proof-queue-brokers' "$name wrapper does not pass proof kafka brokers for postgres proof queue mode"
   done
+  assert_contains "$(cat "$output_prefix.base-event-scanner.args")" '--max-blocks-per-poll 200' "base-event-scanner wrapper passes rendered public rpc block cap"
 
   cat >"$env_file" <<EOF
 CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
@@ -1552,6 +1585,7 @@ CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 BASE_EVENT_SCANNER_BASE_RPC_URL=https://127.0.0.1:8545
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 BASE_EVENT_SCANNER_START_BLOCK=12345
+BASE_EVENT_SCANNER_ENABLED=true
 JUNO_QUEUE_KAFKA_TLS=false
 JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 AWS_REGION=us-east-1
@@ -1561,6 +1595,30 @@ EOF
     exit 1
   fi
   assert_contains "$(cat "$tmp/base-event-scanner.stderr")" "base-event-scanner requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" "base-event-scanner fails closed when kafka TLS is disabled"
+
+  cat >"$fake_bin/base-event-scanner" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--help" ]]; then
+  printf 'Usage of /usr/local/bin/base-event-scanner:\n'
+  exit 0
+fi
+printf '%s\n' "\$*" >"$output_prefix.base-event-scanner.args"
+env | sort >"$output_prefix.base-event-scanner.env"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/base-event-scanner"
+  cat >"$env_file" <<EOF
+CHECKPOINT_POSTGRES_DSN=postgres://operator-queue?sslmode=require
+OPERATOR_QUEUE_DRIVER=postgres
+BASE_EVENT_SCANNER_BASE_RPC_URL=https://127.0.0.1:8545
+BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+BASE_EVENT_SCANNER_START_BLOCK=12345
+BASE_EVENT_SCANNER_ENABLED=true
+BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=200
+EOF
+  PATH="$fake_bin:$PATH" "$tmp/base-event-scanner.sh" >"$tmp/base-event-scanner.old.stdout" 2>"$tmp/base-event-scanner.old.stderr"
+  assert_contains "$(cat "$tmp/base-event-scanner.old.stderr")" "base-event-scanner binary does not support --max-blocks-per-poll; using poll interval throttle only" "base-event-scanner wrapper warns when old binary lacks max block flag"
+  assert_not_contains "$(cat "$output_prefix.base-event-scanner.args")" '--max-blocks-per-poll' "base-event-scanner wrapper omits unsupported max block flag"
 
   rm -rf "$tmp"
 }
