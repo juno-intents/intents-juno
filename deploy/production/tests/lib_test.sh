@@ -1593,6 +1593,91 @@ EOF
   rm -rf "$workdir"
 }
 
+write_backoffice_queue_probe_test_files() {
+  local workdir="$1"
+  cat >"$workdir/shared-manifest.json" <<'JSON'
+{
+  "contracts": {
+    "base_rpc_url": "https://base.example.invalid",
+    "bridge": "0x1111111111111111111111111111111111111111",
+    "wjuno": "0x2222222222222222222222222222222222222222",
+    "operator_registry": "0x3333333333333333333333333333333333333333",
+    "owallet_ua": "u1alphaexample"
+  },
+  "shared_services": {
+    "queue": {
+      "driver": "postgres"
+    },
+    "proof_queue": {
+      "driver": "postgres"
+    },
+    "kafka": {
+      "bootstrap_brokers": "b-1.retained.kafka:9098,b-2.retained.kafka:9098"
+    },
+    "ipfs": {
+      "api_url": "http://ipfs.example.invalid:5001"
+    },
+    "proof": {
+      "requestor_address": "0x4444444444444444444444444444444444444444",
+      "rpc_url": "https://rpc.mainnet.succinct.xyz"
+    }
+  }
+}
+JSON
+  cat >"$workdir/app-deploy.json" <<'JSON'
+{
+  "juno_rpc_url": "https://juno-rpc.example.invalid",
+  "juno_scan_wallet_id": "",
+  "operator_addresses": ["0x1111111111111111111111111111111111111111"],
+  "operator_endpoints": [],
+  "service_urls": ["bridge-api=http://127.0.0.1:8082/readyz"],
+  "base_relayer_signer_addresses": "",
+  "services": {
+    "backoffice": {
+      "listen_addr": "127.0.0.1:8090"
+    }
+  }
+}
+JSON
+  : >"$workdir/resolved.env"
+}
+
+test_render_backoffice_env_ignores_retained_msk_when_no_kafka_queue_path() {
+  local workdir backoffice_env
+  workdir="$(mktemp -d)"
+  write_backoffice_queue_probe_test_files "$workdir"
+  backoffice_env="$workdir/backoffice.env"
+
+  production_render_backoffice_env "$workdir/shared-manifest.json" "$workdir/app-deploy.json" "$workdir/resolved.env" "$backoffice_env"
+
+  assert_eq "$(production_env_get_value "$backoffice_env" BACKOFFICE_KAFKA_BROKERS)" "" "backoffice env ignores retained msk brokers when no active queue path uses kafka"
+  assert_not_contains "$(cat "$backoffice_env")" "b-1.retained.kafka" "backoffice env does not retain inactive kafka probe brokers"
+  rm -rf "$workdir"
+}
+
+test_render_backoffice_env_keeps_kafka_brokers_for_active_kafka_paths() {
+  local case_name manifest_filter workdir backoffice_env
+
+  while IFS=';' read -r case_name manifest_filter; do
+    [[ -n "$case_name" ]] || continue
+    workdir="$(mktemp -d)"
+    write_backoffice_queue_probe_test_files "$workdir"
+    jq "$manifest_filter" "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+    mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+    backoffice_env="$workdir/backoffice.env"
+
+    production_render_backoffice_env "$workdir/shared-manifest.json" "$workdir/app-deploy.json" "$workdir/resolved.env" "$backoffice_env"
+
+    assert_eq "$(production_env_get_value "$backoffice_env" BACKOFFICE_KAFKA_BROKERS)" "b-1.retained.kafka:9098,b-2.retained.kafka:9098" "backoffice env keeps kafka probe brokers for active kafka path: $case_name"
+    rm -rf "$workdir"
+  done <<'EOF'
+shared-primary;.shared_services.queue.driver = "kafka" | .shared_services.proof_queue.driver = "postgres"
+shared-shadow;.shared_services.queue.driver = "postgres" | .shared_services.queue.shadow.driver = "kafka" | .shared_services.proof_queue.driver = "postgres"
+proof-primary;.shared_services.queue.driver = "postgres" | .shared_services.proof_queue.driver = "kafka"
+proof-shadow;.shared_services.queue.driver = "postgres" | .shared_services.proof_queue.driver = "postgres" | .shared_services.proof_queue.shadow.driver = "kafka"
+EOF
+}
+
 test_render_shared_manifest_includes_proof_queue_controls() {
   local workdir shared_manifest tf_json
   workdir="$(mktemp -d)"
@@ -5353,6 +5438,8 @@ main() {
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
   test_render_shared_manifest_allows_postgres_queue_without_kafka_brokers
+  test_render_backoffice_env_ignores_retained_msk_when_no_kafka_queue_path
+  test_render_backoffice_env_keeps_kafka_brokers_for_active_kafka_paths
   test_render_shared_manifest_requires_kafka_brokers_for_kafka_queue
   test_production_shared_postgres_queue_gates_msk_resources
   test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard

@@ -328,7 +328,6 @@ args=(
   --base-relayer-signer-addresses "${BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES}"
   --base-relayer-gas-min-wei "${BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI}"
   --service-urls "${BACKOFFICE_SERVICE_URLS}"
-  --kafka-brokers "${BACKOFFICE_KAFKA_BROKERS}"
   --ipfs-api-url "${BACKOFFICE_IPFS_API_URL}"
   --deposit-min-confirmations "${BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS}"
   --withdraw-planner-min-confirmations "${BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS}"
@@ -336,6 +335,9 @@ args=(
   --min-deposit-admin-key-env MIN_DEPOSIT_ADMIN_PRIVATE_KEY
 )
 
+if [[ -n "${BACKOFFICE_KAFKA_BROKERS:-}" ]]; then
+  args+=(--kafka-brokers "${BACKOFFICE_KAFKA_BROKERS}")
+fi
 if [[ -n "${BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS:-}" ]]; then
   args+=(--fee-distributor-address "${BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS}")
 fi

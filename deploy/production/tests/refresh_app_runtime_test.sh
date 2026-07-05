@@ -356,7 +356,7 @@ test_refresh_app_runtime_skips_kafka_ingress_for_postgres_queue() {
   secret_contract="$tmp/app/app-secrets.env"
   app_deploy="$tmp/app/app-deploy.json"
   write_refresh_runtime_shared_manifest_fixture "$shared_manifest"
-  jq '.shared_services.queue.driver = "postgres" | del(.shared_services.kafka.bootstrap_brokers)' \
+  jq '.shared_services.queue.driver = "postgres"' \
     "$shared_manifest" >"$shared_manifest.next"
   mv "$shared_manifest.next" "$shared_manifest"
   write_refresh_runtime_app_secret_contract "$secret_contract"
@@ -381,6 +381,10 @@ test_refresh_app_runtime_skips_kafka_ingress_for_postgres_queue() {
   assert_contains "$(cat "$aws_log")" '"FromPort":5432' "refresh restores shared postgres ingress for the app security group"
   assert_not_contains "$(cat "$aws_log")" '"FromPort":9098' "refresh does not restore shared kafka ingress when the shared queue driver is postgres"
   assert_not_contains "$(cat "$aws_log")" "Kafka from app runtime" "refresh does not describe kafka ingress when the shared queue driver is postgres"
+  assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_KAFKA_BROKERS=" "refresh renders an empty backoffice kafka probe when retained msk is inactive"
+  assert_not_contains "$(cat "$output_dir/backoffice.env")" "b-1.preview.kafka" "refresh omits retained msk brokers from inactive backoffice probes"
+  assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" 'if [[ -n "${BACKOFFICE_KAFKA_BROKERS:-}" ]]; then' "refresh guards the backoffice kafka probe flag"
+  assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" 'args+=(--kafka-brokers "${BACKOFFICE_KAFKA_BROKERS}")' "refresh only passes backoffice kafka brokers when configured"
   assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-ipfs1234567890" "refresh still restores preview app ingress to shared ipfs"
   assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-operator1234567890" "refresh still restores preview app ingress to operator services"
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/refresh-summary.json")" "true" "refresh summary reports success"

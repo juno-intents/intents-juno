@@ -21,6 +21,67 @@ production_json_optional() {
   jq -er "$query // empty" "$file" 2>/dev/null || true
 }
 
+production_shared_manifest_uses_kafka_queue_path() {
+  local shared_manifest="$1"
+  local shared_queue_driver queue_shadow_driver proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver selected_queue_driver
+
+  shared_queue_driver="$(production_json_optional "$shared_manifest" '.shared_services.queue.driver | select(type == "string" and length > 0)')"
+  shared_queue_driver="$(trim "${shared_queue_driver:-kafka}")"
+  shared_queue_driver="$(lower "$shared_queue_driver")"
+  case "$shared_queue_driver" in
+    kafka|postgres) ;;
+    *) die "shared manifest queue driver must be kafka or postgres (got: $shared_queue_driver)" ;;
+  esac
+
+  queue_shadow_driver=""
+  if jq -e '(.shared_services.queue? | type == "object") and (.shared_services.queue.shadow? | type == "object") and (.shared_services.queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest queue shadow driver must be kafka or postgres"
+    fi
+    queue_shadow_driver="$(production_json_required "$shared_manifest" '.shared_services.queue.shadow.driver')"
+    queue_shadow_driver="$(trim "$queue_shadow_driver")"
+    queue_shadow_driver="$(lower "$queue_shadow_driver")"
+    case "$queue_shadow_driver" in
+      kafka|postgres) ;;
+      *) die "shared manifest queue shadow driver must be kafka or postgres (got: $queue_shadow_driver)" ;;
+    esac
+  fi
+
+  proof_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest proof queue driver must be kafka or postgres"
+    fi
+    proof_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.proof_queue.driver')"
+    proof_queue_driver="$(trim "$proof_queue_driver")"
+    proof_queue_driver="$(lower "$proof_queue_driver")"
+    case "$proof_queue_driver" in
+      kafka|postgres) ;;
+      *) die "shared manifest proof queue driver must be kafka or postgres (got: $proof_queue_driver)" ;;
+    esac
+  fi
+  effective_proof_queue_driver="${proof_queue_driver:-$shared_queue_driver}"
+
+  proof_shadow_queue_driver=""
+  if jq -e '(.shared_services.proof_queue? | type == "object") and (.shared_services.proof_queue.shadow? | type == "object") and (.shared_services.proof_queue.shadow | has("driver"))' "$shared_manifest" >/dev/null 2>&1; then
+    if ! jq -e '.shared_services.proof_queue.shadow.driver | type == "string" and (length > 0)' "$shared_manifest" >/dev/null 2>&1; then
+      die "shared manifest proof queue shadow driver must be kafka or postgres"
+    fi
+    proof_shadow_queue_driver="$(production_json_required "$shared_manifest" '.shared_services.proof_queue.shadow.driver')"
+    proof_shadow_queue_driver="$(trim "$proof_shadow_queue_driver")"
+    proof_shadow_queue_driver="$(lower "$proof_shadow_queue_driver")"
+    case "$proof_shadow_queue_driver" in
+      kafka|postgres) ;;
+      *) die "shared manifest proof queue shadow driver must be kafka or postgres (got: $proof_shadow_queue_driver)" ;;
+    esac
+  fi
+
+  for selected_queue_driver in "$shared_queue_driver" "$queue_shadow_driver" "$effective_proof_queue_driver" "$proof_shadow_queue_driver"; do
+    [[ "$selected_queue_driver" == "kafka" ]] && return 0
+  done
+  return 1
+}
+
 production_abs_path() {
   local base_dir="$1"
   local path="$2"
@@ -4675,6 +4736,7 @@ production_render_backoffice_env() {
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local sp1_requestor_address sp1_rpc_url render_juno_rpc app_postgres_dsn backoffice_auth_secret
   local ipfs_api_bearer_token cloudflare_tunnel_token juno_rpc_user juno_rpc_pass min_deposit_admin_private_key
+  local backoffice_kafka_brokers
   juno_rpc_url="$(production_json_optional "$app_deploy" '.juno_rpc_url')"
   listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
   operator_addresses="$(jq -r '.operator_addresses | join(",")' "$app_deploy")"
@@ -4692,6 +4754,10 @@ production_render_backoffice_env() {
   juno_rpc_urls="$(production_backoffice_juno_rpc_urls_csv "$app_deploy" || true)"
   juno_scan_url="$(production_backoffice_juno_scan_url "$app_deploy" || true)"
   juno_scan_wallet_id="$(production_json_optional "$app_deploy" '.juno_scan_wallet_id')"
+  backoffice_kafka_brokers=""
+  if production_shared_manifest_uses_kafka_queue_path "$shared_manifest"; then
+    backoffice_kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")"
+  fi
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
   app_postgres_dsn=""
@@ -4726,7 +4792,7 @@ BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=$base_relayer_gas_min_wei
 BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
 BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
 BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
-BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")
+BACKOFFICE_KAFKA_BROKERS=$backoffice_kafka_brokers
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 BACKOFFICE_IPFS_API_BEARER_TOKEN=$ipfs_api_bearer_token
 BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=$cloudflare_tunnel_token
