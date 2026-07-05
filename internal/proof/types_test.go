@@ -48,6 +48,29 @@ func TestDecodeJobRequest(t *testing.T) {
 	}
 }
 
+func TestDecodeJobRequest_ResponseGroup(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"job_id":"0x5a6a8f35ea6fbce9ebc657de70e77bb9b7f2030569f9c6fbf46ba783f913be98",
+		"pipeline":"deposit",
+		"image_id":"0x000000000000000000000000000000000000000000000000000000000000aa01",
+		"journal":"0x010203",
+		"private_input":"0x0405",
+		"deadline":"2026-02-12T12:00:00Z",
+		"priority":2,
+		"response_group":"  ip-10-92-1-179-deposit-relayer-proof  "
+	}`)
+
+	job, err := DecodeJobRequest(payload)
+	if err != nil {
+		t.Fatalf("DecodeJobRequest: %v", err)
+	}
+	if got, want := job.ResponseGroup, "ip-10-92-1-179-deposit-relayer-proof"; got != want {
+		t.Fatalf("response group: got %q want %q", got, want)
+	}
+}
+
 func TestDecodeJobRequest_Invalid(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -534,6 +535,195 @@ func TestPostgresQueuePreservesCriticalTopicWirePayload(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueTargetedPublishPreservesCriticalTopicWirePayload(t *testing.T) {
+	t.Parallel()
+
+	backend := newTestPostgresQueueBackend(time.Now)
+	producer, err := newPostgresProducerWithBackend(backend)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	targeted, ok := producer.(interface {
+		PublishToGroup(context.Context, string, string, []byte) error
+	})
+	if !ok {
+		t.Fatalf("postgres producer does not support targeted delivery")
+	}
+
+	codec := queueauth.New(queueauth.Config{
+		KeyID:  "ops-1",
+		Secret: []byte("super-secret-key"),
+		Now: func() time.Time {
+			return time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+		},
+		Rand: bytes.NewReader(bytes.Repeat([]byte{0x42}, 16)),
+	})
+	raw := []byte(`{"version":"deposits.event.v2"}`)
+	wire, err := queueauth.WrapPayload(codec, "deposits.event.v2", raw)
+	if err != nil {
+		t.Fatalf("WrapPayload: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := targeted.PublishToGroup(ctx, "deposits.event.v2", "deposit-relayer", wire); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "deposit-relayer",
+		Topics:                []string{"deposits.event.v2"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	msg := readQueueMessage(t, consumer)
+	if !bytes.Equal(msg.Value, wire) {
+		t.Fatalf("wire payload changed: got %x want %x", msg.Value, wire)
+	}
+	unwrapped, err := queueauth.UnwrapPayload(codec, msg.Topic, msg.Value)
+	if err != nil {
+		t.Fatalf("UnwrapPayload: %v", err)
+	}
+	if !bytes.Equal(unwrapped, raw) {
+		t.Fatalf("unwrapped payload changed: got %s want %s", unwrapped, raw)
+	}
+}
+
+func TestPostgresQueueTargetedPublishOnlyDeliversToTargetGroup(t *testing.T) {
+	t.Parallel()
+
+	backend := newTestPostgresQueueBackend(time.Now)
+	producer, err := newPostgresProducerWithBackend(backend)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	targeted, ok := producer.(interface {
+		PublishToGroup(context.Context, string, string, []byte) error
+	})
+	if !ok {
+		t.Fatalf("postgres producer does not support targeted delivery")
+	}
+
+	ctx := context.Background()
+	if err := targeted.PublishToGroup(ctx, "proof.fulfillments.v1", "deposit-relayer-proof", []byte("for-deposit")); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+
+	idle, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "withdraw-finalizer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new idle consumer: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+	assertNoQueueMessage(t, idle, 30*time.Millisecond)
+
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "deposit-relayer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new target consumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	msg := readQueueMessage(t, consumer)
+	if got, want := string(msg.Value), "for-deposit"; got != want {
+		t.Fatalf("target value = %q, want %q", got, want)
+	}
+	if err := msg.Ack(ctx); err != nil {
+		t.Fatalf("ack target: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if _, ok := backend.deliveries[testPostgresQueueDeliveryKey{group: "withdraw-finalizer-proof", topic: "proof.fulfillments.v1", seq: 1}]; ok {
+		t.Fatalf("idle group should not have a delivery row for targeted message")
+	}
+}
+
+func TestPostgresQueueTargetedAndBroadcastMessagesPreserveGroupOrdering(t *testing.T) {
+	t.Parallel()
+
+	backend := newTestPostgresQueueBackend(time.Now)
+	producer, err := newPostgresProducerWithBackend(backend)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	targeted, ok := producer.(interface {
+		PublishToGroup(context.Context, string, string, []byte) error
+	})
+	if !ok {
+		t.Fatalf("postgres producer does not support targeted delivery")
+	}
+
+	ctx := context.Background()
+	if err := targeted.PublishToGroup(ctx, "proof.fulfillments.v1", "deposit-relayer-proof", []byte("targeted-first")); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+	if err := producer.Publish(ctx, "proof.fulfillments.v1", []byte("broadcast-second")); err != nil {
+		t.Fatalf("Publish broadcast: %v", err)
+	}
+
+	idle, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "withdraw-finalizer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new idle consumer: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+	idleMsg := readQueueMessage(t, idle)
+	if got, want := string(idleMsg.Value), "broadcast-second"; got != want {
+		t.Fatalf("idle value = %q, want %q", got, want)
+	}
+	if err := idleMsg.Ack(ctx); err != nil {
+		t.Fatalf("ack idle broadcast: %v", err)
+	}
+
+	target, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "deposit-relayer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new target consumer: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+
+	first := readQueueMessage(t, target)
+	if got, want := string(first.Value), "targeted-first"; got != want {
+		t.Fatalf("target first value = %q, want %q", got, want)
+	}
+	if err := first.Ack(ctx); err != nil {
+		t.Fatalf("ack target first: %v", err)
+	}
+	second := readQueueMessage(t, target)
+	if got, want := string(second.Value), "broadcast-second"; got != want {
+		t.Fatalf("target second value = %q, want %q", got, want)
+	}
+}
+
 func TestPostgresQueueAcceptsProductionTopicNames(t *testing.T) {
 	t.Parallel()
 
@@ -640,10 +830,11 @@ type testPostgresQueueBackend struct {
 }
 
 type testPostgresQueueMessage struct {
-	topic     string
-	seq       int64
-	payload   []byte
-	createdAt time.Time
+	topic       string
+	seq         int64
+	payload     []byte
+	targetGroup string
+	createdAt   time.Time
 }
 
 type testPostgresQueueDeliveryKey struct {
@@ -679,15 +870,21 @@ func (b *testPostgresQueueBackend) ensureSchema(context.Context) error {
 }
 
 func (b *testPostgresQueueBackend) enqueue(_ context.Context, topic string, payload []byte) error {
+	return b.enqueueTarget(context.Background(), topic, "", payload)
+}
+
+func (b *testPostgresQueueBackend) enqueueTarget(_ context.Context, topic string, consumerGroup string, payload []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	consumerGroup = strings.TrimSpace(consumerGroup)
 	b.nextSeq[topic]++
 	b.messages[topic] = append(b.messages[topic], testPostgresQueueMessage{
-		topic:     topic,
-		seq:       b.nextSeq[topic],
-		payload:   append([]byte(nil), payload...),
-		createdAt: b.now().UTC(),
+		topic:       topic,
+		seq:         b.nextSeq[topic],
+		payload:     append([]byte(nil), payload...),
+		targetGroup: consumerGroup,
+		createdAt:   b.now().UTC(),
 	})
 	return nil
 }
@@ -704,6 +901,9 @@ func (b *testPostgresQueueBackend) claim(_ context.Context, cfg postgresQueueCla
 			if msg.seq < nextSeq {
 				continue
 			}
+			if !testMessageVisibleToGroup(msg, cfg.group) {
+				continue
+			}
 			key := testPostgresQueueDeliveryKey{group: cfg.group, topic: topic, seq: msg.seq}
 			if _, ok := b.deliveries[key]; !ok {
 				b.deliveries[key] = &testPostgresQueueDelivery{}
@@ -716,6 +916,9 @@ func (b *testPostgresQueueBackend) claim(_ context.Context, cfg postgresQueueCla
 		for _, msg := range b.messages[topic] {
 			if len(out) >= cfg.limit {
 				return out, nil
+			}
+			if !testMessageVisibleToGroup(msg, cfg.group) {
+				continue
 			}
 			key := testPostgresQueueDeliveryKey{group: cfg.group, topic: topic, seq: msg.seq}
 			delivery := b.deliveries[key]
@@ -755,7 +958,13 @@ func (b *testPostgresQueueBackend) ensureOffsetLocked(cfg postgresQueueClaimConf
 		return
 	}
 	if cfg.initialPosition == PostgresInitialPositionLatest {
-		b.offsets[key] = b.nextSeq[topic] + 1
+		var next int64 = 1
+		for _, msg := range b.messages[topic] {
+			if testMessageVisibleToGroup(msg, cfg.group) && msg.seq >= next {
+				next = msg.seq + 1
+			}
+		}
+		b.offsets[key] = next
 		return
 	}
 	b.offsets[key] = 1
@@ -799,13 +1008,33 @@ func (b *testPostgresQueueBackend) advanceOffsetLocked(group, topic string) {
 		next = 1
 	}
 	for {
-		delivery := b.deliveries[testPostgresQueueDeliveryKey{group: group, topic: topic, seq: next}]
+		msg, ok := b.firstVisibleMessageAtOrAfterLocked(group, topic, next)
+		if !ok {
+			next = b.nextSeq[topic] + 1
+			break
+		}
+		next = msg.seq
+		delivery := b.deliveries[testPostgresQueueDeliveryKey{group: group, topic: topic, seq: msg.seq}]
 		if delivery == nil || !delivery.acked {
 			break
 		}
 		next++
 	}
 	b.offsets[offsetKey] = next
+}
+
+func (b *testPostgresQueueBackend) firstVisibleMessageAtOrAfterLocked(group, topic string, seq int64) (testPostgresQueueMessage, bool) {
+	for _, msg := range b.messages[topic] {
+		if msg.seq < seq || !testMessageVisibleToGroup(msg, group) {
+			continue
+		}
+		return msg, true
+	}
+	return testPostgresQueueMessage{}, false
+}
+
+func testMessageVisibleToGroup(msg testPostgresQueueMessage, group string) bool {
+	return msg.targetGroup == "" || msg.targetGroup == group
 }
 
 func (b *testPostgresQueueBackend) renew(_ context.Context, group, topic string, seq int64, owner string, attempt int, leaseDuration time.Duration) error {

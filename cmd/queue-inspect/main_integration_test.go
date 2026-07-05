@@ -101,6 +101,152 @@ func TestPostgresInspectorIntegrationInspectAllAndMissingGroup(t *testing.T) {
 	}
 }
 
+func TestPostgresInspectorIntegrationTargetedBacklogOnlyCountsVisibleGroups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver:       queue.DriverPostgres,
+		PostgresPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	targeted, ok := producer.(queue.TargetedProducer)
+	if !ok {
+		t.Fatalf("postgres producer does not support targeted delivery")
+	}
+	if err := targeted.PublishToGroup(ctx, "proof.fulfillments.v1", "deposit-relayer-proof", []byte("fulfilled")); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+
+	inspector := postgresInspector{pool: pool}
+	allRows, err := inspector.Inspect(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("Inspect all: %v", err)
+	}
+	target := findQueueStatsRow(t, allRows, "proof.fulfillments.v1", "deposit-relayer-proof")
+	if got, want := target.Backlog, int64(1); got != want {
+		t.Fatalf("target backlog = %d, want %d", got, want)
+	}
+
+	filteredRows, err := inspector.Inspect(ctx, []string{"proof.fulfillments.v1"}, []string{"deposit-relayer-proof", "withdraw-finalizer-proof"})
+	if err != nil {
+		t.Fatalf("Inspect filtered: %v", err)
+	}
+	target = findQueueStatsRow(t, filteredRows, "proof.fulfillments.v1", "deposit-relayer-proof")
+	if got, want := target.Backlog, int64(1); got != want {
+		t.Fatalf("filtered target backlog = %d, want %d", got, want)
+	}
+	idle := findQueueStatsRow(t, filteredRows, "proof.fulfillments.v1", "withdraw-finalizer-proof")
+	if got, want := idle.Backlog, int64(0); got != want {
+		t.Fatalf("filtered idle backlog = %d, want %d", got, want)
+	}
+}
+
+func TestPostgresInspectorIntegrationLegacySchemaWithoutTargetColumn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	if _, err := pool.Exec(ctx, legacyPostgresQueueSchemaSQL); err != nil {
+		t.Fatalf("create legacy queue schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO queue_messages (topic, seq, payload, created_at)
+VALUES
+	('proof.fulfillments.v1', 1, decode('6669727374', 'hex'), now()),
+	('proof.fulfillments.v1', 2, decode('7365636f6e64', 'hex'), now());
+INSERT INTO queue_group_offsets (consumer_group, topic, next_seq, created_at, updated_at)
+VALUES ('legacy-proof-group', 'proof.fulfillments.v1', 1, now(), now());
+`); err != nil {
+		t.Fatalf("seed legacy queue schema: %v", err)
+	}
+
+	inspector := postgresInspector{pool: pool}
+	hasTargetColumn, err := inspector.hasTargetConsumerGroupColumn(ctx)
+	if err != nil {
+		t.Fatalf("hasTargetConsumerGroupColumn: %v", err)
+	}
+	if hasTargetColumn {
+		t.Fatalf("legacy schema unexpectedly has target_consumer_group")
+	}
+	rows, err := inspector.Inspect(ctx, []string{"proof.fulfillments.v1"}, []string{"legacy-proof-group"})
+	if err != nil {
+		t.Fatalf("Inspect legacy schema: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("legacy row count = %d, want 1: %#v", len(rows), rows)
+	}
+	row := rows[0]
+	if got, want := row.Topic, "proof.fulfillments.v1"; got != want {
+		t.Fatalf("topic = %q, want %q", got, want)
+	}
+	if got, want := row.ConsumerGroup, "legacy-proof-group"; got != want {
+		t.Fatalf("consumer group = %q, want %q", got, want)
+	}
+	if got, want := row.MessageCount, int64(2); got != want {
+		t.Fatalf("message count = %d, want %d", got, want)
+	}
+	if got, want := row.Backlog, int64(2); got != want {
+		t.Fatalf("backlog = %d, want %d", got, want)
+	}
+}
+
+const legacyPostgresQueueSchemaSQL = `
+CREATE TABLE queue_topic_sequences (
+	topic TEXT PRIMARY KEY,
+	next_seq BIGINT NOT NULL DEFAULT 1,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	CONSTRAINT queue_topic_sequences_topic_nonempty CHECK (topic <> ''),
+	CONSTRAINT queue_topic_sequences_next_seq_positive CHECK (next_seq > 0)
+);
+
+CREATE TABLE queue_messages (
+	topic TEXT NOT NULL,
+	seq BIGINT NOT NULL,
+	payload BYTEA NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (topic, seq),
+	CONSTRAINT queue_messages_topic_nonempty CHECK (topic <> ''),
+	CONSTRAINT queue_messages_seq_positive CHECK (seq > 0)
+);
+
+CREATE TABLE queue_group_offsets (
+	consumer_group TEXT NOT NULL,
+	topic TEXT NOT NULL,
+	next_seq BIGINT NOT NULL DEFAULT 1,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (consumer_group, topic),
+	CONSTRAINT queue_group_offsets_group_nonempty CHECK (consumer_group <> ''),
+	CONSTRAINT queue_group_offsets_topic_nonempty CHECK (topic <> ''),
+	CONSTRAINT queue_group_offsets_next_seq_positive CHECK (next_seq > 0)
+);
+
+CREATE TABLE queue_deliveries (
+	topic TEXT NOT NULL,
+	seq BIGINT NOT NULL,
+	consumer_group TEXT NOT NULL,
+	attempt_count INTEGER NOT NULL DEFAULT 0,
+	lease_owner TEXT,
+	lease_expires_at TIMESTAMPTZ,
+	acked_at TIMESTAMPTZ,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (topic, seq, consumer_group),
+	FOREIGN KEY (topic, seq) REFERENCES queue_messages(topic, seq) ON DELETE CASCADE,
+	CONSTRAINT queue_deliveries_group_nonempty CHECK (consumer_group <> ''),
+	CONSTRAINT queue_deliveries_attempt_nonnegative CHECK (attempt_count >= 0)
+);
+`
+
 func readQueueMessage(t *testing.T, consumer queue.Consumer) queue.Message {
 	t.Helper()
 	select {

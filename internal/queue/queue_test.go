@@ -54,6 +54,16 @@ func (p *recordingProducer) Publish(_ context.Context, topic string, payload []b
 	return p.publishErr
 }
 
+func (p *recordingProducer) PublishToGroup(_ context.Context, topic string, consumerGroup string, payload []byte) error {
+	if p.calls != nil {
+		*p.calls = append(*p.calls, p.name+":"+topic+":"+consumerGroup+":"+string(payload))
+	}
+	if p.after != nil {
+		p.after()
+	}
+	return p.publishErr
+}
+
 func (p *recordingProducer) Close() error {
 	p.closed = true
 	return p.closeErr
@@ -323,6 +333,29 @@ func TestMirrorProducerRequiredShadowFailureFailsPublish(t *testing.T) {
 		t.Fatalf("Publish error = %v, want shadow error", err)
 	}
 	if got, want := strings.Join(calls, ","), "primary:proof.requests.v1:payload,shadow:proof.requests.v1:payload"; got != want {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestMirrorProducerPublishesTargetedPrimaryThenShadow(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	primary := &recordingProducer{name: "primary", calls: &calls}
+	shadow := &recordingProducer{name: "shadow", calls: &calls}
+	producer, err := NewMirrorProducer(primary, shadow, MirrorProducerConfig{RequireShadow: true})
+	if err != nil {
+		t.Fatalf("NewMirrorProducer: %v", err)
+	}
+	targeted, ok := producer.(TargetedProducer)
+	if !ok {
+		t.Fatalf("mirror producer does not support targeted delivery")
+	}
+
+	if err := targeted.PublishToGroup(context.Background(), "proof.fulfillments.v1", "deposit-relayer-proof", []byte("payload")); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+	if got, want := strings.Join(calls, ","), "primary:proof.fulfillments.v1:deposit-relayer-proof:payload,shadow:proof.fulfillments.v1:deposit-relayer-proof:payload"; got != want {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }

@@ -58,6 +58,29 @@ func (p *mirrorProducer) Publish(ctx context.Context, topic string, payload []by
 	return nil
 }
 
+func (p *mirrorProducer) PublishToGroup(ctx context.Context, topic string, consumerGroup string, payload []byte) error {
+	primaryPayload := append([]byte(nil), payload...)
+	shadowPayload := append([]byte(nil), payload...)
+	if err := publishTargetedOrBroadcast(ctx, p.primary, topic, consumerGroup, primaryPayload); err != nil {
+		return fmt.Errorf("primary producer publish: %w", err)
+	}
+	if p.requireShadow {
+		if err := publishTargetedOrBroadcast(ctx, p.shadow, topic, consumerGroup, shadowPayload); err != nil {
+			return fmt.Errorf("shadow producer publish: %w", err)
+		}
+		return nil
+	}
+	p.publishOptionalTargetedShadow(ctx, topic, consumerGroup, shadowPayload)
+	return nil
+}
+
+func publishTargetedOrBroadcast(ctx context.Context, producer Producer, topic string, consumerGroup string, payload []byte) error {
+	if targeted, ok := producer.(TargetedProducer); ok {
+		return targeted.PublishToGroup(ctx, topic, consumerGroup, payload)
+	}
+	return producer.Publish(ctx, topic, payload)
+}
+
 func (p *mirrorProducer) publishOptionalShadow(ctx context.Context, topic string, payload []byte) {
 	if p.shadowTimeout <= 0 {
 		if err := p.shadow.Publish(ctx, topic, payload); err != nil {
@@ -79,6 +102,43 @@ func (p *mirrorProducer) publishOptionalShadow(ctx context.Context, topic string
 	resultCh := make(chan error, 1)
 	go func() {
 		resultCh <- p.shadow.Publish(shadowCtx, topic, payload)
+	}()
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			p.handleOptionalShadowError(topic, err)
+		}
+		if errors.Is(shadowCtx.Err(), context.DeadlineExceeded) {
+			p.closeOptionalShadow()
+		}
+	case <-shadowCtx.Done():
+		p.handleOptionalShadowError(topic, shadowCtx.Err())
+		p.closeOptionalShadow()
+	}
+}
+
+func (p *mirrorProducer) publishOptionalTargetedShadow(ctx context.Context, topic string, consumerGroup string, payload []byte) {
+	if p.shadowTimeout <= 0 {
+		if err := publishTargetedOrBroadcast(ctx, p.shadow, topic, consumerGroup, payload); err != nil {
+			p.handleOptionalShadowError(topic, err)
+		}
+		return
+	}
+
+	p.shadowMu.Lock()
+	shadowClosed := p.shadowClosed
+	p.shadowMu.Unlock()
+	if shadowClosed {
+		return
+	}
+
+	shadowCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.shadowTimeout)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- publishTargetedOrBroadcast(shadowCtx, p.shadow, topic, consumerGroup, payload)
 	}()
 
 	select {

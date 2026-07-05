@@ -38,11 +38,29 @@ CREATE TABLE IF NOT EXISTS queue_messages (
 	topic TEXT NOT NULL,
 	seq BIGINT NOT NULL,
 	payload BYTEA NOT NULL,
+	target_consumer_group TEXT,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	PRIMARY KEY (topic, seq),
 	CONSTRAINT queue_messages_topic_nonempty CHECK (topic <> ''),
-	CONSTRAINT queue_messages_seq_positive CHECK (seq > 0)
+	CONSTRAINT queue_messages_seq_positive CHECK (seq > 0),
+	CONSTRAINT queue_messages_target_group_nonempty CHECK (target_consumer_group IS NULL OR target_consumer_group <> '')
 );
+
+ALTER TABLE queue_messages ADD COLUMN IF NOT EXISTS target_consumer_group TEXT;
+
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1
+		FROM pg_constraint
+		WHERE conrelid = 'queue_messages'::regclass
+		  AND conname = 'queue_messages_target_group_nonempty'
+	) THEN
+		ALTER TABLE queue_messages
+		ADD CONSTRAINT queue_messages_target_group_nonempty
+		CHECK (target_consumer_group IS NULL OR target_consumer_group <> '');
+	END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS queue_group_offsets (
 	consumer_group TEXT NOT NULL,
@@ -73,6 +91,7 @@ CREATE TABLE IF NOT EXISTS queue_deliveries (
 );
 
 CREATE INDEX IF NOT EXISTS queue_messages_created_idx ON queue_messages (created_at);
+CREATE INDEX IF NOT EXISTS queue_messages_target_group_idx ON queue_messages (topic, target_consumer_group, seq);
 CREATE INDEX IF NOT EXISTS queue_group_offsets_topic_idx ON queue_group_offsets (topic, next_seq);
 CREATE INDEX IF NOT EXISTS queue_deliveries_claim_idx ON queue_deliveries (consumer_group, topic, acked_at, lease_expires_at, seq);
 `
@@ -101,6 +120,7 @@ type postgresQueueClaimConfig struct {
 type postgresQueueBackend interface {
 	ensureSchema(context.Context) error
 	enqueue(context.Context, string, []byte) error
+	enqueueTarget(context.Context, string, string, []byte) error
 	claim(context.Context, postgresQueueClaimConfig) ([]postgresQueueRecord, error)
 	ack(context.Context, string, string, int64, string, int) error
 	renew(context.Context, string, string, int64, string, int, time.Duration) error
@@ -149,6 +169,10 @@ func (s *postgresQueueStore) ensureSchema(ctx context.Context) error {
 }
 
 func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload []byte) error {
+	return s.enqueueTarget(ctx, topic, "", payload)
+}
+
+func (s *postgresQueueStore) enqueueTarget(ctx context.Context, topic string, consumerGroup string, payload []byte) error {
 	if s == nil || s.pool == nil {
 		return errors.New("postgres queue: nil store")
 	}
@@ -159,7 +183,7 @@ func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := EnqueuePostgresTx(ctx, tx, topic, payload); err != nil {
+	if err := EnqueuePostgresTxToGroup(ctx, tx, topic, consumerGroup, payload); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -172,10 +196,17 @@ func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload 
 // The caller is responsible for committing or rolling back the transaction and for ensuring
 // the Postgres queue schema has already been created.
 func EnqueuePostgresTx(ctx context.Context, tx pgx.Tx, topic string, payload []byte) error {
+	return EnqueuePostgresTxToGroup(ctx, tx, topic, "", payload)
+}
+
+// EnqueuePostgresTxToGroup appends a message that is visible only to one
+// consumer group. Empty consumerGroup preserves broadcast delivery semantics.
+func EnqueuePostgresTxToGroup(ctx context.Context, tx pgx.Tx, topic string, consumerGroup string, payload []byte) error {
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
 		return errors.New("topic is required")
 	}
+	consumerGroup = strings.TrimSpace(consumerGroup)
 	if tx == nil {
 		return errors.New("postgres queue: nil transaction")
 	}
@@ -192,9 +223,9 @@ func EnqueuePostgresTx(ctx context.Context, tx pgx.Tx, topic string, payload []b
 		return fmt.Errorf("postgres queue: allocate sequence: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO queue_messages (topic, seq, payload, created_at)
-		VALUES ($1, $2, $3, now())
-	`, topic, seq, append([]byte(nil), payload...)); err != nil {
+		INSERT INTO queue_messages (topic, seq, payload, target_consumer_group, created_at)
+		VALUES ($1, $2, $3, NULLIF($4, ''), now())
+	`, topic, seq, append([]byte(nil), payload...), consumerGroup); err != nil {
 		return fmt.Errorf("postgres queue: insert message: %w", err)
 	}
 	return nil
@@ -261,6 +292,7 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 				SELECT $1, $2, COALESCE(MAX(seq) + 1, 1), now(), now()
 				FROM queue_messages
 				WHERE topic = $2
+				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
 				ON CONFLICT (consumer_group, topic) DO NOTHING
 			`, cfg.group, topic); err != nil {
 				return nil, fmt.Errorf("postgres queue: ensure latest group offset: %w", err)
@@ -291,6 +323,7 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 				FROM queue_messages
 				WHERE topic = o.topic
 				  AND seq >= o.next_seq
+				  AND (target_consumer_group IS NULL OR target_consumer_group = $1)
 				ORDER BY seq
 				LIMIT $3
 			) m ON true
@@ -422,11 +455,13 @@ func (s *postgresQueueStore) ack(ctx context.Context, group, topic string, seq i
 					 AND d.seq = m.seq
 					WHERE m.topic = o.topic
 					  AND m.seq >= o.next_seq
+					  AND (m.target_consumer_group IS NULL OR m.target_consumer_group = o.consumer_group)
 					  AND (d.seq IS NULL OR d.acked_at IS NULL)
 				), (
 					SELECT COALESCE(MAX(m.seq) + 1, o.next_seq)
 					FROM queue_messages m
 					WHERE m.topic = o.topic
+					  AND (m.target_consumer_group IS NULL OR m.target_consumer_group = o.consumer_group)
 				))
 			),
 			updated_at = now()
@@ -538,6 +573,18 @@ func (p *postgresProducer) Publish(ctx context.Context, topic string, payload []
 		return errors.New("topic is required")
 	}
 	return p.backend.enqueue(ctx, topic, append([]byte(nil), payload...))
+}
+
+func (p *postgresProducer) PublishToGroup(ctx context.Context, topic string, consumerGroup string, payload []byte) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic is required")
+	}
+	consumerGroup = strings.TrimSpace(consumerGroup)
+	if consumerGroup == "" {
+		return errors.New("consumer group is required")
+	}
+	return p.backend.enqueueTarget(ctx, topic, consumerGroup, append([]byte(nil), payload...))
 }
 
 func (p *postgresProducer) Close() error {

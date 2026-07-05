@@ -221,6 +221,7 @@ func (s *MemoryStore) GetJob(_ context.Context, jobID common.Hash) (JobRecord, e
 
 func cloneJob(job JobRequest) JobRequest {
 	job.Pipeline = stringsTrim(job.Pipeline)
+	job.ResponseGroup = stringsTrim(job.ResponseGroup)
 	job.Journal = append([]byte(nil), job.Journal...)
 	job.PrivateInput = append([]byte(nil), job.PrivateInput...)
 	return job

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -172,6 +173,22 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 				"job_id", job.JobID.Hex(),
 				"err", err,
 			)
+			if strings.TrimSpace(job.ResponseGroup) != "" {
+				payload, ferr := proof.EncodeFailureMessage(proof.FailureMessage{
+					JobID:     job.JobID,
+					ErrorCode: "proof_request_mismatch",
+					Retryable: false,
+					Message:   "proof request payload does not match existing job",
+				})
+				if ferr != nil {
+					return ferr
+				}
+				if perr := w.publishResponse(ctx, w.cfg.FailureTopic, job, payload); perr != nil {
+					return perr
+				}
+				w.failureCount.Add(1)
+				w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
+			}
 			ackMessage(msg, w.cfg.AckTimeout, w.log)
 			return nil
 		}
@@ -184,7 +201,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		if ferr != nil {
 			return ferr
 		}
-		if perr := w.producer.Publish(ctx, w.cfg.FailureTopic, failPayload); perr != nil {
+		if perr := w.publishResponse(ctx, w.cfg.FailureTopic, job, failPayload); perr != nil {
 			return perr
 		}
 		w.failureCount.Add(1)
@@ -206,7 +223,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		if err != nil {
 			return err
 		}
-		if err := w.producer.Publish(ctx, w.cfg.ResultTopic, payload); err != nil {
+		if err := w.publishResponse(ctx, w.cfg.ResultTopic, job, payload); err != nil {
 			return err
 		}
 		if out.FallbackUsed {
@@ -234,7 +251,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		if err != nil {
 			return err
 		}
-		if err := w.producer.Publish(ctx, w.cfg.FailureTopic, payload); err != nil {
+		if err := w.publishResponse(ctx, w.cfg.FailureTopic, job, payload); err != nil {
 			return err
 		}
 		w.failureCount.Add(1)
@@ -247,10 +264,37 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		}
 	case StatusSkipped:
 		// Already handled by another worker instance or terminal state.
+		if strings.TrimSpace(job.ResponseGroup) != "" {
+			payload, err := proof.EncodeFailureMessage(proof.FailureMessage{
+				JobID:     job.JobID,
+				RequestID: out.RequestID,
+				ErrorCode: "proof_request_in_progress",
+				Retryable: true,
+				Message:   "proof request is already in progress",
+			})
+			if err != nil {
+				return err
+			}
+			if err := w.publishResponse(ctx, w.cfg.FailureTopic, job, payload); err != nil {
+				return err
+			}
+			w.failureCount.Add(1)
+			w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
+		}
 	}
 
 	ackMessage(msg, w.cfg.AckTimeout, w.log)
 	return nil
+}
+
+func (w *Worker) publishResponse(ctx context.Context, topic string, job proof.JobRequest, payload []byte) error {
+	group := strings.TrimSpace(job.ResponseGroup)
+	if group != "" {
+		if producer, ok := w.producer.(queue.TargetedProducer); ok {
+			return producer.PublishToGroup(ctx, topic, group, payload)
+		}
+	}
+	return w.producer.Publish(ctx, topic, payload)
 }
 
 func (w *Worker) maybeDLQMalformedRequest(ctx context.Context, msg queue.Message, decodeErr error) error {

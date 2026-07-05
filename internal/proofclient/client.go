@@ -71,9 +71,10 @@ func (e *FailureError) Unwrap() error {
 }
 
 type QueueConfig struct {
-	RequestTopic string
-	ResultTopic  string
-	FailureTopic string
+	RequestTopic  string
+	ResultTopic   string
+	FailureTopic  string
+	ResponseGroup string
 
 	Producer queue.Producer
 	Consumer queue.Consumer
@@ -88,7 +89,8 @@ type QueueConfig struct {
 }
 
 type QueueClient struct {
-	cfg QueueConfig
+	gate chan struct{}
+	cfg  QueueConfig
 }
 
 func NewQueueClient(cfg QueueConfig) (*QueueClient, error) {
@@ -110,11 +112,21 @@ func NewQueueClient(cfg QueueConfig) (*QueueClient, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &QueueClient{cfg: cfg}, nil
+	cfg.ResponseGroup = strings.TrimSpace(cfg.ResponseGroup)
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &QueueClient{gate: gate, cfg: cfg}, nil
 }
 
 func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, error) {
 	if err := validateRequest(req); err != nil {
+		return Result{}, err
+	}
+	if err := c.acquire(ctx); err != nil {
+		return Result{}, err
+	}
+	defer c.release()
+	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
 	requestStartedAt := c.cfg.Now().UTC()
@@ -123,7 +135,7 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 	if deadline.IsZero() {
 		deadline = c.cfg.Now().UTC().Add(c.cfg.DefaultDeadline)
 	}
-	payload, err := json.Marshal(map[string]any{
+	requestPayload := map[string]any{
 		"job_id":        req.JobID.Hex(),
 		"pipeline":      strings.TrimSpace(req.Pipeline),
 		"image_id":      req.ImageID.Hex(),
@@ -131,7 +143,11 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 		"private_input": "0x" + hex.EncodeToString(req.PrivateInput),
 		"deadline":      deadline.Format(time.RFC3339),
 		"priority":      req.Priority,
-	})
+	}
+	if c.cfg.ResponseGroup != "" {
+		requestPayload["response_group"] = c.cfg.ResponseGroup
+	}
+	payload, err := json.Marshal(requestPayload)
 	if err != nil {
 		return Result{}, fmt.Errorf("proofclient: marshal request payload: %w", err)
 	}
@@ -166,6 +182,22 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 			}
 		}
 	}
+}
+
+func (c *QueueClient) acquire(ctx context.Context) error {
+	if c.gate == nil {
+		return fmt.Errorf("%w: queue client not initialized", ErrInvalidConfig)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.gate:
+		return nil
+	}
+}
+
+func (c *QueueClient) release() {
+	c.gate <- struct{}{}
 }
 
 func (c *QueueClient) handleResponseMessage(

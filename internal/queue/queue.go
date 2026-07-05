@@ -175,6 +175,13 @@ type Producer interface {
 	Close() error
 }
 
+// TargetedProducer optionally publishes a message to a single consumer group
+// when the backing queue supports per-group delivery metadata.
+type TargetedProducer interface {
+	Producer
+	PublishToGroup(ctx context.Context, topic string, consumerGroup string, payload []byte) error
+}
+
 // ConsumerConfig configures queue consumers.
 type ConsumerConfig struct {
 	Driver string

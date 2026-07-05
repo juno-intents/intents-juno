@@ -32,13 +32,14 @@ const (
 )
 
 type JobRequest struct {
-	JobID        common.Hash
-	Pipeline     string
-	ImageID      common.Hash
-	Journal      []byte
-	PrivateInput []byte
-	Deadline     time.Time
-	Priority     int
+	JobID         common.Hash
+	Pipeline      string
+	ImageID       common.Hash
+	Journal       []byte
+	PrivateInput  []byte
+	Deadline      time.Time
+	Priority      int
+	ResponseGroup string
 }
 
 func (j JobRequest) Validate() error {
@@ -65,13 +66,14 @@ func (j JobRequest) Validate() error {
 
 func DecodeJobRequest(payload []byte) (JobRequest, error) {
 	var raw struct {
-		JobID        string `json:"job_id"`
-		Pipeline     string `json:"pipeline"`
-		ImageID      string `json:"image_id"`
-		Journal      string `json:"journal"`
-		PrivateInput string `json:"private_input"`
-		Deadline     string `json:"deadline"`
-		Priority     int    `json:"priority"`
+		JobID         string `json:"job_id"`
+		Pipeline      string `json:"pipeline"`
+		ImageID       string `json:"image_id"`
+		Journal       string `json:"journal"`
+		PrivateInput  string `json:"private_input"`
+		Deadline      string `json:"deadline"`
+		Priority      int    `json:"priority"`
+		ResponseGroup string `json:"response_group"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return JobRequest{}, fmt.Errorf("%w: decode payload: %v", ErrInvalidJob, err)
@@ -99,13 +101,14 @@ func DecodeJobRequest(payload []byte) (JobRequest, error) {
 	}
 
 	job := JobRequest{
-		JobID:        jobID,
-		Pipeline:     strings.TrimSpace(raw.Pipeline),
-		ImageID:      imageID,
-		Journal:      journal,
-		PrivateInput: privateInput,
-		Deadline:     deadline.UTC(),
-		Priority:     raw.Priority,
+		JobID:         jobID,
+		Pipeline:      strings.TrimSpace(raw.Pipeline),
+		ImageID:       imageID,
+		Journal:       journal,
+		PrivateInput:  privateInput,
+		Deadline:      deadline.UTC(),
+		Priority:      raw.Priority,
+		ResponseGroup: strings.TrimSpace(raw.ResponseGroup),
 	}
 	if err := job.Validate(); err != nil {
 		return JobRequest{}, err

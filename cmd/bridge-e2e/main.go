@@ -2389,6 +2389,7 @@ func requestSP1ProofViaQueue(
 		RequestTopic:    cfg.ProofRequestTopic,
 		ResultTopic:     cfg.ProofResultTopic,
 		FailureTopic:    cfg.ProofFailureTopic,
+		ResponseGroup:   group,
 		Producer:        producer,
 		Consumer:        consumer,
 		AckTimeout:      cfg.ProofAckTimeout,

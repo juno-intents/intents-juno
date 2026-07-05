@@ -217,7 +217,160 @@ func (i postgresInspector) Inspect(ctx context.Context, topics, groups []string)
 	}
 	topics = normalizeFilterList(topics)
 	groups = normalizeFilterList(groups)
-	rows, err := i.pool.Query(ctx, `
+	hasTargetColumn, err := i.hasTargetConsumerGroupColumn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := postgresInspectLegacyQuery
+	if hasTargetColumn {
+		query = postgresInspectTargetQuery
+	}
+	rows, err := i.pool.Query(ctx, query, topics, groups)
+	if err != nil {
+		return nil, fmt.Errorf("inspect postgres queue: %w", err)
+	}
+	defer rows.Close()
+
+	var out []queueStatsRow
+	for rows.Next() {
+		var row queueStatsRow
+		if err := rows.Scan(
+			&row.Topic,
+			&row.ConsumerGroup,
+			&row.FirstSeq,
+			&row.LastSeq,
+			&row.MessageCount,
+			&row.NextSeq,
+			&row.Backlog,
+			&row.UnackedDeliveries,
+			&row.AckedDeliveries,
+			&row.LeasedDeliveries,
+			&row.ExpiredLeases,
+			&row.MaxAttemptCount,
+			&row.LastMessageAgeSecs,
+		); err != nil {
+			return nil, fmt.Errorf("scan postgres queue stats: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read postgres queue stats: %w", err)
+	}
+	return out, nil
+}
+
+func (i postgresInspector) hasTargetConsumerGroupColumn(ctx context.Context) (bool, error) {
+	var ok bool
+	if err := i.pool.QueryRow(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM pg_attribute
+	WHERE attrelid = to_regclass('queue_messages')
+	  AND attname = 'target_consumer_group'
+	  AND NOT attisdropped
+)`).Scan(&ok); err != nil {
+		return false, fmt.Errorf("inspect postgres queue schema: %w", err)
+	}
+	return ok, nil
+}
+
+const postgresInspectTargetQuery = `
+WITH requested_topics AS (
+	SELECT unnest($1::text[]) AS topic
+),
+requested_groups AS (
+	SELECT unnest($2::text[]) AS consumer_group
+),
+topic_stats AS (
+	SELECT
+		topic,
+		COALESCE(min(seq), 0)::bigint AS first_seq,
+		COALESCE(max(seq), 0)::bigint AS last_seq,
+		count(*)::bigint AS message_count,
+		COALESCE(floor(extract(epoch FROM (now() - max(created_at))))::bigint, 0) AS last_message_age_seconds
+	FROM queue_messages
+	WHERE (cardinality($1::text[]) = 0 OR topic = ANY($1::text[]))
+	GROUP BY topic
+),
+actual_groups AS (
+	SELECT topic, consumer_group
+	FROM queue_group_offsets
+	WHERE (cardinality($1::text[]) = 0 OR topic = ANY($1::text[]))
+		AND (cardinality($2::text[]) = 0 OR consumer_group = ANY($2::text[]))
+	UNION
+	SELECT topic, consumer_group
+	FROM queue_deliveries
+	WHERE (cardinality($1::text[]) = 0 OR topic = ANY($1::text[]))
+		AND (cardinality($2::text[]) = 0 OR consumer_group = ANY($2::text[]))
+	UNION
+	SELECT topic, target_consumer_group AS consumer_group
+	FROM queue_messages
+	WHERE target_consumer_group IS NOT NULL
+		AND (cardinality($1::text[]) = 0 OR topic = ANY($1::text[]))
+		AND (cardinality($2::text[]) = 0 OR target_consumer_group = ANY($2::text[]))
+),
+known_topics AS (
+	SELECT topic FROM requested_topics
+	UNION
+	SELECT topic FROM topic_stats
+	UNION
+	SELECT topic FROM actual_groups
+),
+groups AS (
+	SELECT kt.topic, rg.consumer_group
+	FROM known_topics kt
+	CROSS JOIN requested_groups rg
+	WHERE cardinality($2::text[]) > 0
+	UNION
+	SELECT topic, consumer_group
+	FROM actual_groups
+	WHERE cardinality($2::text[]) = 0
+),
+delivery_stats AS (
+	SELECT
+		topic,
+		consumer_group,
+		count(*) FILTER (WHERE acked_at IS NULL)::bigint AS unacked_deliveries,
+		count(*) FILTER (WHERE acked_at IS NOT NULL)::bigint AS acked_deliveries,
+		count(*) FILTER (WHERE acked_at IS NULL AND lease_owner IS NOT NULL AND lease_expires_at > now())::bigint AS leased_deliveries,
+		count(*) FILTER (WHERE acked_at IS NULL AND lease_owner IS NOT NULL AND lease_expires_at <= now())::bigint AS expired_leases,
+		COALESCE(max(attempt_count), 0)::bigint AS max_attempt_count
+	FROM queue_deliveries
+	WHERE (cardinality($1::text[]) = 0 OR topic = ANY($1::text[]))
+		AND (cardinality($2::text[]) = 0 OR consumer_group = ANY($2::text[]))
+	GROUP BY topic, consumer_group
+)
+SELECT
+	COALESCE(ts.topic, g.topic) AS topic,
+	COALESCE(g.consumer_group, '') AS consumer_group,
+	COALESCE(ts.first_seq, 0)::bigint AS first_seq,
+	COALESCE(ts.last_seq, 0)::bigint AS last_seq,
+	COALESCE(ts.message_count, 0)::bigint AS message_count,
+	COALESCE(o.next_seq, 0)::bigint AS next_seq,
+	CASE
+		WHEN g.consumer_group IS NULL OR ts.last_seq IS NULL THEN 0
+		ELSE (
+			SELECT count(*)::bigint
+			FROM queue_messages m
+			WHERE m.topic = g.topic
+			  AND (m.target_consumer_group IS NULL OR m.target_consumer_group = g.consumer_group)
+			  AND m.seq >= COALESCE(o.next_seq, 1)
+		)
+	END::bigint AS backlog,
+	COALESCE(ds.unacked_deliveries, 0)::bigint AS unacked_deliveries,
+	COALESCE(ds.acked_deliveries, 0)::bigint AS acked_deliveries,
+	COALESCE(ds.leased_deliveries, 0)::bigint AS leased_deliveries,
+	COALESCE(ds.expired_leases, 0)::bigint AS expired_leases,
+	COALESCE(ds.max_attempt_count, 0)::bigint AS max_attempt_count,
+	COALESCE(ts.last_message_age_seconds, 0)::bigint AS last_message_age_seconds
+FROM topic_stats ts
+FULL OUTER JOIN groups g ON g.topic = ts.topic
+LEFT JOIN queue_group_offsets o ON o.topic = g.topic AND o.consumer_group = g.consumer_group
+LEFT JOIN delivery_stats ds ON ds.topic = g.topic AND ds.consumer_group = g.consumer_group
+ORDER BY topic, consumer_group
+`
+
+const postgresInspectLegacyQuery = `
 WITH requested_topics AS (
 	SELECT unnest($1::text[]) AS topic
 ),
@@ -299,39 +452,7 @@ FULL OUTER JOIN groups g ON g.topic = ts.topic
 LEFT JOIN queue_group_offsets o ON o.topic = g.topic AND o.consumer_group = g.consumer_group
 LEFT JOIN delivery_stats ds ON ds.topic = g.topic AND ds.consumer_group = g.consumer_group
 ORDER BY topic, consumer_group
-`, topics, groups)
-	if err != nil {
-		return nil, fmt.Errorf("inspect postgres queue: %w", err)
-	}
-	defer rows.Close()
-
-	var out []queueStatsRow
-	for rows.Next() {
-		var row queueStatsRow
-		if err := rows.Scan(
-			&row.Topic,
-			&row.ConsumerGroup,
-			&row.FirstSeq,
-			&row.LastSeq,
-			&row.MessageCount,
-			&row.NextSeq,
-			&row.Backlog,
-			&row.UnackedDeliveries,
-			&row.AckedDeliveries,
-			&row.LeasedDeliveries,
-			&row.ExpiredLeases,
-			&row.MaxAttemptCount,
-			&row.LastMessageAgeSecs,
-		); err != nil {
-			return nil, fmt.Errorf("scan postgres queue stats: %w", err)
-		}
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read postgres queue stats: %w", err)
-	}
-	return out, nil
-}
+`
 
 func (i kafkaInspector) Inspect(ctx context.Context, topics, groups []string) ([]queueStatsRow, error) {
 	topics = normalizeFilterList(topics)

@@ -2,6 +2,7 @@ package proofclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,6 +26,26 @@ func (p *fakeProducer) Publish(_ context.Context, topic string, payload []byte) 
 }
 
 func (p *fakeProducer) Close() error { return nil }
+
+type channelProducer struct {
+	published chan publishedRequest
+}
+
+type publishedRequest struct {
+	topic   string
+	payload []byte
+}
+
+func (p *channelProducer) Publish(ctx context.Context, topic string, payload []byte) error {
+	select {
+	case p.published <- publishedRequest{topic: topic, payload: append([]byte(nil), payload...)}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *channelProducer) Close() error { return nil }
 
 type fakeConsumer struct {
 	msgCh chan queue.Message
@@ -127,6 +148,236 @@ func TestQueueClient_RequestProofFulfillment(t *testing.T) {
 	}
 	if len(res.Journal) != 2 || res.Journal[0] != 0x01 || res.Journal[1] != 0x02 {
 		t.Fatalf("journal mismatch: %x", res.Journal)
+	}
+}
+
+func TestQueueClient_RequestProofIncludesResponseGroup(t *testing.T) {
+	t.Parallel()
+
+	producer := &fakeProducer{}
+	consumer := &fakeConsumer{
+		msgCh: make(chan queue.Message, 1),
+		errCh: make(chan error, 1),
+	}
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic:  "proof.requests.v1",
+		ResultTopic:   "proof.fulfillments.v1",
+		FailureTopic:  "proof.failures.v1",
+		ResponseGroup: "  ip-10-92-1-179-deposit-relayer-proof  ",
+		Producer:      producer,
+		Consumer:      consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+
+	jobID := common.HexToHash("0x6a6a8f35ea6fbce9ebc657de70e77bb9b7f2030569f9c6fbf46ba783f913be98")
+	consumer.msgCh <- queue.Message{
+		Topic: "proof.fulfillments.v1",
+		Value: []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99","journal":"0x0102"}`),
+	}
+
+	_, err = client.RequestProof(context.Background(), Request{
+		JobID:        jobID,
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     time.Now().UTC().Add(time.Minute),
+		Priority:     1,
+	})
+	if err != nil {
+		t.Fatalf("RequestProof: %v", err)
+	}
+
+	var payload struct {
+		ResponseGroup string `json:"response_group"`
+	}
+	if err := json.Unmarshal(producer.payload, &payload); err != nil {
+		t.Fatalf("decode request payload: %v", err)
+	}
+	if got, want := payload.ResponseGroup, "ip-10-92-1-179-deposit-relayer-proof"; got != want {
+		t.Fatalf("response group: got %q want %q", got, want)
+	}
+}
+
+func TestQueueClient_RequestProofSerializesSharedResponseConsumer(t *testing.T) {
+	t.Parallel()
+
+	producer := &channelProducer{published: make(chan publishedRequest, 2)}
+	consumer := &fakeConsumer{
+		msgCh: make(chan queue.Message, 2),
+		errCh: make(chan error, 1),
+	}
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic:  "proof.requests.v1",
+		ResultTopic:   "proof.fulfillments.v1",
+		FailureTopic:  "proof.failures.v1",
+		ResponseGroup: "deposit-relayer-proof",
+		Producer:      producer,
+		Consumer:      consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+
+	jobA := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	jobB := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctx, validProofRequest(jobA))
+		doneA <- err
+	}()
+	first := readPublishedRequest(t, producer.published)
+	if got, want := publishedJobID(t, first.payload), jobA.Hex(); got != want {
+		t.Fatalf("first published job_id = %q, want %q", got, want)
+	}
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctx, validProofRequest(jobB))
+		doneB <- err
+	}()
+	assertNoPublishedRequest(t, producer.published, 50*time.Millisecond)
+
+	consumer.msgCh <- fulfillmentMessage(jobA)
+	if err := readRequestProofError(t, doneA); err != nil {
+		t.Fatalf("request A error: %v", err)
+	}
+
+	second := readPublishedRequest(t, producer.published)
+	if got, want := publishedJobID(t, second.payload), jobB.Hex(); got != want {
+		t.Fatalf("second published job_id = %q, want %q", got, want)
+	}
+	consumer.msgCh <- fulfillmentMessage(jobB)
+	if err := readRequestProofError(t, doneB); err != nil {
+		t.Fatalf("request B error: %v", err)
+	}
+}
+
+func TestQueueClient_RequestProofWaitForSharedConsumerSlotHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	producer := &channelProducer{published: make(chan publishedRequest, 2)}
+	consumer := &fakeConsumer{
+		msgCh: make(chan queue.Message, 2),
+		errCh: make(chan error, 1),
+	}
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic:  "proof.requests.v1",
+		ResultTopic:   "proof.fulfillments.v1",
+		FailureTopic:  "proof.failures.v1",
+		ResponseGroup: "deposit-relayer-proof",
+		Producer:      producer,
+		Consumer:      consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+
+	jobA := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	jobB := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	ctxA, cancelA := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelA()
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctxA, validProofRequest(jobA))
+		doneA <- err
+	}()
+	defer func() {
+		consumer.msgCh <- fulfillmentMessage(jobA)
+		_ = readRequestProofError(t, doneA)
+	}()
+	first := readPublishedRequest(t, producer.published)
+	if got, want := publishedJobID(t, first.payload), jobA.Hex(); got != want {
+		t.Fatalf("first published job_id = %q, want %q", got, want)
+	}
+
+	ctxB, cancelB := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelB()
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := client.RequestProof(ctxB, validProofRequest(jobB))
+		doneB <- err
+	}()
+
+	select {
+	case err := <-doneB:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("request B error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timeout waiting for queued RequestProof to honor context deadline")
+	}
+	assertNoPublishedRequest(t, producer.published, 50*time.Millisecond)
+}
+
+func validProofRequest(jobID common.Hash) Request {
+	return Request{
+		JobID:        jobID,
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     time.Now().UTC().Add(time.Minute),
+		Priority:     1,
+	}
+}
+
+func fulfillmentMessage(jobID common.Hash) queue.Message {
+	return queue.Message{
+		Topic: "proof.fulfillments.v1",
+		Value: []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99","journal":"0x0102"}`),
+	}
+}
+
+func readPublishedRequest(t *testing.T, published <-chan publishedRequest) publishedRequest {
+	t.Helper()
+
+	select {
+	case req := <-published:
+		return req
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for published request")
+		return publishedRequest{}
+	}
+}
+
+func assertNoPublishedRequest(t *testing.T, published <-chan publishedRequest, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case req := <-published:
+		t.Fatalf("unexpected published request before prior request completed: topic=%s job_id=%s", req.topic, publishedJobID(t, req.payload))
+	case <-time.After(wait):
+	}
+}
+
+func publishedJobID(t *testing.T, payload []byte) string {
+	t.Helper()
+
+	var req struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("decode published request: %v", err)
+	}
+	return req.JobID
+}
+
+func readRequestProofError(t *testing.T, done <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for RequestProof")
+		return nil
 	}
 }
 

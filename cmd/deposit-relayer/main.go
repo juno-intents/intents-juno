@@ -866,14 +866,15 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 			return nil, func() {}, err
 		}
 		client, err := proofclient.NewQueueClient(proofclient.QueueConfig{
-			RequestTopic: cfg.proofRequestTopic,
-			ResultTopic:  cfg.proofResultTopic,
-			FailureTopic: cfg.proofFailureTopic,
-			Producer:     producer,
-			Consumer:     consumer,
-			AckTimeout:   cfg.ackTimeout,
-			DLQStore:     cfg.dlqStore,
-			Log:          cfg.log,
+			RequestTopic:  cfg.proofRequestTopic,
+			ResultTopic:   cfg.proofResultTopic,
+			FailureTopic:  cfg.proofFailureTopic,
+			ResponseGroup: group,
+			Producer:      producer,
+			Consumer:      consumer,
+			AckTimeout:    cfg.ackTimeout,
+			DLQStore:      cfg.dlqStore,
+			Log:           cfg.log,
 		})
 		if err != nil {
 			_ = producer.Close()

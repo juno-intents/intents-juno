@@ -89,6 +89,81 @@ func TestPostgresQueueIntegration_RoundTripAndResume(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueIntegration_TargetedDeliveryDoesNotBlockUnrelatedGroups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	producer, err := NewProducer(ProducerConfig{
+		Driver:       DriverPostgres,
+		PostgresPool: pool,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+	targeted, ok := producer.(TargetedProducer)
+	if !ok {
+		t.Fatalf("postgres producer does not support targeted delivery")
+	}
+
+	if err := targeted.PublishToGroup(ctx, "proof.fulfillments.v1", "deposit-relayer-proof", []byte("targeted-first")); err != nil {
+		t.Fatalf("PublishToGroup: %v", err)
+	}
+	if err := producer.Publish(ctx, "proof.fulfillments.v1", []byte("broadcast-second")); err != nil {
+		t.Fatalf("Publish broadcast: %v", err)
+	}
+
+	idle, err := NewConsumer(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		PostgresPool:          pool,
+		Group:                 "withdraw-finalizer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+		PostgresOwner:         "idle",
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer idle: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+	idleMsg := readQueueMessage(t, idle)
+	if got, want := string(idleMsg.Value), "broadcast-second"; got != want {
+		t.Fatalf("idle value = %q, want %q", got, want)
+	}
+	if err := idleMsg.Ack(ctx); err != nil {
+		t.Fatalf("ack idle: %v", err)
+	}
+
+	target, err := NewConsumer(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		PostgresPool:          pool,
+		Group:                 "deposit-relayer-proof",
+		Topics:                []string{"proof.fulfillments.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+		PostgresOwner:         "target",
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer target: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+
+	first := readQueueMessage(t, target)
+	if got, want := string(first.Value), "targeted-first"; got != want {
+		t.Fatalf("target first value = %q, want %q", got, want)
+	}
+	if err := first.Ack(ctx); err != nil {
+		t.Fatalf("ack target first: %v", err)
+	}
+	second := readQueueMessage(t, target)
+	if got, want := string(second.Value), "broadcast-second"; got != want {
+		t.Fatalf("target second value = %q, want %q", got, want)
+	}
+}
+
 func TestPostgresQueueIntegration_EnqueueTxCommitsWithTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
