@@ -3066,7 +3066,7 @@ EOF
 }
 
 test_render_operator_stack_env_replaces_mainnet_quicknode_rpc_with_guarded_default_base_rpc() {
-  local workdir shared_manifest handoff_dir resolved_env output_env
+  local workdir shared_manifest handoff_dir resolved_env output_env unsafe_status
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
@@ -3126,6 +3126,47 @@ EOF
   assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://mainnet.base.org" "rendered env resolves stale shared manifest deposit rpc"
   assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_POLL_INTERVAL=30s" "rendered env keeps stale shared manifest public rpc throttle"
   assert_not_contains "$(cat "$output_env")" "stale-shared-manifest" "rendered env omits stale shared manifest QuickNode rpc"
+
+  (
+    PRODUCTION_BASE_EVENT_SCANNER_ENABLED_OVERRIDE=false \
+      PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE=120s \
+      PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE=50 \
+      production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  )
+
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_ENABLED=false" "rendered env supports scanner disablement through reviewed deploy path"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_POLL_INTERVAL=120s" "rendered env supports scanner poll interval containment override"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=50" "rendered env supports scanner block range containment override"
+
+  set +e
+  (
+    set -e
+    unset PRODUCTION_BASE_EVENT_SCANNER_ENABLED_OVERRIDE PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE
+    PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE=3s \
+      production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  ) >/dev/null 2>"$workdir/unsafe-poll.err"
+  unsafe_status=$?
+  set -e
+  if [[ "$unsafe_status" -eq 0 ]]; then
+    printf 'expected unsafe public Base RPC poll override to fail\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$workdir/unsafe-poll.err")" "must be at least 30s when using the default public Base RPC" "rendered env rejects public Base RPC poll overrides below the safe floor"
+
+  set +e
+  (
+    set -e
+    unset PRODUCTION_BASE_EVENT_SCANNER_ENABLED_OVERRIDE PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE
+    PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE=1000 \
+      production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  ) >/dev/null 2>"$workdir/unsafe-max-blocks.err"
+  unsafe_status=$?
+  set -e
+  if [[ "$unsafe_status" -eq 0 ]]; then
+    printf 'expected unsafe public Base RPC max-block override to fail\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$workdir/unsafe-max-blocks.err")" "must be at most 200 when using the default public Base RPC" "rendered env rejects public Base RPC block range overrides above the safe cap"
   rm -rf "$workdir"
 }
 

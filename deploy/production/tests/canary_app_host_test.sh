@@ -375,6 +375,92 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_resolves_retired_mainnet_base_rpc() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  cat >"$shared_manifest" <<'EOF'
+{
+  "contracts": {
+    "base_rpc_url": "https://stale.base-mainnet.quiknode.pro/redacted",
+    "base_chain_id": 8453,
+    "bridge": "0x2222222222222222222222222222222222222222",
+    "wjuno": "0x3333333333333333333333333333333333333333"
+  },
+  "shared_roles": {
+    "proof": {
+      "asg": "alpha-proof-role",
+      "requestor_address": "0x4444444444444444444444444444444444444444",
+      "rpc_url": "https://rpc.mainnet.succinct.xyz"
+    }
+  }
+}
+EOF
+
+  app_manifest="$workdir/app-deploy.json"
+  cat >"$app_manifest" <<EOF
+{
+  "aws_profile": "juno",
+  "aws_region": "us-east-1",
+  "shared_manifest_path": "$shared_manifest",
+  "app_host": "app.alpha.example.invalid",
+  "public_scheme": "https",
+  "services": {
+    "bridge_api": {
+      "public_url": "https://bridge.alpha.junointents.com"
+    },
+    "backoffice": {
+      "internal_url": "http://127.0.0.1:8090",
+      "access": {
+        "mode": "cloudflare-access"
+      }
+    }
+  }
+}
+EOF
+  output_json="$workdir/canary.json"
+
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${@: -1}"
+case "$url" in
+  https://bridge.alpha.*/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.*/v1/config)
+    printf '{"version":"v1","baseChainId":8453,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1mainnetexample","minDepositAmount":"201005025","depositMinConfirmations":200}\n'
+    ;;
+  https://bridge.alpha.*/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.*/)
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  write_fake_aws "$fake_bin/aws" 2 2
+  chmod +x "$fake_bin/curl"
+
+  TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://mainnet.base.org 0x2222222222222222222222222222222222222222 minDepositAdmin()(address)" "canary resolves retired mainnet Base RPC before chain probes"
+  assert_not_contains "$(cat "$log_dir/cast.log")" "quiknode" "canary does not use retired Base RPC for chain probes"
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready after resolving retired Base RPC"
+  rm -rf "$workdir"
+}
+
 test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc() {
   local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
   workdir="$(mktemp -d)"
@@ -2408,6 +2494,7 @@ EOF
 
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
+  test_canary_app_host_resolves_retired_mainnet_base_rpc
   test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc
   test_canary_app_host_blocks_backoffice_funds_runtime_errors
   test_canary_app_host_blocks_bridge_config_contract_mismatch

@@ -3190,8 +3190,37 @@ production_shared_manifest_uses_default_public_base_rpc() {
   [[ -n "$default_base_rpc_url" && "$base_rpc_url" == "$default_base_rpc_url" ]]
 }
 
+production_duration_milliseconds() {
+  local duration="$1"
+  local amount unit
+
+  [[ "$duration" =~ ^([0-9]+)(ms|s|m|h)$ ]] || return 1
+  amount="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[2]}"
+  case "$unit" in
+    ms) printf '%s\n' "$amount" ;;
+    s) printf '%s\n' "$((amount * 1000))" ;;
+    m) printf '%s\n' "$((amount * 60 * 1000))" ;;
+    h) printf '%s\n' "$((amount * 60 * 60 * 1000))" ;;
+    *) return 1 ;;
+  esac
+}
+
 production_base_event_scanner_poll_interval() {
   local shared_manifest="$1"
+  local override override_milliseconds
+
+  override="$(trim "${PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE:-}")"
+  if [[ -n "$override" ]]; then
+    override_milliseconds="$(production_duration_milliseconds "$override")" \
+      || die "PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE must be a duration like 30s"
+    if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest" && (( override_milliseconds < 30000 )); then
+      die "PRODUCTION_BASE_EVENT_SCANNER_POLL_INTERVAL_OVERRIDE must be at least 30s when using the default public Base RPC"
+    fi
+    printf '%s\n' "$override"
+    return 0
+  fi
+
   if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest"; then
     printf '%s\n' "30s"
     return 0
@@ -3201,11 +3230,36 @@ production_base_event_scanner_poll_interval() {
 
 production_base_event_scanner_max_blocks_per_poll() {
   local shared_manifest="$1"
+  local override
+
+  override="$(trim "${PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE:-}")"
+  if [[ -n "$override" ]]; then
+    production_is_positive_integer "$override" \
+      || die "PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE must be a positive integer"
+    if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest" && (( override > 200 )); then
+      die "PRODUCTION_BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL_OVERRIDE must be at most 200 when using the default public Base RPC"
+    fi
+    printf '%s\n' "$override"
+    return 0
+  fi
+
   if production_shared_manifest_uses_default_public_base_rpc "$shared_manifest"; then
     printf '%s\n' "200"
     return 0
   fi
   printf '%s\n' "1000"
+}
+
+production_base_event_scanner_enabled() {
+  local override
+
+  override="$(trim "${PRODUCTION_BASE_EVENT_SCANNER_ENABLED_OVERRIDE:-}")"
+  override="$(lower "$override")"
+  case "$override" in
+    "") printf '%s\n' "true" ;;
+    true|false) printf '%s\n' "$override" ;;
+    *) die "PRODUCTION_BASE_EVENT_SCANNER_ENABLED_OVERRIDE must be true or false" ;;
+  esac
 }
 
 production_deposit_relayer_base_rpc_urls() {
@@ -4448,7 +4502,7 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
-  local deposit_scan_wallet_id base_event_scanner_start_block base_event_scanner_poll_interval base_event_scanner_max_blocks_per_poll withdraw_juno_fee_add_zat
+  local deposit_scan_wallet_id base_event_scanner_start_block base_event_scanner_enabled base_event_scanner_poll_interval base_event_scanner_max_blocks_per_poll withdraw_juno_fee_add_zat
   local withdraw_operator_endpoints owallet_ua signer_ufvk
   local juno_rpc_bind juno_rpc_allow_ips
   local min_base_relayer_balance_wei
@@ -4578,6 +4632,7 @@ production_render_operator_stack_env() {
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
+  base_event_scanner_enabled="$(production_base_event_scanner_enabled)"
   base_event_scanner_poll_interval="$(production_base_event_scanner_poll_interval "$shared_manifest")"
   base_event_scanner_max_blocks_per_poll="$(production_base_event_scanner_max_blocks_per_poll "$shared_manifest")"
   base_rpc_url="$(production_shared_manifest_base_rpc_url "$shared_manifest")"
@@ -4662,7 +4717,7 @@ RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_mi
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BASE_EVENT_SCANNER_BASE_RPC_URL=$base_rpc_url
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
-BASE_EVENT_SCANNER_ENABLED=true
+BASE_EVENT_SCANNER_ENABLED=$base_event_scanner_enabled
 BASE_EVENT_SCANNER_POLL_INTERVAL=$base_event_scanner_poll_interval
 BASE_EVENT_SCANNER_MAX_BLOCKS_PER_POLL=$base_event_scanner_max_blocks_per_poll
 BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block
