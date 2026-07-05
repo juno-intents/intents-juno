@@ -157,6 +157,7 @@ jobs:
               .ci/out/base-event-scanner_linux_amd64.sha256 \
               .ci/out/queue-inspect_linux_amd64 \
               .ci/out/queue-inspect_linux_amd64.sha256 \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "Release ${tag}"
           fi

@@ -199,6 +199,7 @@ jobs:
             gh release create "$tag" \
               .ci/out/shared-proof-services-image-manifest.json \
               .ci/out/shared-proof-services-image-manifest.json.sha256 \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "$notes"
           fi

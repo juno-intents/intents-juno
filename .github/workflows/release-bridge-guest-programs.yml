@@ -142,7 +142,7 @@ jobs:
             gh release upload "$tag" "${assets[@]}" --clobber
             gh release edit "$tag" --title "$tag" --notes "$notes"
           else
-            gh release create "$tag" "${assets[@]}" --title "$tag" --notes "$notes"
+            gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --title "$tag" --notes "$notes"
           fi
 
       - name: Upload Build Artifacts

@@ -296,6 +296,7 @@ jobs:
             gh release create "$tag" \
               .ci/out/wireguard-role-ami-manifest.json \
               .ci/out/wireguard-role-ami-manifest.json.sha256 \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "$notes"
           fi

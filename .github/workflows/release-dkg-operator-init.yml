@@ -90,5 +90,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" ".ci/out/${PACKAGE_NAME}.zip" ".ci/out/${PACKAGE_NAME}.zip.sha256" --clobber
           else
-            gh release create "$tag" ".ci/out/${PACKAGE_NAME}.zip" ".ci/out/${PACKAGE_NAME}.zip.sha256" --title "$tag" --notes "Release ${tag}"
+            gh release create "$tag" ".ci/out/${PACKAGE_NAME}.zip" ".ci/out/${PACKAGE_NAME}.zip.sha256" --target "$GITHUB_SHA" --title "$tag" --notes "Release ${tag}"
           fi

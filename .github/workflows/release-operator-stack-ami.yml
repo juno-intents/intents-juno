@@ -293,6 +293,7 @@ jobs:
               ".ci/out/operator-ami-manifest.json.sha256" \
               ".ci/out/operator-stack-bootstrap.json" \
               ".ci/out/operator-stack-bootstrap.json.sha256" \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "$notes"
           fi

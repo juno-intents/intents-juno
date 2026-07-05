@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+assert_release_create_targets_github_sha() {
+  local workflow_path="$1"
+  local create_count target_count
+
+  create_count="$(grep -c 'gh release create' "$REPO_ROOT/$workflow_path" || true)"
+  target_count="$(grep -c -- '--target "$GITHUB_SHA"' "$REPO_ROOT/$workflow_path" || true)"
+
+  assert_eq "$target_count" "$create_count" "$workflow_path creates release tags at the workflow commit"
+}
+
 main() {
   local app_workflow wireguard_workflow all_workflows
   app_workflow="$(cat "$REPO_ROOT/.github/workflows/release-app-runtime-ami.yml")"
@@ -51,6 +61,14 @@ main() {
 
   assert_contains "$all_workflows" "if: \${{ env.AWS_ROLE_TO_ASSUME != '' }}" "AWS-backed release and deploy workflows prefer role auth when available"
   assert_contains "$all_workflows" "if: \${{ env.AWS_ROLE_TO_ASSUME == '' && env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}" "AWS-backed release and deploy workflows only use static keys when no role is configured"
+
+  assert_release_create_targets_github_sha ".github/workflows/release-app-runtime-ami.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-app-binaries.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-shared-proof-services-image.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-wireguard-role-ami.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-operator-stack-ami.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-bridge-guest-programs.yml"
+  assert_release_create_targets_github_sha ".github/workflows/release-dkg-operator-init.yml"
 }
 
 main "$@"

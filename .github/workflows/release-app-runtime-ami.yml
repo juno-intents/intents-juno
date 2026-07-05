@@ -363,6 +363,7 @@ jobs:
             gh release create "$tag" \
               .ci/out/app-runtime-ami-manifest.json \
               .ci/out/app-runtime-ami-manifest.json.sha256 \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "$notes"
           fi
