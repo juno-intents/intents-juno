@@ -4381,7 +4381,7 @@ production_render_operator_stack_env() {
   local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
   local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
-  local shared_queue_driver queue_shadow_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver queue_shadow_queue_driver_env_lines proof_shadow_queue_driver_env_line
+  local shared_queue_driver queue_shadow_queue_driver shared_proof_queue_driver proof_shadow_queue_driver effective_proof_queue_driver queue_shadow_queue_driver_env_lines proof_shadow_queue_driver_env_line operator_kafka_brokers
   local proof_response_postgres_initial_position
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
@@ -4487,6 +4487,10 @@ production_render_operator_stack_env() {
   if [[ "$effective_proof_queue_driver" == "postgres" ]]; then
     proof_response_postgres_initial_position="latest"
   fi
+  operator_kafka_brokers=""
+  if production_shared_manifest_uses_kafka_queue_path "$shared_manifest"; then
+    operator_kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")"
+  fi
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
   kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   if [[ -z "$kafka_critical_hmac_key" ]]; then
@@ -4551,7 +4555,7 @@ production_render_operator_stack_env() {
   esac
 
   cat >"$output_file" <<EOF
-CHECKPOINT_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers // ""' "$shared_manifest")
+CHECKPOINT_KAFKA_BROKERS=$operator_kafka_brokers
 CHECKPOINT_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 CHECKPOINT_SIGNER_DRIVER=$signer_driver
 CHECKPOINT_OPERATORS=$checkpoint_operators

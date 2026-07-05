@@ -1678,6 +1678,91 @@ proof-shadow;.shared_services.queue.driver = "postgres" | .shared_services.proof
 EOF
 }
 
+write_operator_queue_probe_test_files() {
+  local workdir="$1"
+  write_shared_manifest_fixture "$workdir/shared-manifest.json" "$workdir"
+  jq '
+    .shared_services.queue.driver = "postgres"
+    | .shared_services.proof_queue.driver = "postgres"
+    | del(.shared_services.queue.shadow)
+    | del(.shared_services.proof_queue.shadow)
+    | .shared_services.kafka.bootstrap_brokers = "b-1.retained.kafka:9098,b-2.retained.kafka:9098"
+  ' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  cat >"$workdir/operator-deploy.json" <<'EOF'
+{
+  "environment": "alpha",
+  "runtime_config_secret_id": "alpha-operator-runtime",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
+  "aws_region": "us-east-1",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=203.0.113.11:18443"
+  ]
+}
+EOF
+  cat >"$workdir/resolved.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=token
+JUNO_QUEUE_CRITICAL_HMAC_KEY=critical
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DEPOSIT_OWALLET_IVK=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_OWALLET_OVK=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+}
+
+test_render_operator_stack_env_ignores_retained_msk_when_no_kafka_queue_path() {
+  local workdir output_env
+  workdir="$(mktemp -d)"
+  write_operator_queue_probe_test_files "$workdir"
+  output_env="$workdir/operator-stack.env"
+
+  production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+  assert_eq "$(production_env_get_value "$output_env" CHECKPOINT_KAFKA_BROKERS)" "" "operator env ignores retained msk brokers when no active queue path uses kafka"
+  assert_not_contains "$(cat "$output_env")" "b-1.retained.kafka" "operator env does not retain inactive kafka brokers"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_ignores_retained_msk_when_proof_driver_inherits_postgres() {
+  local workdir output_env
+  workdir="$(mktemp -d)"
+  write_operator_queue_probe_test_files "$workdir"
+  jq 'del(.shared_services.proof_queue.driver)' "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+  output_env="$workdir/operator-stack.env"
+
+  production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+  assert_eq "$(production_env_get_value "$output_env" CHECKPOINT_KAFKA_BROKERS)" "" "operator env ignores retained msk brokers when proof queue inherits postgres"
+  assert_contains "$(cat "$output_env")" "PROOF_QUEUE_DRIVER=postgres" "operator env keeps inherited proof queue driver on postgres"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_keeps_kafka_brokers_for_active_kafka_paths() {
+  local case_name manifest_filter workdir output_env
+
+  while IFS=';' read -r case_name manifest_filter; do
+    [[ -n "$case_name" ]] || continue
+    workdir="$(mktemp -d)"
+    write_operator_queue_probe_test_files "$workdir"
+    jq "$manifest_filter" "$workdir/shared-manifest.json" >"$workdir/shared-manifest.next"
+    mv "$workdir/shared-manifest.next" "$workdir/shared-manifest.json"
+    output_env="$workdir/operator-stack.env"
+
+    production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$workdir/resolved.env" "$output_env"
+
+    assert_eq "$(production_env_get_value "$output_env" CHECKPOINT_KAFKA_BROKERS)" "b-1.retained.kafka:9098,b-2.retained.kafka:9098" "operator env keeps kafka brokers for active kafka path: $case_name"
+    rm -rf "$workdir"
+  done <<'EOF'
+shared-primary;.shared_services.queue.driver = "kafka" | .shared_services.proof_queue.driver = "postgres"
+shared-shadow;.shared_services.queue.driver = "postgres" | .shared_services.queue.shadow.driver = "kafka" | .shared_services.proof_queue.driver = "postgres"
+proof-primary;.shared_services.queue.driver = "postgres" | .shared_services.proof_queue.driver = "kafka"
+proof-shadow;.shared_services.queue.driver = "postgres" | .shared_services.proof_queue.driver = "postgres" | .shared_services.proof_queue.shadow.driver = "kafka"
+EOF
+}
+
 test_render_shared_manifest_includes_proof_queue_controls() {
   local workdir shared_manifest tf_json
   workdir="$(mktemp -d)"
@@ -5462,6 +5547,9 @@ main() {
   test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
   test_render_operator_stack_env_retargets_runtime_values_from_shared_manifest
+  test_render_operator_stack_env_ignores_retained_msk_when_no_kafka_queue_path
+  test_render_operator_stack_env_ignores_retained_msk_when_proof_driver_inherits_postgres
+  test_render_operator_stack_env_keeps_kafka_brokers_for_active_kafka_paths
   test_render_operator_stack_env_enables_main_queue_shadow
   test_render_operator_stack_env_enables_proof_shadow_queue
   test_render_operator_stack_env_uses_proof_queue_driver_override
