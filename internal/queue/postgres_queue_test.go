@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
 
@@ -262,6 +263,168 @@ func TestPostgresQueueRejectsRenewAfterLeaseExpiresBeforeReclaim(t *testing.T) {
 	err = backend.renew(ctx, "proof-requestor", records[0].topic, records[0].seq, records[0].owner, records[0].attempt, time.Minute)
 	if !errors.Is(err, errPostgresQueueStaleLease) {
 		t.Fatalf("renew err = %v, want stale lease", err)
+	}
+}
+
+func TestPostgresQueueRetryableErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "deadlock",
+			err:  fmt.Errorf("postgres queue: ensure deliveries: %w", &pgconn.PgError{Code: "40P01"}),
+			want: true,
+		},
+		{
+			name: "serialization failure",
+			err:  fmt.Errorf("postgres queue: claim messages: %w", &pgconn.PgError{Code: "40001"}),
+			want: true,
+		},
+		{
+			name: "unique violation",
+			err:  fmt.Errorf("postgres queue: insert message: %w", &pgconn.PgError{Code: "23505"}),
+			want: false,
+		},
+		{
+			name: "context canceled",
+			err:  context.Canceled,
+			want: false,
+		},
+		{
+			name: "generic",
+			err:  errors.New("boom"),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isRetryablePostgresQueueError(tt.err); got != tt.want {
+				t.Fatalf("isRetryablePostgresQueueError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPostgresQueueConsumerRetriesRetryableClaimErrors(t *testing.T) {
+	t.Parallel()
+
+	base := newTestPostgresQueueBackend(time.Now)
+	producer, err := newPostgresProducerWithBackend(base)
+	if err != nil {
+		t.Fatalf("newPostgresProducerWithBackend: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := producer.Publish(ctx, "checkpoints.packages.v1", []byte("checkpoint")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	backend := &scriptedPostgresQueueBackend{
+		postgresQueueBackend: base,
+		claimErrors: []error{
+			fmt.Errorf("postgres queue: ensure deliveries: %w", &pgconn.PgError{Code: "40P01"}),
+		},
+	}
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "withdraw-finalizer",
+		Topics:                []string{"checkpoints.packages.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	msg := readQueueMessage(t, consumer)
+	if got, want := string(msg.Value), "checkpoint"; got != want {
+		t.Fatalf("message value = %q, want %q", got, want)
+	}
+}
+
+func TestPostgresQueueConsumerReportsNonRetryableClaimErrors(t *testing.T) {
+	t.Parallel()
+
+	backend := &scriptedPostgresQueueBackend{
+		postgresQueueBackend: newTestPostgresQueueBackend(time.Now),
+		claimErrors:          []error{errors.New("not retryable")},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "withdraw-finalizer",
+		Topics:                []string{"checkpoints.packages.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	select {
+	case err := <-consumer.Errors():
+		if err == nil || !strings.Contains(err.Error(), "not retryable") {
+			t.Fatalf("consumer error = %v, want non-retryable error", err)
+		}
+	case msg := <-consumer.Messages():
+		t.Fatalf("unexpected message before non-retryable error: %+v", msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for non-retryable claim error")
+	}
+}
+
+func TestPostgresQueueConsumerRetriesRetryableSchemaErrors(t *testing.T) {
+	t.Parallel()
+
+	backend := &scriptedPostgresQueueBackend{
+		postgresQueueBackend: newTestPostgresQueueBackend(time.Now),
+		ensureErrors: []error{
+			fmt.Errorf("postgres queue: ensure schema: %w", &pgconn.PgError{Code: "40P01"}),
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer, err := newPostgresConsumerWithBackend(ctx, ConsumerConfig{
+		Driver:                DriverPostgres,
+		Group:                 "withdraw-finalizer",
+		Topics:                []string{"checkpoints.packages.v1"},
+		PostgresLeaseDuration: time.Minute,
+		PostgresPollInterval:  time.Millisecond,
+	}, backend)
+	if err != nil {
+		t.Fatalf("new consumer: %v", err)
+	}
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("close consumer: %v", err)
+	}
+}
+
+func TestPostgresQueueProducerRetriesRetryableSchemaErrors(t *testing.T) {
+	t.Parallel()
+
+	backend := &scriptedPostgresQueueBackend{
+		postgresQueueBackend: newTestPostgresQueueBackend(time.Now),
+		ensureErrors: []error{
+			fmt.Errorf("postgres queue: ensure schema: %w", &pgconn.PgError{Code: "40P01"}),
+		},
+	}
+	producer, err := newPostgresProducerWithBackend(backend)
+	if err != nil {
+		t.Fatalf("new producer: %v", err)
+	}
+	if err := producer.Close(); err != nil {
+		t.Fatalf("close producer: %v", err)
 	}
 }
 
@@ -853,6 +1016,52 @@ type testPostgresQueueDelivery struct {
 	leaseOwner   string
 	leaseExpires time.Time
 	attempts     int
+}
+
+type scriptedPostgresQueueBackend struct {
+	postgresQueueBackend
+
+	mu           sync.Mutex
+	ensureErrors []error
+	claimErrors  []error
+}
+
+func (b *scriptedPostgresQueueBackend) ensureSchema(ctx context.Context) error {
+	if err := b.popEnsureError(); err != nil {
+		return err
+	}
+	return b.postgresQueueBackend.ensureSchema(ctx)
+}
+
+func (b *scriptedPostgresQueueBackend) claim(ctx context.Context, cfg postgresQueueClaimConfig) ([]postgresQueueRecord, error) {
+	if err := b.popClaimError(); err != nil {
+		return nil, err
+	}
+	return b.postgresQueueBackend.claim(ctx, cfg)
+}
+
+func (b *scriptedPostgresQueueBackend) popEnsureError() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.ensureErrors) == 0 {
+		return nil
+	}
+	err := b.ensureErrors[0]
+	b.ensureErrors = b.ensureErrors[1:]
+	return err
+}
+
+func (b *scriptedPostgresQueueBackend) popClaimError() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.claimErrors) == 0 {
+		return nil
+	}
+	err := b.claimErrors[0]
+	b.claimErrors = b.claimErrors[1:]
+	return err
 }
 
 func newTestPostgresQueueBackend(now func() time.Time) *testPostgresQueueBackend {

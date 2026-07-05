@@ -858,6 +858,72 @@ func TestPostgresQueueIntegration_ConcurrentSchemaCreation(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueIntegration_ClaimWaitsForMaterializationLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	pool := newPostgresIntegrationPool(t, ctx)
+	defer pool.Close()
+
+	store := &postgresQueueStore{pool: pool}
+	if err := store.ensureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	if err := store.enqueue(ctx, "checkpoints.packages.v1", []byte("checkpoint")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	lockTx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	if _, err := lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(postgresQueueClaimAdvisoryLock)); err != nil {
+		_ = lockTx.Rollback(ctx)
+		t.Fatalf("lock claim tx: %v", err)
+	}
+
+	claimCh := make(chan error, 1)
+	go func() {
+		records, err := store.claim(ctx, postgresQueueClaimConfig{
+			group:            "withdraw-finalizer",
+			topics:           []string{"checkpoints.packages.v1"},
+			owner:            "claim-lock-test",
+			initialPosition:  PostgresInitialPositionEarliest,
+			leaseDuration:    time.Minute,
+			materializeLimit: 1,
+			limit:            1,
+		})
+		if err != nil {
+			claimCh <- err
+			return
+		}
+		if len(records) != 1 {
+			claimCh <- fmt.Errorf("records = %d, want 1", len(records))
+			return
+		}
+		claimCh <- nil
+	}()
+
+	select {
+	case err := <-claimCh:
+		_ = lockTx.Rollback(ctx)
+		t.Fatalf("claim completed while materialization lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release claim lock: %v", err)
+	}
+	select {
+	case err := <-claimCh:
+		if err != nil {
+			t.Fatalf("claim after lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for claim after materialization lock release")
+	}
+}
+
 func newPostgresIntegrationPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
 

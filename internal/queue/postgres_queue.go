@@ -10,14 +10,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	defaultPostgresLeaseDuration    = 30 * time.Second
-	defaultPostgresMaterializeLimit = 100
-	defaultPostgresPollInterval     = 250 * time.Millisecond
-	postgresQueueSchemaAdvisoryLock = 0x4a554e4f51554555
+	defaultPostgresLeaseDuration     = 30 * time.Second
+	defaultPostgresMaterializeLimit  = 100
+	defaultPostgresPollInterval      = 250 * time.Millisecond
+	postgresQueueRetryAttempts       = 10
+	postgresQueueRetryInitialBackoff = 10 * time.Millisecond
+	postgresQueueRetryMaxBackoff     = 500 * time.Millisecond
+	postgresQueueSchemaAdvisoryLock  = 0x4a554e4f51554555
+	postgresQueueClaimAdvisoryLock   = 0x4a554e4f51434c4d
 )
 
 var (
@@ -168,6 +173,50 @@ func (s *postgresQueueStore) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
+func ensurePostgresQueueSchema(ctx context.Context, backend postgresQueueBackend) error {
+	return retryPostgresQueueOperation(ctx, func() error {
+		return backend.ensureSchema(ctx)
+	})
+}
+
+func retryPostgresQueueOperation(ctx context.Context, op func() error) error {
+	backoff := postgresQueueRetryInitialBackoff
+	var err error
+	for attempt := 0; attempt < postgresQueueRetryAttempts; attempt++ {
+		err = op()
+		if err == nil {
+			return nil
+		}
+		if !isRetryablePostgresQueueError(err) || attempt == postgresQueueRetryAttempts-1 {
+			return err
+		}
+		if !sleepOrDone(ctx, backoff) {
+			return ctx.Err()
+		}
+		backoff *= 2
+		if backoff > postgresQueueRetryMaxBackoff {
+			backoff = postgresQueueRetryMaxBackoff
+		}
+	}
+	return err
+}
+
+func isRetryablePostgresQueueError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case "40P01", "40001":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *postgresQueueStore) enqueue(ctx context.Context, topic string, payload []byte) error {
 	return s.enqueueTarget(ctx, topic, "", payload)
 }
@@ -270,6 +319,10 @@ func (s *postgresQueueStore) claim(ctx context.Context, cfg postgresQueueClaimCo
 		return nil, fmt.Errorf("postgres queue: begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(postgresQueueClaimAdvisoryLock)); err != nil {
+		return nil, fmt.Errorf("postgres queue: lock claim transaction: %w", err)
+	}
 
 	for _, topic := range cfg.topics {
 		initialSeq := cfg.initialSequences[topic]
@@ -561,7 +614,7 @@ func newPostgresProducerWithBackendContext(ctx context.Context, backend postgres
 	if backend == nil {
 		return nil, errors.New("postgres producer requires backend")
 	}
-	if err := backend.ensureSchema(ctx); err != nil {
+	if err := ensurePostgresQueueSchema(ctx, backend); err != nil {
 		return nil, err
 	}
 	return &postgresProducer{backend: backend}, nil
@@ -572,7 +625,9 @@ func (p *postgresProducer) Publish(ctx context.Context, topic string, payload []
 	if topic == "" {
 		return errors.New("topic is required")
 	}
-	return p.backend.enqueue(ctx, topic, append([]byte(nil), payload...))
+	return retryPostgresQueueOperation(ctx, func() error {
+		return p.backend.enqueue(ctx, topic, append([]byte(nil), payload...))
+	})
 }
 
 func (p *postgresProducer) PublishToGroup(ctx context.Context, topic string, consumerGroup string, payload []byte) error {
@@ -584,7 +639,9 @@ func (p *postgresProducer) PublishToGroup(ctx context.Context, topic string, con
 	if consumerGroup == "" {
 		return errors.New("consumer group is required")
 	}
-	return p.backend.enqueueTarget(ctx, topic, consumerGroup, append([]byte(nil), payload...))
+	return retryPostgresQueueOperation(ctx, func() error {
+		return p.backend.enqueueTarget(ctx, topic, consumerGroup, append([]byte(nil), payload...))
+	})
 }
 
 func (p *postgresProducer) Close() error {
@@ -680,7 +737,7 @@ func newPostgresConsumerWithBackend(parent context.Context, cfg ConsumerConfig, 
 	if owner == "" {
 		owner = defaultPostgresQueueOwner()
 	}
-	if err := backend.ensureSchema(parent); err != nil {
+	if err := ensurePostgresQueueSchema(parent, backend); err != nil {
 		return nil, err
 	}
 
@@ -739,6 +796,12 @@ func (c *postgresConsumer) run(ctx context.Context) {
 			limit:            1,
 		})
 		if err != nil {
+			if isRetryablePostgresQueueError(err) {
+				if !sleepOrDone(ctx, c.nextSleepDuration()) {
+					return
+				}
+				continue
+			}
 			select {
 			case c.errCh <- err:
 			case <-ctx.Done():
@@ -764,7 +827,9 @@ func (c *postgresConsumer) run(ctx context.Context) {
 				Value:     append([]byte(nil), rec.payload...),
 				Timestamp: rec.createdAt.UTC(),
 				ackFn: func(ackCtx context.Context) error {
-					err := c.backend.ack(ackCtx, c.group, rec.topic, rec.seq, rec.owner, rec.attempt)
+					err := retryPostgresQueueOperation(ackCtx, func() error {
+						return c.backend.ack(ackCtx, c.group, rec.topic, rec.seq, rec.owner, rec.attempt)
+					})
 					if err == nil {
 						c.untrackInflight(rec)
 					}
@@ -832,7 +897,9 @@ func (c *postgresConsumer) renewInflight(ctx context.Context) error {
 				renewFor = remaining
 			}
 		}
-		if err := c.backend.renew(ctx, c.group, rec.topic, rec.seq, rec.owner, rec.attempt, renewFor); err != nil {
+		if err := retryPostgresQueueOperation(ctx, func() error {
+			return c.backend.renew(ctx, c.group, rec.topic, rec.seq, rec.owner, rec.attempt, renewFor)
+		}); err != nil {
 			if errors.Is(err, errPostgresQueueStaleLease) {
 				c.untrackInflight(rec)
 				continue
