@@ -567,6 +567,11 @@ func pinBacklogMetrics(ctx context.Context, store checkpoint.PackageStore, now t
 	if store == nil {
 		return 0, 0, nil
 	}
+	if counter, ok := store.(interface {
+		ReadyToPinCounts(context.Context, time.Time, int) (int, int, error)
+	}); ok {
+		return counter.ReadyToPinCounts(ctx, now.UTC(), checkpointPinMetricsLimit)
+	}
 	recs, err := store.ListReadyToPin(ctx, now.UTC(), checkpointPinMetricsLimit)
 	if err != nil {
 		return 0, 0, err

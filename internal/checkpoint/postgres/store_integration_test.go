@@ -66,8 +66,10 @@ func TestStore_RecordCommitmentAndListReadyToPin(t *testing.T) {
 
 	now := time.Unix(1_700_000_100, 0).UTC()
 	dueDigest := common.HexToHash("0x0101010101010101010101010101010101010101010101010101010101010101")
-	futureDigest := common.HexToHash("0x0202020202020202020202020202020202020202020202020202020202020202")
-	disabledDigest := common.HexToHash("0x0303030303030303030303030303030303030303030303030303030303030303")
+	failedDueDigest := common.HexToHash("0x0202020202020202020202020202020202020202020202020202020202020202")
+	futureDigest := common.HexToHash("0x0303030303030303030303030303030303030303030303030303030303030303")
+	claimedDigest := common.HexToHash("0x0404040404040404040404040404040404040404040404040404040404040404")
+	disabledDigest := common.HexToHash("0x0505050505050505050505050505050505050505050505050505050505050505")
 
 	for _, rec := range []checkpoint.PackageRecord{
 		{
@@ -87,11 +89,28 @@ func TestStore_RecordCommitmentAndListReadyToPin(t *testing.T) {
 			PersistedAt:      now.Add(-2 * time.Second),
 		},
 		{
-			Digest: futureDigest,
+			Digest: failedDueDigest,
 			Checkpoint: checkpoint.Checkpoint{
 				Height:           201,
 				BlockHash:        common.HexToHash("0x2121212121212121212121212121212121212121212121212121212121212121"),
 				FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+				BaseChainID:      8453,
+				BridgeContract:   commitment.BridgeContract,
+			},
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(`{"digest":"failed-due"}`),
+			PinState:         checkpoint.PackagePinStateFailed,
+			PinAttempts:      1,
+			PinNextAttemptAt: now.Add(-time.Second),
+			State:            checkpoint.PackageStateOpen,
+			PersistedAt:      now.Add(-time.Second),
+		},
+		{
+			Digest: futureDigest,
+			Checkpoint: checkpoint.Checkpoint{
+				Height:           202,
+				BlockHash:        common.HexToHash("0x3131313131313131313131313131313131313131313131313131313131313131"),
+				FinalOrchardRoot: common.HexToHash("0x3232323232323232323232323232323232323232323232323232323232323232"),
 				BaseChainID:      8453,
 				BridgeContract:   commitment.BridgeContract,
 			},
@@ -101,14 +120,32 @@ func TestStore_RecordCommitmentAndListReadyToPin(t *testing.T) {
 			PinAttempts:      1,
 			PinNextAttemptAt: now.Add(time.Minute),
 			State:            checkpoint.PackageStateOpen,
-			PersistedAt:      now.Add(-time.Second),
+			PersistedAt:      now,
+		},
+		{
+			Digest: claimedDigest,
+			Checkpoint: checkpoint.Checkpoint{
+				Height:           203,
+				BlockHash:        common.HexToHash("0x4141414141414141414141414141414141414141414141414141414141414141"),
+				FinalOrchardRoot: common.HexToHash("0x4242424242424242424242424242424242424242424242424242424242424242"),
+				BaseChainID:      8453,
+				BridgeContract:   commitment.BridgeContract,
+			},
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(`{"digest":"claimed"}`),
+			PinState:         checkpoint.PackagePinStatePending,
+			PinNextAttemptAt: now.Add(-time.Second),
+			PinClaimOwner:    "worker-a",
+			PinClaimUntil:    now.Add(time.Minute),
+			State:            checkpoint.PackageStateOpen,
+			PersistedAt:      now.Add(time.Second),
 		},
 		{
 			Digest: disabledDigest,
 			Checkpoint: checkpoint.Checkpoint{
-				Height:           202,
-				BlockHash:        common.HexToHash("0x3131313131313131313131313131313131313131313131313131313131313131"),
-				FinalOrchardRoot: common.HexToHash("0x3232323232323232323232323232323232323232323232323232323232323232"),
+				Height:           204,
+				BlockHash:        common.HexToHash("0x5151515151515151515151515151515151515151515151515151515151515151"),
+				FinalOrchardRoot: common.HexToHash("0x5252525252525252525252525252525252525252525252525252525252525252"),
 				BaseChainID:      8453,
 				BridgeContract:   commitment.BridgeContract,
 			},
@@ -116,7 +153,7 @@ func TestStore_RecordCommitmentAndListReadyToPin(t *testing.T) {
 			Payload:         []byte(`{"digest":"disabled"}`),
 			PinState:        checkpoint.PackagePinStateDisabled,
 			State:           checkpoint.PackageStateOpen,
-			PersistedAt:     now,
+			PersistedAt:     now.Add(2 * time.Second),
 		},
 	} {
 		if err := s.UpsertPackage(ctx, rec); err != nil {
@@ -128,11 +165,36 @@ func TestStore_RecordCommitmentAndListReadyToPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListReadyToPin: %v", err)
 	}
-	if len(ready) != 1 {
-		t.Fatalf("ready packages: got %d want 1", len(ready))
+	if len(ready) != 2 {
+		t.Fatalf("ready packages: got %d want 2", len(ready))
 	}
 	if ready[0].Digest != dueDigest {
 		t.Fatalf("ready digest: got %s want %s", ready[0].Digest, dueDigest)
+	}
+	if ready[1].Digest != failedDueDigest {
+		t.Fatalf("ready digest #2: got %s want %s", ready[1].Digest, failedDueDigest)
+	}
+
+	backlog, retryBacklog, err := s.ReadyToPinCounts(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("ReadyToPinCounts: %v", err)
+	}
+	if backlog != 2 {
+		t.Fatalf("ready count: got %d want 2", backlog)
+	}
+	if retryBacklog != 1 {
+		t.Fatalf("retry count: got %d want 1", retryBacklog)
+	}
+
+	backlog, retryBacklog, err = s.ReadyToPinCounts(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("ReadyToPinCounts limit=1: %v", err)
+	}
+	if backlog != 1 {
+		t.Fatalf("limited ready count: got %d want 1", backlog)
+	}
+	if retryBacklog != 0 {
+		t.Fatalf("limited retry count: got %d want 0", retryBacklog)
 	}
 }
 

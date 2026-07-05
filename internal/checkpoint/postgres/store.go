@@ -391,6 +391,42 @@ func (s *Store) ListReadyToPin(ctx context.Context, now time.Time, limit int) ([
 	return out, nil
 }
 
+func (s *Store) ReadyToPinCounts(ctx context.Context, now time.Time, limit int) (int, int, error) {
+	if s == nil || s.pool == nil {
+		return 0, 0, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if limit <= 0 {
+		return 0, 0, nil
+	}
+
+	var backlog, retryBacklog int64
+	if err := s.pool.QueryRow(ctx, `
+		WITH ready AS (
+			SELECT pin_state
+			FROM checkpoint_packages
+			WHERE pin_state IN ($1, $2)
+			  AND (pin_next_attempt_at IS NULL OR pin_next_attempt_at <= $3)
+			  AND (
+			    btrim(pin_claim_owner) = ''
+			    OR pin_claim_until IS NULL
+			    OR pin_claim_until <= $3
+			  )
+			ORDER BY COALESCE(pin_next_attempt_at, persisted_at) ASC, persisted_at ASC, digest ASC
+			LIMIT $4
+		)
+		SELECT
+			count(*)::bigint,
+			count(*) FILTER (WHERE pin_state = $2)::bigint
+		FROM ready
+	`, int16(checkpoint.PackagePinStatePending), int16(checkpoint.PackagePinStateFailed), now.UTC(), limit).Scan(
+		&backlog,
+		&retryBacklog,
+	); err != nil {
+		return 0, 0, fmt.Errorf("checkpoint/postgres: count ready to pin: %w", err)
+	}
+	return int(backlog), int(retryBacklog), nil
+}
+
 func (s *Store) ClaimReadyToPin(ctx context.Context, owner string, claimTTL time.Duration, now time.Time, limit int) ([]checkpoint.PackageRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)

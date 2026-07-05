@@ -617,6 +617,49 @@ func TestPinBacklogMetricsCountsDueAndRetryPackages(t *testing.T) {
 	}
 }
 
+type fastPinBacklogStore struct {
+	checkpoint.PackageStore
+	backlog      int
+	retryBacklog int
+	limit        int
+	listCalled   bool
+}
+
+func (s *fastPinBacklogStore) ReadyToPinCounts(_ context.Context, _ time.Time, limit int) (int, int, error) {
+	s.limit = limit
+	return s.backlog, s.retryBacklog, nil
+}
+
+func (s *fastPinBacklogStore) ListReadyToPin(context.Context, time.Time, int) ([]checkpoint.PackageRecord, error) {
+	s.listCalled = true
+	return nil, errors.New("ListReadyToPin should not be used")
+}
+
+func TestPinBacklogMetricsUsesFastCounterWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	store := &fastPinBacklogStore{
+		backlog:      4096,
+		retryBacklog: 37,
+	}
+	backlog, retryBacklog, err := pinBacklogMetrics(context.Background(), store, time.Unix(1_700_000_000, 0).UTC())
+	if err != nil {
+		t.Fatalf("pinBacklogMetrics: %v", err)
+	}
+	if backlog != 4096 {
+		t.Fatalf("backlog = %d, want 4096", backlog)
+	}
+	if retryBacklog != 37 {
+		t.Fatalf("retry backlog = %d, want 37", retryBacklog)
+	}
+	if store.listCalled {
+		t.Fatal("ListReadyToPin was called despite fast counter support")
+	}
+	if store.limit != checkpointPinMetricsLimit {
+		t.Fatalf("fast counter limit = %d, want %d", store.limit, checkpointPinMetricsLimit)
+	}
+}
+
 func TestPublishCheckpointPackage_SkipsDurablyEmittedDigestAfterCacheEviction(t *testing.T) {
 	t.Parallel()
 
