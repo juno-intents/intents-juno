@@ -519,6 +519,111 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_retries_transient_postgres_queue_inspection_failure() {
+  local tmp manifest fake_bin log_file output_json attempts_file steady_attempts_file
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  attempts_file="$tmp/queue-inspect-attempts"
+  steady_attempts_file="$tmp/steady-queue-inspect-attempts"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "alpha",
+  "shared_services": {
+    "queue": {
+      "driver": "postgres"
+    },
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/sleep" <<EOF
+#!/usr/bin/env bash
+printf 'sleep %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/queue-inspect" <<EOF
+#!/usr/bin/env bash
+printf 'queue-inspect %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.requests.v1"*"--groups proof-requestor"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
+    count=0
+    if [[ -f "$steady_attempts_file" ]]; then
+      count="\$(cat "$steady_attempts_file")"
+    fi
+    count=\$((count + 1))
+    printf '%s\n' "\$count" >"$steady_attempts_file"
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *"--postgres-dsn-env CANARY_QUEUE_DSN"*"--topics proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1"*"--format json"*"--max-expired-leases 0"*"--max-backlog 0"*)
+    count=0
+    if [[ -f "$attempts_file" ]]; then
+      count="\$(cat "$attempts_file")"
+    fi
+    count=\$((count + 1))
+    printf '%s\n' "\$count" >"$attempts_file"
+    if [[ "\$count" -lt 2 ]]; then
+      printf 'transient backlog\n' >&2
+      exit 1
+    fi
+    printf '{"topics":[]}\n'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected queue inspect invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/curl" "$fake_bin/sleep" "$fake_bin/queue-inspect"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    PRODUCTION_CANARY_QUEUE_INSPECT_TARGETS="proof.requests.v1|proof-requestor;proof.fulfillments.v1,proof.failures.v1,checkpoints.signatures.v1,ops.alerts.v1|" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=2 \
+    PRODUCTION_CANARY_RETRY_SLEEP_SECONDS=0 \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(cat "$attempts_file")" "2" "postgres queue canary retries a transient queue inspect failure"
+  assert_eq "$(cat "$steady_attempts_file")" "2" "postgres queue canary retries the full target set after transient failure"
+  assert_eq "$(grep -c 'queue-inspect --postgres-dsn-env CANARY_QUEUE_DSN' "$log_file")" "4" "postgres queue canary reruns each target after transient failure"
+  assert_contains "$(cat "$log_file")" "sleep 0" "postgres queue canary waits between queue inspect attempts"
+  assert_eq "$(jq -r '.checks.queue.status' "$output_json")" "passed" "postgres queue canary passes after retry"
+  assert_contains "$(jq -r '.checks.queue.detail' "$output_json")" "queue-inspect passed for 2 targets" "postgres queue canary reports successful retried targets"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "postgres queue inspect retry keeps canary deployable"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -829,6 +934,8 @@ EOF
     CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
     PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
     PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=1 \
+    PRODUCTION_CANARY_RETRY_SLEEP_SECONDS=0 \
     bash deploy/production/canary-shared-services.sh \
       --shared-manifest "$manifest" >"$output_json"
   )
@@ -904,6 +1011,8 @@ EOF
     CANARY_QUEUE_DSN="postgres://queue.example.invalid/intents?sslmode=require" \
     PRODUCTION_CANARY_QUEUE_INSPECT_BIN="queue-inspect" \
     PRODUCTION_CANARY_QUEUE_INSPECT_POSTGRES_DSN_ENV="CANARY_QUEUE_DSN" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=1 \
+    PRODUCTION_CANARY_RETRY_SLEEP_SECONDS=0 \
     bash deploy/production/canary-shared-services.sh \
       --shared-manifest "$manifest" >"$output_json"
   )
@@ -1764,6 +1873,7 @@ main() {
   test_shared_services_canary_accepts_postgres_queue_without_kafka
   test_shared_services_canary_skips_queue_inspect_bin_when_no_postgres_path_active
   test_shared_services_canary_runs_postgres_queue_inspection_when_configured
+  test_shared_services_canary_retries_transient_postgres_queue_inspection_failure
   test_shared_services_canary_runs_postgres_queue_inspection_for_proof_shadow
   test_shared_services_canary_runs_postgres_queue_inspection_for_shared_shadow
   test_shared_services_canary_reports_proof_primary_failures_without_shadow_consumer_false_positive

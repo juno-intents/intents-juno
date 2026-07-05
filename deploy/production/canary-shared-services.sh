@@ -403,6 +403,7 @@ else
       IFS=';' read -r -a queue_inspect_target_array <<<"$queue_inspect_targets"
       queue_inspect_target_count=0
       queue_inspect_failed_targets=()
+      queue_inspect_target_specs=()
       queue_status="passed"
       for queue_inspect_target in "${queue_inspect_target_array[@]}"; do
         queue_inspect_target="$(trim "$queue_inspect_target")"
@@ -419,27 +420,46 @@ else
           queue_detail="queue-inspect target is missing topics"
           break
         fi
-        queue_inspect_args=(
-          --postgres-dsn-env "$queue_inspect_dsn_env"
-          --topics "$queue_inspect_topics"
-        )
-        if [[ -n "$queue_inspect_groups" ]]; then
-          queue_inspect_args+=(--groups "$queue_inspect_groups")
-        fi
-        queue_inspect_args+=(
-          --format json
-          --max-expired-leases "$queue_inspect_max_expired_leases"
-        )
-        if [[ -n "$queue_inspect_max_backlog" ]]; then
-          queue_inspect_args+=(--max-backlog "$queue_inspect_max_backlog")
-        fi
-        if ! "$queue_inspect_bin" "${queue_inspect_args[@]}" >/dev/null 2>&1; then
-          queue_status="failed"
-          queue_inspect_failed_targets+=("topics=${queue_inspect_topics} groups=${queue_inspect_groups:-actual}")
-          continue
-        fi
-        queue_inspect_target_count=$((queue_inspect_target_count + 1))
+        queue_inspect_target_specs+=("${queue_inspect_topics}|${queue_inspect_groups}")
       done
+      if [[ "$queue_status" == "passed" ]]; then
+        for ((queue_inspect_attempt = 1; queue_inspect_attempt <= canary_retry_attempts; queue_inspect_attempt++)); do
+          queue_inspect_failed_targets=()
+          queue_inspect_target_count=0
+          for queue_inspect_target in "${queue_inspect_target_specs[@]}"; do
+            queue_inspect_topics="${queue_inspect_target%%|*}"
+            queue_inspect_groups="${queue_inspect_target#*|}"
+            queue_inspect_args=(
+              --postgres-dsn-env "$queue_inspect_dsn_env"
+              --topics "$queue_inspect_topics"
+            )
+            if [[ -n "$queue_inspect_groups" ]]; then
+              queue_inspect_args+=(--groups "$queue_inspect_groups")
+            fi
+            queue_inspect_args+=(
+              --format json
+              --max-expired-leases "$queue_inspect_max_expired_leases"
+            )
+            if [[ -n "$queue_inspect_max_backlog" ]]; then
+              queue_inspect_args+=(--max-backlog "$queue_inspect_max_backlog")
+            fi
+            if "$queue_inspect_bin" "${queue_inspect_args[@]}" >/dev/null 2>&1; then
+              queue_inspect_target_count=$((queue_inspect_target_count + 1))
+            else
+              queue_inspect_failed_targets+=("topics=${queue_inspect_topics} groups=${queue_inspect_groups:-actual}")
+            fi
+          done
+          if ((${#queue_inspect_failed_targets[@]} == 0)); then
+            break
+          fi
+          if (( queue_inspect_attempt < canary_retry_attempts )); then
+            sleep "$canary_retry_sleep_seconds"
+          fi
+        done
+        if ((${#queue_inspect_failed_targets[@]} > 0)); then
+          queue_status="failed"
+        fi
+      fi
       if [[ "$queue_status" == "passed" ]]; then
         queue_detail="queue-inspect passed for ${queue_inspect_target_count} targets"
       elif ((${#queue_inspect_failed_targets[@]} > 0)); then
