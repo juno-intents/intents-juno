@@ -110,7 +110,7 @@ func main() {
 		leaderLeaseName = flag.String("leader-lease-name", "withdraw-coordinator", "lease name used for leader election")
 		leaderLeaseTTL  = flag.Duration("leader-lease-ttl", 15*time.Second, "leader lease TTL (renewed each tick)")
 
-		safetyMargin   = flag.Duration("expiry-safety-margin", policy.DefaultWithdrawExpirySafetyMargin, "minimum time-to-expiry required to broadcast")
+		safetyMargin   = flag.Duration("expiry-safety-margin", policy.DefaultWithdrawExpirySafetyMargin, "minimum time-to-expiry required to broadcast; set a negative value only for explicit emergency bypass")
 		maxExtension   = flag.Duration("max-expiry-extension", 12*time.Hour, "max per-withdrawal expiry extension allowed by contract")
 		maxExtendBatch = flag.Int("max-extend-batch", policy.DefaultMaxExtendBatch, "max withdrawal ids per extendWithdrawExpiryBatch call")
 
@@ -235,8 +235,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --max-items, --max-extend-batch, --max-line-bytes, and --queue-max-bytes must be > 0")
 		os.Exit(2)
 	}
-	if *maxAge <= 0 || *claimTTL <= 0 || *tickInterval <= 0 || *safetyMargin <= 0 || *maxExtension <= 0 {
-		fmt.Fprintln(os.Stderr, "error: durations must be > 0")
+	if err := validateCoordinatorDurations(*maxAge, *claimTTL, *tickInterval, *safetyMargin, *maxExtension); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(2)
 	}
 	if *rebroadcastBaseDelay <= 0 || *rebroadcastMaxDelay <= 0 || *rebroadcastMaxDelay < *rebroadcastBaseDelay {
@@ -909,6 +909,16 @@ func shouldAckWithdrawIngestError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func validateCoordinatorDurations(maxAge, claimTTL, tickInterval, safetyMargin, maxExtension time.Duration) error {
+	if maxAge <= 0 || claimTTL <= 0 || tickInterval <= 0 || maxExtension <= 0 {
+		return errors.New("durations must be > 0")
+	}
+	if safetyMargin == 0 {
+		return errors.New("--expiry-safety-margin must be non-zero; use a negative value to explicitly bypass expiry safety")
+	}
+	return nil
 }
 
 func parseHash32(s string) ([32]byte, error) {

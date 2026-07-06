@@ -128,6 +128,30 @@ func TestShouldAckWithdrawIngestError(t *testing.T) {
 	}
 }
 
+func TestValidateCoordinatorDurations_AllowsNegativeExpirySafetyMarginBypass(t *testing.T) {
+	t.Parallel()
+
+	if err := validateCoordinatorDurations(time.Minute, time.Second, time.Second, -time.Nanosecond, 12*time.Hour); err != nil {
+		t.Fatalf("negative expiry safety margin should be allowed as explicit bypass: %v", err)
+	}
+
+	err := validateCoordinatorDurations(time.Minute, time.Second, time.Second, 0, 12*time.Hour)
+	if err == nil {
+		t.Fatalf("expected zero expiry safety margin to fail")
+	}
+	if !strings.Contains(err.Error(), "expiry-safety-margin") {
+		t.Fatalf("expected expiry-safety-margin error, got %v", err)
+	}
+
+	err = validateCoordinatorDurations(0, time.Second, time.Second, -time.Nanosecond, 12*time.Hour)
+	if err == nil {
+		t.Fatalf("expected non-safety duration validation to remain strict")
+	}
+	if !strings.Contains(err.Error(), "durations must be > 0") {
+		t.Fatalf("expected positive duration error, got %v", err)
+	}
+}
+
 func TestStartTxBuildScanProxy_DisabledWhenScanURLBlank(t *testing.T) {
 	t.Parallel()
 

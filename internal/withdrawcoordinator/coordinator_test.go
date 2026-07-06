@@ -13,6 +13,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -992,6 +993,61 @@ func TestCoordinator_DoesNotReplanSignedBatchAfterTxExpiringSoonBroadcastError(t
 	}
 	if b.BroadcastLockedAt.IsZero() {
 		t.Fatal("expected broadcast lock to be persisted")
+	}
+}
+
+func TestCoordinator_NegativeExpirySafetyMarginBroadcastsExpiredWithdrawal(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{txid: "tx-expired"}
+	confirmer := &stubConfirmer{}
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   time.Nanosecond,
+		ClaimTTL: 10 * time.Second,
+		ExpiryPolicy: policy.WithdrawExpiryConfig{
+			SafetyMargin: -time.Nanosecond,
+			MaxExtension: 12 * time.Hour,
+			MaxBatch:     policy.DefaultMaxExtendBatch,
+		},
+		Now: nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	w := withdraw.Withdrawal{
+		ID:          seq32(0xa1),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: []byte{0x01},
+		Expiry:      now.Add(-time.Hour),
+	}
+	if err := c.IngestWithdrawRequested(ctx, w); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	}
+	b, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{w.ID}))
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State < withdraw.BatchStateBroadcasted || b.JunoTxID != "tx-expired" {
+		t.Fatalf("batch after bypass broadcast: state=%s juno_txid=%q", b.State, b.JunoTxID)
 	}
 }
 
