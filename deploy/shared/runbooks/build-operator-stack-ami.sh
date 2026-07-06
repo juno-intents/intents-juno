@@ -2571,12 +2571,14 @@ export JUNO_TXSIGN_SIGNER_KEYS
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
 withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v2}"
+withdraw_coord_leader_lease_ttl="${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-15s}"
 withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-50}"
 
 exec /usr/local/bin/withdraw-coordinator \
   --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
   --owner "${withdraw_coord_owner}" \
   --claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}" \
+  --leader-lease-ttl "${withdraw_coord_leader_lease_ttl}" \
   --max-items "${withdraw_coord_max_items}" \
   "${withdraw_coord_queue_args[@]}" \
   --queue-group "${withdraw_coord_queue_group}" \

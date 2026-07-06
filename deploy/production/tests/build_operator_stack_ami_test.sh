@@ -341,8 +341,10 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" 'export JUNO_TXSIGN_SIGNER_KEYS' "withdraw wrapper exports juno txsign signer keys"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
+  assert_contains "$withdraw_wrapper" 'withdraw_coord_leader_lease_ttl="${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-15s}"' "withdraw wrapper defaults the leader lease ttl with env override"
   assert_contains "$withdraw_wrapper" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-50}"' "withdraw wrapper defaults to withdraw-sized batches with env override"
   assert_contains "$withdraw_wrapper" '--max-items "${withdraw_coord_max_items}"' "withdraw wrapper passes the withdraw batch size override"
+  assert_contains "$withdraw_wrapper" '--leader-lease-ttl "${withdraw_coord_leader_lease_ttl}"' "withdraw wrapper passes the leader lease ttl override"
   assert_contains "$withdraw_wrapper" '--juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}"' "withdraw wrapper pins juno txbuild to the scanner URL"
   assert_contains "$withdraw_wrapper" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper passes the scanner bearer env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper passes RPC username env name"
@@ -972,6 +974,7 @@ RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=3
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=4
 JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
+WITHDRAW_COORDINATOR_LEADER_LEASE_TTL=4m
 WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 AWS_REGION=us-east-1
@@ -998,6 +1001,7 @@ EOF
 
   assert_contains "$(cat "$output_file")" '--postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "withdraw wrapper forwards DSN env name"
   assert_contains "$(cat "$output_file")" '--claim-ttl 7m' "withdraw wrapper forwards the configured claim ttl"
+  assert_contains "$(cat "$output_file")" '--leader-lease-ttl 4m' "withdraw wrapper forwards the configured leader lease ttl"
   assert_contains "$(cat "$output_file")" '--juno-scan-url http://127.0.0.1:8080' "withdraw wrapper forwards the scanner URL"
   assert_contains "$(cat "$output_file")" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper forwards the scanner bearer env name"
   assert_contains "$(cat "$output_file")" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper forwards RPC username env name"
