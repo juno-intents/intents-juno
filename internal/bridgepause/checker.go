@@ -30,6 +30,8 @@ type Checker struct {
 	cachedAt   time.Time
 	cached     bool
 	cacheValid bool
+	staleUntil time.Time
+	refreshing bool
 }
 
 // NewChecker creates a new Checker.
@@ -54,43 +56,124 @@ func NewChecker(caller ContractCaller, bridgeAddr common.Address, cacheTTL time.
 // On RPC error, returns true (fail-safe: assume paused).
 func (c *Checker) IsPaused(ctx context.Context) (bool, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.cacheValid && time.Since(c.cachedAt) < c.cacheTTL {
-		return c.cached, nil
+		paused := c.cached
+		c.mu.Unlock()
+		return paused, nil
 	}
+	c.mu.Unlock()
 
-	return c.queryPausedLocked(ctx)
+	return c.queryAndStore(ctx)
+}
+
+// IsPausedCached returns the cached paused() state for read-only status display.
+// If a prior successful read exists, expired values are returned immediately while
+// a background refresh runs at most once per cacheTTL.
+// Use IsPaused or IsPausedFresh for transaction gating.
+func (c *Checker) IsPausedCached(ctx context.Context) (bool, error) {
+	c.mu.Lock()
+	now := time.Now()
+	if c.cacheValid && now.Sub(c.cachedAt) < c.cacheTTL {
+		paused := c.cached
+		c.mu.Unlock()
+		return paused, nil
+	}
+	if c.cacheValid {
+		paused := c.cached
+		if !c.refreshing && !now.Before(c.staleUntil) {
+			c.refreshing = true
+			go c.refreshCached()
+		}
+		c.mu.Unlock()
+		return paused, nil
+	}
+	c.mu.Unlock()
+
+	paused, err := c.queryAndStore(ctx)
+	if err != nil {
+		return false, err
+	}
+	return paused, nil
 }
 
 // IsPausedFresh returns true if Bridge.paused() returns true without using a cached result.
 // On RPC error, returns true (fail-safe: assume paused).
 func (c *Checker) IsPausedFresh(ctx context.Context) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.queryPausedLocked(ctx)
+	return c.queryAndStore(ctx)
 }
 
-func (c *Checker) queryPausedLocked(ctx context.Context) (bool, error) {
-	result, err := c.caller.CallContract(ctx, c.bridgeAddr, pausedSelector)
+func (c *Checker) queryAndStore(ctx context.Context) (bool, error) {
+	started := time.Now()
+	paused, err := c.queryPaused(ctx)
 	if err != nil {
-		return true, fmt.Errorf("bridgepause: rpc error (fail-safe: assuming paused): %w", err)
+		return paused, err
 	}
-
-	paused := decodeBoolResult(result)
-	c.cached = paused
-	c.cachedAt = time.Now()
-	c.cacheValid = true
-
+	c.mu.Lock()
+	if !c.cacheValid || !c.cachedAt.After(started) {
+		c.storePausedLocked(paused)
+	}
+	c.mu.Unlock()
 	return paused, nil
 }
 
-// decodeBoolResult decodes an ABI-encoded bool (32 bytes, last byte is 0 or 1).
-func decodeBoolResult(data []byte) bool {
-	if len(data) < 32 {
-		// Unexpected response length; fail-safe: assume paused.
-		return true
+func (c *Checker) refreshCached() {
+	timeout := c.cacheTTL
+	if timeout > 2*time.Second {
+		timeout = 2 * time.Second
 	}
-	return data[31] != 0
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	started := time.Now()
+	paused, err := c.queryPaused(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		if !c.cacheValid || !c.cachedAt.After(started) {
+			c.storePausedLocked(paused)
+		}
+	} else {
+		c.staleUntil = time.Now().Add(c.cacheTTL)
+	}
+	c.refreshing = false
+}
+
+func (c *Checker) queryPaused(ctx context.Context) (bool, error) {
+	result, err := c.caller.CallContract(ctx, c.bridgeAddr, pausedSelector)
+	if err != nil {
+		return true, fmt.Errorf("bridgepause: rpc error checking paused(): %w", err)
+	}
+
+	paused, err := decodeBoolResult(result)
+	if err != nil {
+		return true, err
+	}
+	return paused, nil
+}
+
+func (c *Checker) storePausedLocked(paused bool) {
+	c.cached = paused
+	c.cachedAt = time.Now()
+	c.cacheValid = true
+	c.staleUntil = time.Time{}
+}
+
+// decodeBoolResult decodes an ABI-encoded bool (32 bytes, last byte is 0 or 1).
+func decodeBoolResult(data []byte) (bool, error) {
+	if len(data) != 32 {
+		return true, fmt.Errorf("bridgepause: invalid paused() response length %d", len(data))
+	}
+	for i := 0; i < 31; i++ {
+		if data[i] != 0 {
+			return true, fmt.Errorf("bridgepause: invalid paused() bool padding")
+		}
+	}
+	switch data[31] {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return true, fmt.Errorf("bridgepause: invalid paused() bool value %d", data[31])
+	}
 }

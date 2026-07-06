@@ -79,6 +79,10 @@ type FreshPauseChecker interface {
 	IsPausedFresh(ctx context.Context) (bool, error)
 }
 
+type CachedPauseChecker interface {
+	IsPausedCached(ctx context.Context) (bool, error)
+}
+
 type DepositStatus struct {
 	Job        deposit.Job
 	BaseTxHash string
@@ -243,7 +247,7 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, r *http.Request) {
-	bridgePaused := h.currentBridgePaused(r.Context(), true)
+	bridgePaused := h.currentBridgePaused(r.Context(), false)
 	minDepositAmount := h.cfg.MinDepositAmount
 	depositMinConfirmations := h.cfg.DepositMinConfirmations
 	if !bridgePaused {
@@ -314,6 +318,15 @@ func (h *handler) currentBridgePaused(ctx context.Context, fresh bool) bool {
 	}
 	if h.cfg.PauseChecker == nil {
 		return false
+	}
+	if !fresh {
+		if checker, ok := h.cfg.PauseChecker.(CachedPauseChecker); ok {
+			paused, err := checker.IsPausedCached(ctx)
+			if err != nil {
+				return false
+			}
+			return paused
+		}
 	}
 	if fresh {
 		if checker, ok := h.cfg.PauseChecker.(FreshPauseChecker); ok {
