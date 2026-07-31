@@ -107,6 +107,7 @@ test_live_handoffs_emit_runtime_material_refs() {
   write_live_inventory_fixture "$workdir/inventory.json"
   jq '
     .operators[0].deposit_relayer_release_tag = "app-binaries-v2026.04.06-r2-mainnet"
+    | .operators[0].juno_scan_release_tag = "v1.4.7-mainnet"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
@@ -121,6 +122,7 @@ test_live_handoffs_emit_runtime_material_refs() {
   assert_eq "$(jq -r '.runtime_config_secret_id' "$manifest")" "mainnet/op1/runtime-config" "live operator manifest carries the runtime config secret id"
   assert_eq "$(jq -r '.runtime_config_secret_region' "$manifest")" "us-east-1" "live operator manifest carries the runtime config secret region"
   assert_eq "$(jq -r '.deposit_relayer_release_tag' "$manifest")" "app-binaries-v2026.04.06-r2-mainnet" "live operator manifest carries the pinned deposit-relayer release tag"
+  assert_eq "$(jq -r '.juno_scan_release_tag' "$manifest")" "v1.4.7-mainnet" "live operator manifest carries the pinned juno-scan release tag"
   assert_eq "$(jq -r '.dkg_backup_zip // ""' "$manifest")" "" "live operator manifest omits local runtime packages"
   assert_eq "$(jq -r '.secret_contract_file // ""' "$manifest")" "" "live operator manifest omits local secret contracts"
   if [[ -e "$handoff_dir/dkg-backup.zip" ]]; then

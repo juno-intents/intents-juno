@@ -65,6 +65,20 @@ test_run_operator_rollout_repairs_juno_txsign_from_published_release() {
   assert_contains "$script_text" 'printf '\''%s\n'\'' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null' "run-operator-rollout records the installed juno-txsign release tag on the host"
 }
 
+test_run_operator_rollout_refreshes_juno_scan_from_published_release() {
+  local script_text
+  script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
+
+  assert_contains "$script_text" 'ensure_runtime_juno_scan_binary() {' "run-operator-rollout defines a juno-scan refresh helper"
+  assert_contains "$script_text" "requested_tag=\"\$(jq -r '.juno_scan_release_tag // empty' \"\$operator_deploy\")\"" "run-operator-rollout reads an optional pinned juno-scan release tag from the operator manifest"
+  assert_contains "$script_text" '[[ -n "$requested_tag" ]] || return 0' "run-operator-rollout leaves juno-scan unchanged without an explicit release tag"
+  assert_contains "$script_text" 'asset_name="juno-scan_${requested_tag}_linux_${arch}.tar.gz"' "run-operator-rollout selects the published juno-scan archive for the host architecture"
+  assert_contains "$script_text" 'download_github_release_asset_with_checksum "junocash-tools/juno-scan" "$requested_tag" "$asset_name" "$archive"' "run-operator-rollout downloads juno-scan from the published upstream release"
+  assert_contains "$script_text" 'sudo install -m 0755 "$extract_dir/juno-scan" /usr/local/bin/juno-scan' "run-operator-rollout installs the published juno-scan binary"
+  assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.juno-scan-release-tag"' "run-operator-rollout records the installed juno-scan release tag"
+  assert_contains "$script_text" $'ensure_runtime_juno_txsign_binary\nensure_runtime_juno_scan_binary' "run-operator-rollout refreshes juno-scan before restarting services"
+}
+
 test_run_operator_rollout_repairs_deposit_relayer_from_published_release() {
   local script_text
   script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
@@ -124,6 +138,7 @@ main() {
   test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_newline
   test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release
   test_run_operator_rollout_repairs_juno_txsign_from_published_release
+  test_run_operator_rollout_refreshes_juno_scan_from_published_release
   test_run_operator_rollout_repairs_deposit_relayer_from_published_release
   test_run_operator_rollout_repairs_withdraw_binaries_from_published_release
   test_run_operator_rollout_refreshes_dkg_client_tls_identity_after_staging

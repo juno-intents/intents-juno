@@ -4219,7 +4219,7 @@ production_render_operator_handoffs() {
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst backup_zip_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index
-    local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id deposit_relayer_release_tag
+    local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id deposit_relayer_release_tag juno_scan_release_tag
     local operator_aws_profile operator_aws_region runtime_config_secret_id runtime_config_secret_region
     local runtime_material_mode runtime_material_bucket runtime_material_key runtime_material_region runtime_material_kms_key_id
     local withdraw_coordinator_juno_wallet_id withdraw_finalizer_juno_scan_wallet_id deposit_scan_juno_scan_wallet_id
@@ -4251,6 +4251,7 @@ production_render_operator_handoffs() {
     checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' <<<"$operator_json")"
     checkpoint_blob_sse_kms_key_id="$(jq -r '.checkpoint_blob_sse_kms_key_id // empty' <<<"$operator_json")"
     deposit_relayer_release_tag="$(jq -r '.deposit_relayer_release_tag // empty' <<<"$operator_json")"
+    juno_scan_release_tag="$(jq -r '.juno_scan_release_tag // empty' <<<"$operator_json")"
     operator_aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
     operator_aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
@@ -4421,6 +4422,7 @@ production_render_operator_handoffs() {
       --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
       --arg checkpoint_blob_sse_kms_key_id "$checkpoint_blob_sse_kms_key_id" \
       --arg deposit_relayer_release_tag "$deposit_relayer_release_tag" \
+      --arg juno_scan_release_tag "$juno_scan_release_tag" \
       --arg operator_address "$operator_address" \
       --arg runtime_material_mode "$runtime_material_mode" \
       --arg runtime_material_bucket "$runtime_material_bucket" \
@@ -4458,6 +4460,7 @@ production_render_operator_handoffs() {
         checkpoint_blob_prefix: (if $checkpoint_blob_prefix == "" then null else $checkpoint_blob_prefix end),
         checkpoint_blob_sse_kms_key_id: (if $checkpoint_blob_sse_kms_key_id == "" then null else $checkpoint_blob_sse_kms_key_id end),
         deposit_relayer_release_tag: (if $deposit_relayer_release_tag == "" then null else $deposit_relayer_release_tag end),
+        juno_scan_release_tag: (if $juno_scan_release_tag == "" then null else $juno_scan_release_tag end),
         operator_index: $operator.index,
         aws_profile: $operator.aws_profile,
         aws_region: $operator.aws_region,

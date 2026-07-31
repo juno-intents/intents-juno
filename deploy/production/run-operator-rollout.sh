@@ -318,6 +318,38 @@ ensure_runtime_juno_txsign_binary() {
   rm -rf "$extract_dir"
 }
 
+ensure_runtime_juno_scan_binary() {
+  local requested_tag release_tag_marker arch asset_name archive extract_dir
+
+  requested_tag="$(jq -r '.juno_scan_release_tag // empty' "$operator_deploy")"
+  [[ -n "$requested_tag" ]] || return 0
+
+  release_tag_marker="/var/lib/intents-juno/.juno-scan-release-tag"
+  if sudo test -x /usr/local/bin/juno-scan \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) die "unsupported architecture for juno-scan install: $(uname -m)" ;;
+  esac
+
+  asset_name="juno-scan_${requested_tag}_linux_${arch}.tar.gz"
+  archive="$(mktemp)"
+  download_github_release_asset_with_checksum "junocash-tools/juno-scan" "$requested_tag" "$asset_name" "$archive"
+  extract_dir="$(mktemp -d)"
+  tar -xzf "$archive" -C "$extract_dir"
+  rm -f "$archive"
+
+  sudo install -m 0755 "$extract_dir/juno-scan" /usr/local/bin/juno-scan
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -rf "$extract_dir"
+}
+
 ensure_runtime_deposit_relayer_binary() {
   local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
 
@@ -614,6 +646,7 @@ fetch_restore_package
 restore_runtime
 ensure_runtime_dkg_admin_binary
 ensure_runtime_juno_txsign_binary
+ensure_runtime_juno_scan_binary
 ensure_runtime_checkpoint_signer_binary
 ensure_runtime_checkpoint_aggregator_binary
 ensure_runtime_deposit_relayer_binary
