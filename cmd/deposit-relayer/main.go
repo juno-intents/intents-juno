@@ -157,6 +157,7 @@ func main() {
 		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")
 		junoScanWalletID  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet ID for the oWallet (required when --scan-enabled)")
 		junoScanBearerEnv = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for juno-scan bearer token")
+		junoScanTimeout   = flag.Duration("juno-scan-timeout", 75*time.Second, "timeout for juno-scan requests")
 		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required)")
 		junoRPCUserEnv    = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var for junocashd RPC user")
 		junoRPCPassEnv    = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var for junocashd RPC password")
@@ -198,8 +199,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --max-batch-witness-bytes must be >= 0")
 		os.Exit(2)
 	}
-	if *maxAge <= 0 || *claimTTL <= 0 || *flushEvery <= 0 || *submitTimeout <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --max-age, --claim-ttl, --flush-interval, and --submit-timeout must be > 0")
+	if *maxAge <= 0 || *claimTTL <= 0 || *flushEvery <= 0 || *submitTimeout <= 0 || *junoScanTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --max-age, --claim-ttl, --flush-interval, --submit-timeout, and --juno-scan-timeout must be > 0")
 		os.Exit(2)
 	}
 	if *ackTimeout <= 0 {
@@ -291,7 +292,7 @@ func main() {
 			os.Exit(2)
 		}
 		scanBearer := os.Getenv(*junoScanBearerEnv)
-		scanClient = junoscanhttp.New(*junoScanURL, scanBearer)
+		scanClient = junoscanhttp.NewWithTimeout(*junoScanURL, scanBearer, *junoScanTimeout)
 		depositWitnessRefresher = witnessextract.New(scanClient, rpcClient)
 	}
 
@@ -547,6 +548,7 @@ func main() {
 		"claimTTL", claimTTL.String(),
 		"owner", workerOwner,
 		"flushInterval", flushEvery.String(),
+		"junoScanTimeout", junoScanTimeout.String(),
 		"queueDriver", *queueDriver,
 		"storeDriver", strings.ToLower(strings.TrimSpace(*storeDriver)),
 	)

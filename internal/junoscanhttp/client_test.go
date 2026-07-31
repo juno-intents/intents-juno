@@ -6,7 +6,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestNewWithTimeoutUsesConfiguredTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewWithTimeout("http://127.0.0.1:8080", "", 75*time.Second)
+	if got := client.hc.Timeout; got != 75*time.Second {
+		t.Fatalf("timeout: got %s want %s", got, 75*time.Second)
+	}
+}
 
 func TestListWalletNotesRequestsIncomingDirectionAndFiltersResponse(t *testing.T) {
 	t.Parallel()

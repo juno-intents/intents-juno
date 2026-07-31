@@ -21,11 +21,20 @@ type Client struct {
 	hc      *http.Client
 }
 
+const defaultHTTPTimeout = 15 * time.Second
+
 func New(baseURL, bearerToken string) *Client {
+	return NewWithTimeout(baseURL, bearerToken, defaultHTTPTimeout)
+}
+
+func NewWithTimeout(baseURL, bearerToken string, timeout time.Duration) *Client {
+	if timeout <= 0 {
+		timeout = defaultHTTPTimeout
+	}
 	return &Client{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		bearer:  strings.TrimSpace(bearerToken),
-		hc:      &http.Client{Timeout: 15 * time.Second},
+		hc:      &http.Client{Timeout: timeout},
 	}
 }
 
