@@ -235,6 +235,33 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 	return getWithQuerier(ctx, s.pool, depositID)
 }
 
+func (s *Store) GetBySourceEvent(ctx context.Context, source deposit.SourceEvent) (deposit.Job, error) {
+	if s == nil || s.pool == nil {
+		return deposit.Job{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if source.ChainID == 0 || source.ChainID > math.MaxInt64 || source.LogIndex > math.MaxInt64 {
+		return deposit.Job{}, deposit.ErrDepositMismatch
+	}
+
+	var depositIDRaw []byte
+	if err := s.pool.QueryRow(ctx, `
+		SELECT dse.deposit_id
+		FROM deposit_source_events dse
+		JOIN deposit_jobs dj ON dj.deposit_id = dse.deposit_id
+		WHERE dse.chain_id = $1 AND dse.tx_hash = $2 AND dse.log_index = $3
+	`, int64(source.ChainID), source.TxHash[:], int64(source.LogIndex)).Scan(&depositIDRaw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return deposit.Job{}, deposit.ErrNotFound
+		}
+		return deposit.Job{}, fmt.Errorf("deposit/postgres: get by source event: %w", err)
+	}
+	depositID, err := to32(depositIDRaw)
+	if err != nil {
+		return deposit.Job{}, err
+	}
+	return s.Get(ctx, depositID)
+}
+
 func (s *Store) ListByState(ctx context.Context, state deposit.State, limit int) ([]deposit.Job, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)

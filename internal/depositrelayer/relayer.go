@@ -374,6 +374,10 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 	return r.refillFromStore(ctx)
 }
 
+func (r *Relayer) GetDepositBySourceEvent(ctx context.Context, source deposit.SourceEvent) (deposit.Job, error) {
+	return r.store.GetBySourceEvent(ctx, source)
+}
+
 func (r *Relayer) FlushDue(ctx context.Context) error {
 	if !r.ready(ctx) {
 		return nil

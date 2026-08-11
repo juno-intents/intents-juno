@@ -12,9 +12,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
+	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
@@ -48,11 +52,12 @@ func testASCIIHexWrappedMemoHex(recipient common.Address, nonce uint64) string {
 }
 
 type stubScan struct {
-	notes       []witnessextract.WalletNote
-	notesErr    error
-	wallets     []string
-	witnessResp witnessextract.WitnessResponse
-	witnessErr  error
+	notes        []witnessextract.WalletNote
+	notesErr     error
+	wallets      []string
+	witnessResp  witnessextract.WitnessResponse
+	witnessErr   error
+	witnessCalls int
 }
 
 func (s *stubScan) ListWalletNotes(_ context.Context, _ string) ([]witnessextract.WalletNote, error) {
@@ -64,6 +69,7 @@ func (s *stubScan) ListWalletIDs(_ context.Context) ([]string, error) {
 }
 
 func (s *stubScan) OrchardWitness(_ context.Context, _ *int64, _ []uint32) (witnessextract.WitnessResponse, error) {
+	s.witnessCalls++
 	return s.witnessResp, s.witnessErr
 }
 
@@ -90,13 +96,59 @@ func (s *stubRPC) GetBlockHash(_ context.Context, height uint64) (common.Hash, e
 }
 
 type stubIngester struct {
-	events []depositrelayer.DepositEvent
-	err    error
+	events            []depositrelayer.DepositEvent
+	err               error
+	sourceEventExists bool
+	sourceEventJob    deposit.Job
+	sourceEventErr    error
+	sourceEventChecks []deposit.SourceEvent
 }
 
 func (s *stubIngester) IngestDeposit(_ context.Context, ev depositrelayer.DepositEvent) error {
 	s.events = append(s.events, ev)
 	return s.err
+}
+
+func (s *stubIngester) GetDepositBySourceEvent(_ context.Context, source deposit.SourceEvent) (deposit.Job, error) {
+	s.sourceEventChecks = append(s.sourceEventChecks, source)
+	if s.sourceEventErr != nil {
+		return deposit.Job{}, s.sourceEventErr
+	}
+	if !s.sourceEventExists {
+		return deposit.Job{}, deposit.ErrNotFound
+	}
+	return s.sourceEventJob, nil
+}
+
+type unusedDepositSender struct{}
+
+func (unusedDepositSender) Send(context.Context, httpapi.SendRequest) (httpapi.SendResponse, error) {
+	return httpapi.SendResponse{}, errors.New("unexpected deposit send")
+}
+
+type unusedDepositProver struct{}
+
+func (unusedDepositProver) RequestProof(context.Context, proofclient.Request) (proofclient.Result, error) {
+	return proofclient.Result{}, errors.New("unexpected deposit proof request")
+}
+
+func newDurableTestRelayer(t *testing.T, store *deposit.MemoryStore) *depositrelayer.Relayer {
+	t.Helper()
+
+	relayer, err := depositrelayer.New(depositrelayer.Config{
+		BaseChainID:       testChainID,
+		BridgeAddress:     testBridge,
+		OWalletIVKBytes:   make([]byte, 64),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            time.Minute,
+		DedupeMax:         10,
+	}, store, unusedDepositSender{}, unusedDepositProver{}, nil)
+	if err != nil {
+		t.Fatalf("depositrelayer.New: %v", err)
+	}
+	return relayer
 }
 
 func makeAuthPath() []string {
@@ -375,6 +427,436 @@ func TestScanner_Duplicate_NotReprocessed(t *testing.T) {
 
 	if len(ingester.events) != 1 {
 		t.Fatalf("expected exactly 1 ingested event after 2 polls, got %d", len(ingester.events))
+	}
+}
+
+func TestScanner_RestartSkipsDurableSourceEventBeforeWitness(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x3737373737373737373737373737373737373737")
+	txid := strings.Repeat("d7", 32)
+	var pos int64 = 17
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 3, Position: &pos, Height: 97, ValueZat: 700000, MemoHex: testMemoHex(recipient, 17)},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	rpc := &stubRPC{blockHashes: map[uint64]common.Hash{97: common.HexToHash("0x97")}}
+	var recipient20 [20]byte
+	copy(recipient20[:], recipient.Bytes())
+	ingester := &stubIngester{
+		sourceEventExists: true,
+		sourceEventJob: deposit.Job{
+			State: deposit.StateSeen,
+			Deposit: deposit.Deposit{
+				LeafIndex:        uint64(pos),
+				Amount:           700000,
+				BaseRecipient:    recipient20,
+				ProofWitnessItem: make([]byte, proverinput.DepositWitnessItemLen),
+				JunoHeight:       97,
+			},
+		},
+	}
+
+	s, err := New(testConfig(), scan, rpc, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.poll(context.Background())
+
+	if got := scan.witnessCalls; got != 0 {
+		t.Fatalf("witness calls: got=%d want=0", got)
+	}
+	if got := len(ingester.events); got != 0 {
+		t.Fatalf("ingested events: got=%d want=0", got)
+	}
+	if got := len(ingester.sourceEventChecks); got != 1 {
+		t.Fatalf("source event checks: got=%d want=1", got)
+	}
+	if got := ingester.sourceEventChecks[0]; got.ChainID != uint64(testChainID) || got.TxHash != common.HexToHash("0x"+txid) || got.LogIndex != 3 {
+		t.Fatalf("source event check mismatch: got=%+v", got)
+	}
+	if _, ok := s.seen[noteKey(txid, 3)]; !ok {
+		t.Fatalf("durable source event should be marked seen in memory")
+	}
+}
+
+func TestScanner_NewSourceEventBuildsAndIngests(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x3838383838383838383838383838383838383838")
+	txid := strings.Repeat("d8", 32)
+	var pos int64 = 18
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 4, Position: &pos, ValueZat: 800000, MemoHex: testMemoHex(recipient, 18)},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	ingester := &stubIngester{}
+
+	s, err := New(testConfig(), scan, &stubRPC{}, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.poll(context.Background())
+
+	if got := len(ingester.sourceEventChecks); got != 1 {
+		t.Fatalf("source event checks: got=%d want=1", got)
+	}
+	if got := scan.witnessCalls; got != 1 {
+		t.Fatalf("witness calls: got=%d want=1", got)
+	}
+	if got := len(ingester.events); got != 1 {
+		t.Fatalf("ingested events: got=%d want=1", got)
+	}
+}
+
+func TestScanner_SourceEventLookupFailureRetriesWithoutWitness(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x3939393939393939393939393939393939393939")
+	txid := strings.Repeat("d9", 32)
+	var pos int64 = 19
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 5, Position: &pos, ValueZat: 900000, MemoHex: testMemoHex(recipient, 19)},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	ingester := &stubIngester{sourceEventErr: errors.New("store unavailable")}
+
+	s, err := New(testConfig(), scan, &stubRPC{}, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.poll(context.Background())
+
+	if got := scan.witnessCalls; got != 0 {
+		t.Fatalf("witness calls after lookup failure: got=%d want=0", got)
+	}
+	if got := len(ingester.events); got != 0 {
+		t.Fatalf("ingested events after lookup failure: got=%d want=0", got)
+	}
+	if _, ok := s.seen[noteKey(txid, 5)]; ok {
+		t.Fatalf("lookup failure must remain retryable")
+	}
+
+	ingester.sourceEventErr = nil
+	s.poll(context.Background())
+	if got := scan.witnessCalls; got != 1 {
+		t.Fatalf("witness calls after retry: got=%d want=1", got)
+	}
+	if got := len(ingester.events); got != 1 {
+		t.Fatalf("ingested events after retry: got=%d want=1", got)
+	}
+}
+
+func TestScanner_RestartUsesDurableSourceMetadataBeforeWitness(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x4040404040404040404040404040404040404040")
+	txid := strings.Repeat("e0", 32)
+	var position int64 = 20
+	note := witnessextract.WalletNote{
+		TxID:        txid,
+		ActionIndex: 6,
+		Position:    &position,
+		Height:      100,
+		ValueZat:    1_000_000,
+		MemoHex:     testMemoHex(recipient, 20),
+	}
+	store := deposit.NewMemoryStore()
+	relayer := newDurableTestRelayer(t, store)
+
+	firstScan := &stubScan{notes: []witnessextract.WalletNote{note}, witnessResp: makeWitnessResponse(uint32(position))}
+	first, err := New(
+		testConfig(),
+		firstScan,
+		&stubRPC{blockHashes: map[uint64]common.Hash{100: common.HexToHash("0x100")}},
+		relayer,
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatalf("New first scanner: %v", err)
+	}
+	first.poll(context.Background())
+	if got := firstScan.witnessCalls; got != 1 {
+		t.Fatalf("first scanner witness calls: got=%d want=1", got)
+	}
+
+	secondScan := &stubScan{
+		notes:      []witnessextract.WalletNote{note},
+		witnessErr: errors.New("historical durable note must not request a witness"),
+	}
+	second, err := New(
+		testConfig(),
+		secondScan,
+		&stubRPC{blockHashes: map[uint64]common.Hash{100: common.HexToHash("0x100")}},
+		relayer,
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatalf("New second scanner: %v", err)
+	}
+	second.poll(context.Background())
+	if got := secondScan.witnessCalls; got != 0 {
+		t.Fatalf("restart witness calls: got=%d want=0", got)
+	}
+}
+
+func TestScanner_DurableSourceReorgMetadataDoesNotSkip(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x4141414141414141414141414141414141414141")
+	txid := strings.Repeat("e1", 32)
+	tests := []struct {
+		name         string
+		mutate       func(*witnessextract.WalletNote)
+		wantSeen     bool
+		wantHeight   int64
+		wantPosition uint64
+	}{
+		{
+			name: "height changed",
+			mutate: func(note *witnessextract.WalletNote) {
+				note.Height = 101
+			},
+			wantSeen:     true,
+			wantHeight:   101,
+			wantPosition: 21,
+		},
+		{
+			name: "position changed",
+			mutate: func(note *witnessextract.WalletNote) {
+				position := int64(22)
+				note.Position = &position
+			},
+			wantSeen:     false,
+			wantHeight:   100,
+			wantPosition: 21,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var initialPosition int64 = 21
+			initialNote := witnessextract.WalletNote{
+				TxID:        txid,
+				ActionIndex: 7,
+				Position:    &initialPosition,
+				Height:      100,
+				ValueZat:    1_100_000,
+				MemoHex:     testMemoHex(recipient, 21),
+			}
+			store := deposit.NewMemoryStore()
+			relayer := newDurableTestRelayer(t, store)
+			seedScan := &stubScan{notes: []witnessextract.WalletNote{initialNote}, witnessResp: makeWitnessResponse(uint32(initialPosition))}
+			seed, err := New(
+				testConfig(),
+				seedScan,
+				&stubRPC{blockHashes: map[uint64]common.Hash{100: common.HexToHash("0x100")}},
+				relayer,
+				slog.Default(),
+			)
+			if err != nil {
+				t.Fatalf("New seed scanner: %v", err)
+			}
+			seed.poll(context.Background())
+			if got := seedScan.witnessCalls; got != 1 {
+				t.Fatalf("seed witness calls: got=%d want=1", got)
+			}
+
+			reorgNote := initialNote
+			tc.mutate(&reorgNote)
+			reorgPosition := uint32(*reorgNote.Position)
+			reorgScan := &stubScan{notes: []witnessextract.WalletNote{reorgNote}, witnessResp: makeWitnessResponse(reorgPosition)}
+			restarted, err := New(
+				testConfig(),
+				reorgScan,
+				&stubRPC{blockHashes: map[uint64]common.Hash{uint64(reorgNote.Height): common.HexToHash("0x101")}},
+				relayer,
+				slog.Default(),
+			)
+			if err != nil {
+				t.Fatalf("New restarted scanner: %v", err)
+			}
+			restarted.poll(context.Background())
+
+			if got := reorgScan.witnessCalls; got != 1 {
+				t.Fatalf("reorg witness calls: got=%d want=1", got)
+			}
+			_, seen := restarted.seen[noteKey(reorgNote.TxID, reorgNote.ActionIndex)]
+			if seen != tc.wantSeen {
+				t.Fatalf("reorg seen=%v want=%v", seen, tc.wantSeen)
+			}
+			jobs, err := store.ListByState(context.Background(), deposit.StateSeen, 10)
+			if err != nil {
+				t.Fatalf("ListByState: %v", err)
+			}
+			if got := len(jobs); got != 1 {
+				t.Fatalf("durable jobs: got=%d want=1", got)
+			}
+			if got := jobs[0].Deposit.JunoHeight; got != tc.wantHeight {
+				t.Fatalf("durable height: got=%d want=%d", got, tc.wantHeight)
+			}
+			if got := jobs[0].Deposit.LeafIndex; got != tc.wantPosition {
+				t.Fatalf("durable position: got=%d want=%d", got, tc.wantPosition)
+			}
+		})
+	}
+}
+
+func TestScanner_IncompleteDurableWitnessIsRebuilt(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x4242424242424242424242424242424242424242")
+	txid := strings.Repeat("e2", 32)
+	var position int64 = 23
+	note := witnessextract.WalletNote{
+		TxID:        txid,
+		ActionIndex: 8,
+		Position:    &position,
+		Height:      102,
+		ValueZat:    1_200_000,
+		MemoHex:     testMemoHex(recipient, 22),
+	}
+
+	captureScan := &stubScan{notes: []witnessextract.WalletNote{note}, witnessResp: makeWitnessResponse(uint32(position))}
+	captureIngester := &stubIngester{}
+	capture, err := New(
+		testConfig(),
+		captureScan,
+		&stubRPC{blockHashes: map[uint64]common.Hash{102: common.HexToHash("0x102")}},
+		captureIngester,
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatalf("New capture scanner: %v", err)
+	}
+	capture.poll(context.Background())
+	if got := len(captureIngester.events); got != 1 {
+		t.Fatalf("captured events: got=%d want=1", got)
+	}
+	ev := captureIngester.events[0]
+	depositID, err := idempotency.DepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	var recipient20 [20]byte
+	copy(recipient20[:], recipient.Bytes())
+	store := deposit.NewMemoryStore()
+	if _, _, err := store.UpsertSeen(context.Background(), deposit.Deposit{
+		DepositID:     depositID,
+		Commitment:    [32]byte(ev.Commitment),
+		LeafIndex:     ev.LeafIndex,
+		Amount:        ev.Amount,
+		BaseRecipient: recipient20,
+		SourceEvent:   ev.SourceEvent,
+		JunoHeight:    ev.JunoHeight,
+	}); err != nil {
+		t.Fatalf("seed incomplete durable deposit: %v", err)
+	}
+
+	rebuildScan := &stubScan{notes: []witnessextract.WalletNote{note}, witnessResp: makeWitnessResponse(uint32(position))}
+	rebuild, err := New(
+		testConfig(),
+		rebuildScan,
+		&stubRPC{blockHashes: map[uint64]common.Hash{102: common.HexToHash("0x102")}},
+		newDurableTestRelayer(t, store),
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatalf("New rebuild scanner: %v", err)
+	}
+	rebuild.poll(context.Background())
+	if got := rebuildScan.witnessCalls; got != 1 {
+		t.Fatalf("rebuild witness calls: got=%d want=1", got)
+	}
+	job, err := store.Get(context.Background(), depositID)
+	if err != nil {
+		t.Fatalf("Get rebuilt deposit: %v", err)
+	}
+	if got := len(job.Deposit.ProofWitnessItem); got != proverinput.DepositWitnessItemLen {
+		t.Fatalf("rebuilt witness length: got=%d want=%d", got, proverinput.DepositWitnessItemLen)
+	}
+}
+
+func TestDurableSourceMatchesNote(t *testing.T) {
+	t.Parallel()
+
+	var position int64 = 24
+	recipient := [20]byte{0x24}
+	note := witnessextract.WalletNote{Position: &position, Height: 103, ValueZat: 1_300_000}
+	parsedMemo := memo.DepositMemoV1{BaseRecipient: recipient}
+	baseJob := deposit.Job{
+		State: deposit.StateSeen,
+		Deposit: deposit.Deposit{
+			LeafIndex:        24,
+			Amount:           1_300_000,
+			BaseRecipient:    recipient,
+			ProofWitnessItem: make([]byte, proverinput.DepositWitnessItemLen),
+			JunoHeight:       103,
+		},
+	}
+
+	tests := []struct {
+		name string
+		edit func(*deposit.Job, *witnessextract.WalletNote, *memo.DepositMemoV1)
+		want bool
+	}{
+		{name: "stable seen", want: true},
+		{name: "height mismatch", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) { job.Deposit.JunoHeight-- }},
+		{name: "position mismatch", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) { job.Deposit.LeafIndex-- }},
+		{name: "position absent", edit: func(_ *deposit.Job, note *witnessextract.WalletNote, _ *memo.DepositMemoV1) { note.Position = nil }},
+		{name: "position negative", edit: func(_ *deposit.Job, note *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			position := int64(-1)
+			note.Position = &position
+		}},
+		{name: "amount mismatch", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) { job.Deposit.Amount-- }},
+		{name: "recipient mismatch", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.Deposit.BaseRecipient[0]++
+		}},
+		{name: "seen witness absent", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.Deposit.ProofWitnessItem = nil
+		}},
+		{name: "seen witness incomplete", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.Deposit.ProofWitnessItem = []byte{0x01}
+		}},
+		{name: "proof requested witness absent", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.State = deposit.StateProofRequested
+			job.Deposit.ProofWitnessItem = nil
+		}, want: true},
+		{name: "finalized witness absent", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.State = deposit.StateFinalized
+			job.Deposit.ProofWitnessItem = nil
+		}, want: true},
+		{name: "rejected witness absent", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.State = deposit.StateRejected
+			job.Deposit.ProofWitnessItem = nil
+		}, want: true},
+		{name: "unknown state", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.State = deposit.StateUnknown
+		}},
+		{name: "invalid high state", edit: func(job *deposit.Job, _ *witnessextract.WalletNote, _ *memo.DepositMemoV1) {
+			job.State = deposit.StateRejected + 1
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			job := baseJob
+			job.Deposit.ProofWitnessItem = append([]byte(nil), baseJob.Deposit.ProofWitnessItem...)
+			candidateNote := note
+			candidateMemo := parsedMemo
+			if tc.edit != nil {
+				tc.edit(&job, &candidateNote, &candidateMemo)
+			}
+			if got := durableSourceMatchesNote(job, candidateNote, candidateMemo); got != tc.want {
+				t.Fatalf("durableSourceMatchesNote=%v want=%v", got, tc.want)
+			}
+		})
 	}
 }
 

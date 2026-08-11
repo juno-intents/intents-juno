@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/depositevent"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
@@ -26,6 +28,7 @@ type Config struct {
 }
 
 type DepositIngester interface {
+	GetDepositBySourceEvent(ctx context.Context, source deposit.SourceEvent) (deposit.Job, error)
 	IngestDeposit(ctx context.Context, ev depositrelayer.DepositEvent) error
 }
 
@@ -144,14 +147,29 @@ func (s *Scanner) poll(ctx context.Context) {
 			continue
 		}
 
-		_, memoErr := memo.ParseDepositMemoV1(memoBytes, s.cfg.BaseChainID, bridgeAddr20)
+		parsedMemo, memoErr := memo.ParseDepositMemoV1(memoBytes, s.cfg.BaseChainID, bridgeAddr20)
 		if memoErr != nil {
 			// Not a valid deposit for our domain — skip permanently.
 			s.markSeen(key, note.Height)
 			continue
 		}
 
-		if err := s.processNote(ctx, note, memoBytes); err != nil {
+		sourceEvent, err := sourceEventForNote(s.cfg.BaseChainID, note)
+		if err != nil {
+			s.log.Error("deposit scanner: transient error, will retry", "key", key, "err", err)
+			continue
+		}
+		durableJob, err := s.ingest.GetDepositBySourceEvent(ctx, *sourceEvent)
+		if err != nil && !errors.Is(err, deposit.ErrNotFound) {
+			s.log.Error("deposit scanner: check durable source event, will retry", "key", key, "err", err)
+			continue
+		}
+		if err == nil && durableSourceMatchesNote(durableJob, note, parsedMemo) {
+			s.markSeen(key, note.Height)
+			continue
+		}
+
+		if err := s.processNote(ctx, note, memoBytes, sourceEvent); err != nil {
 			if isPermanent(err) {
 				s.log.Warn("deposit scanner: permanent error, skipping note", "key", key, "err", err)
 				s.markSeen(key, note.Height)
@@ -255,16 +273,35 @@ func (s *Scanner) markSeen(key string, height int64) {
 	s.seenHeights[key] = height
 }
 
-func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNote, memoBytes []byte) error {
-	actionIndex := uint32(note.ActionIndex)
+func sourceEventForNote(chainID uint32, note witnessextract.WalletNote) (*deposit.SourceEvent, error) {
 	if note.ActionIndex < 0 {
-		return fmt.Errorf("invalid action index %d", note.ActionIndex)
+		return nil, fmt.Errorf("invalid action index %d", note.ActionIndex)
 	}
-	sourceEvent, err := noteSourceEvent(s.cfg.BaseChainID, note.TxID, actionIndex)
-	if err != nil {
-		return err
-	}
+	return noteSourceEvent(chainID, note.TxID, uint32(note.ActionIndex))
+}
 
+func durableSourceMatchesNote(job deposit.Job, note witnessextract.WalletNote, parsedMemo memo.DepositMemoV1) bool {
+	if note.Position == nil || *note.Position < 0 || *note.Position > math.MaxUint32 {
+		return false
+	}
+	if job.State < deposit.StateSeen || job.State > deposit.StateRejected {
+		return false
+	}
+	dep := job.Deposit
+	if dep.JunoHeight != note.Height || dep.LeafIndex != uint64(*note.Position) || dep.Amount != note.ValueZat {
+		return false
+	}
+	if dep.BaseRecipient != parsedMemo.BaseRecipient {
+		return false
+	}
+	if job.State < deposit.StateProofRequested && len(dep.ProofWitnessItem) != proverinput.DepositWitnessItemLen {
+		return false
+	}
+	return true
+}
+
+func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNote, memoBytes []byte, sourceEvent *deposit.SourceEvent) error {
+	actionIndex := uint32(note.ActionIndex)
 	res, err := s.builder.BuildDeposit(ctx, witnessextract.DepositRequest{
 		WalletID:    s.cfg.WalletID,
 		TxID:        note.TxID,

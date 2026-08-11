@@ -871,6 +871,84 @@ func TestMemoryStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
 	if _, _, err := s.UpsertConfirmed(ctx, conflict); !errors.Is(err, ErrDepositMismatch) {
 		t.Fatalf("expected ErrDepositMismatch on conflicting source replay, got %v", err)
 	}
+
+	sourceJob, err := s.GetBySourceEvent(ctx, *src)
+	if err != nil {
+		t.Fatalf("GetBySourceEvent existing: %v", err)
+	}
+	if sourceJob.Deposit.DepositID != id {
+		t.Fatalf("source deposit id: got=%x want=%x", sourceJob.Deposit.DepositID, id)
+	}
+
+	missing := *src
+	missing.LogIndex++
+	if _, err := s.GetBySourceEvent(ctx, missing); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing source event, got %v", err)
+	}
+
+	invalid := *src
+	invalid.ChainID = 0
+	if _, err := s.GetBySourceEvent(ctx, invalid); !errors.Is(err, ErrDepositMismatch) {
+		t.Fatalf("expected ErrDepositMismatch for invalid source event, got %v", err)
+	}
+}
+
+func TestMemoryStore_MismatchedUpsertDoesNotPoisonSourceLookup(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		upsert func(*MemoryStore, context.Context, Deposit) (Job, bool, error)
+	}{
+		{name: "seen", upsert: (*MemoryStore).UpsertSeen},
+		{name: "confirmed", upsert: (*MemoryStore).UpsertConfirmed},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewMemoryStore()
+			ctx := context.Background()
+			source := &SourceEvent{ChainID: 84532, LogIndex: 13}
+			source.TxHash[0] = 0xbb
+			original := Deposit{
+				DepositID:     [32]byte{0x61},
+				Commitment:    [32]byte{0xd1},
+				LeafIndex:     13,
+				Amount:        1300,
+				BaseRecipient: [20]byte{0x13},
+			}
+			if _, created, err := tc.upsert(s, ctx, original); err != nil {
+				t.Fatalf("seed deposit: %v", err)
+			} else if !created {
+				t.Fatalf("expected seed deposit to be created")
+			}
+
+			mismatch := original
+			mismatch.Amount++
+			mismatch.SourceEvent = source
+			if _, _, err := tc.upsert(s, ctx, mismatch); !errors.Is(err, ErrDepositMismatch) {
+				t.Fatalf("expected ErrDepositMismatch, got %v", err)
+			}
+			if _, err := s.GetBySourceEvent(ctx, *source); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("failed mismatched upsert poisoned source lookup: %v", err)
+			}
+
+			corrected := original
+			corrected.SourceEvent = source
+			if _, created, err := tc.upsert(s, ctx, corrected); err != nil {
+				t.Fatalf("corrected upsert: %v", err)
+			} else if created {
+				t.Fatalf("corrected upsert unexpectedly created a second deposit")
+			}
+			sourceJob, err := s.GetBySourceEvent(ctx, *source)
+			if err != nil {
+				t.Fatalf("GetBySourceEvent after correction: %v", err)
+			}
+			if sourceJob.Deposit.DepositID != original.DepositID {
+				t.Fatalf("corrected source deposit id: got=%x want=%x", sourceJob.Deposit.DepositID, original.DepositID)
+			}
+		})
+	}
 }
 
 func TestMemoryStore_MarkBatchSubmitted(t *testing.T) {

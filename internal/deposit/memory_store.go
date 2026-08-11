@@ -59,12 +59,11 @@ func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.recordSourceEvent(d); err != nil {
-		return Job{}, false, err
-	}
-
 	j, ok := s.jobs[d.DepositID]
 	if !ok {
+		if err := s.recordSourceEvent(d); err != nil {
+			return Job{}, false, err
+		}
 		j = Job{
 			Deposit: d,
 			State:   StateSeen,
@@ -76,6 +75,9 @@ func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error
 
 	if !depositIdentityEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
+	}
+	if err := s.recordSourceEvent(d); err != nil {
+		return Job{}, false, err
 	}
 	if j.State < StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(j.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
 		j.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
@@ -91,12 +93,11 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.recordSourceEvent(d); err != nil {
-		return Job{}, false, err
-	}
-
 	j, ok := s.jobs[d.DepositID]
 	if !ok {
+		if err := s.recordSourceEvent(d); err != nil {
+			return Job{}, false, err
+		}
 		j = Job{
 			Deposit: d,
 			State:   StateConfirmed,
@@ -108,6 +109,9 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 
 	if !depositIdentityEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
+	}
+	if err := s.recordSourceEvent(d); err != nil {
+		return Job{}, false, err
 	}
 	if j.State < StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(j.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
 		j.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
@@ -168,6 +172,29 @@ func (s *MemoryStore) Get(_ context.Context, depositID [32]byte) (Job, error) {
 		j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 	}
 	return j, nil
+}
+
+func (s *MemoryStore) GetBySourceEvent(_ context.Context, source SourceEvent) (Job, error) {
+	if source.ChainID == 0 {
+		return Job{}, ErrDepositMismatch
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	depositID, ok := s.sourceEvents[sourceEventKey{
+		chainID:  source.ChainID,
+		txHash:   source.TxHash,
+		logIndex: source.LogIndex,
+	}]
+	if !ok {
+		return Job{}, ErrNotFound
+	}
+	job, ok := s.jobs[depositID]
+	if !ok {
+		return Job{}, ErrNotFound
+	}
+	return cloneJob(job), nil
 }
 
 func (s *MemoryStore) GetBatch(_ context.Context, batchID [32]byte) (Batch, error) {

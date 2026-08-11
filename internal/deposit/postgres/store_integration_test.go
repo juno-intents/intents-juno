@@ -447,6 +447,20 @@ func TestStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
 	if _, _, err := s.UpsertConfirmed(ctx, conflict); !errors.Is(err, deposit.ErrDepositMismatch) {
 		t.Fatalf("expected ErrDepositMismatch on conflicting source replay, got %v", err)
 	}
+
+	sourceJob, err := s.GetBySourceEvent(ctx, *src)
+	if err != nil {
+		t.Fatalf("GetBySourceEvent existing: %v", err)
+	}
+	if sourceJob.Deposit.DepositID != id {
+		t.Fatalf("source deposit id: got=%x want=%x", sourceJob.Deposit.DepositID, id)
+	}
+
+	missing := *src
+	missing.LogIndex++
+	if _, err := s.GetBySourceEvent(ctx, missing); !errors.Is(err, deposit.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing source event, got %v", err)
+	}
 }
 
 func TestStore_PrepareNextBatch_PersistsAndSplitsDurableBatch(t *testing.T) {

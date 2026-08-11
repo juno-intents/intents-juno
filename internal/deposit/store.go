@@ -19,6 +19,9 @@ type Store interface {
 	UpsertConfirmed(ctx context.Context, d Deposit) (Job, bool, error)
 	PromoteSeenToConfirmed(ctx context.Context, tipHeight int64, minConfirmations int64, limit int) ([]Job, error)
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
+	// GetBySourceEvent returns the durable job mapped by the exact source tuple.
+	// Implementations return ErrNotFound when the mapping or mapped job is absent.
+	GetBySourceEvent(ctx context.Context, source SourceEvent) (Job, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
 	CountByState(ctx context.Context, state State) (int, error)
