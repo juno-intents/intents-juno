@@ -70,7 +70,10 @@ type depositEventV2 struct {
 	LogIndex         *uint64 `json:"logIndex,omitempty"`
 }
 
-const depositMetricInterval = time.Minute
+const (
+	depositMetricInterval         = time.Minute
+	defaultDepositJunoScanTimeout = 5 * time.Minute
+)
 
 func defaultDepositRelayerClaimTTL() time.Duration {
 	return 0
@@ -157,7 +160,7 @@ func main() {
 		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")
 		junoScanWalletID  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet ID for the oWallet (required when --scan-enabled)")
 		junoScanBearerEnv = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for juno-scan bearer token")
-		junoScanTimeout   = flag.Duration("juno-scan-timeout", 75*time.Second, "timeout for juno-scan requests")
+		junoScanTimeout   = flag.Duration("juno-scan-timeout", defaultDepositJunoScanTimeout, "timeout for juno-scan requests")
 		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required)")
 		junoRPCUserEnv    = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var for junocashd RPC user")
 		junoRPCPassEnv    = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var for junocashd RPC password")

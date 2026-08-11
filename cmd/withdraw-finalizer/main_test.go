@@ -525,8 +525,83 @@ func TestWithdrawProofQueueProducerRequiredUnsupportedShadowDriverFailsClosed(t 
 func TestValidateWithdrawWitnessExtractorConfig_DisabledAllowsEmpty(t *testing.T) {
 	t.Parallel()
 
-	if err := validateWithdrawWitnessExtractorConfig(withdrawWitnessExtractorConfig{}); err != nil {
+	if err := validateWithdrawWitnessExtractorConfig(withdrawWitnessExtractorConfig{ScanTimeout: defaultJunoScanHTTPTimeout}); err != nil {
 		t.Fatalf("validateWithdrawWitnessExtractorConfig: %v", err)
+	}
+}
+
+func TestValidateWithdrawWitnessExtractorConfig_RejectsNonpositiveScanTimeoutWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	err := validateWithdrawWitnessExtractorConfig(withdrawWitnessExtractorConfig{})
+	if err == nil || !strings.Contains(err.Error(), "--juno-scan-timeout must be > 0") {
+		t.Fatalf("error = %v, want nonpositive scan timeout", err)
+	}
+}
+
+func TestWithdrawFinalizerExecutionPathsPreserveParentContext(t *testing.T) {
+	paths := []struct {
+		name string
+		run  func(context.Context, func(context.Context) error) error
+	}{
+		{name: "periodic tick", run: runWithdrawFinalizerTick},
+		{name: "checkpoint ingestion", run: runWithdrawFinalizerCheckpoint},
+	}
+
+	for _, path := range paths {
+		path := path
+		t.Run(path.name, func(t *testing.T) {
+			t.Run("no extra deadline", func(t *testing.T) {
+				parent := context.WithValue(context.Background(), struct{}{}, "root")
+				if err := path.run(parent, func(workCtx context.Context) error {
+					if workCtx != parent {
+						t.Fatal("work did not receive the root context")
+					}
+					if deadline, ok := workCtx.Deadline(); ok {
+						t.Fatalf("unexpected work deadline: %s", deadline)
+					}
+					return nil
+				}); err != nil {
+					t.Fatalf("run: %v", err)
+				}
+			})
+
+			t.Run("inherits parent deadline", func(t *testing.T) {
+				wantDeadline := time.Now().Add(time.Hour)
+				parent, cancel := context.WithDeadline(context.Background(), wantDeadline)
+				defer cancel()
+				if err := path.run(parent, func(workCtx context.Context) error {
+					gotDeadline, ok := workCtx.Deadline()
+					if !ok || !gotDeadline.Equal(wantDeadline) {
+						t.Fatalf("deadline: got %s present=%t want %s", gotDeadline, ok, wantDeadline)
+					}
+					return nil
+				}); err != nil {
+					t.Fatalf("run: %v", err)
+				}
+			})
+
+			t.Run("inherits parent cancellation", func(t *testing.T) {
+				parent, cancel := context.WithCancel(context.Background())
+				cancel()
+				if err := path.run(parent, func(workCtx context.Context) error {
+					if !errors.Is(workCtx.Err(), context.Canceled) {
+						t.Fatalf("context error: got %v want %v", workCtx.Err(), context.Canceled)
+					}
+					return workCtx.Err()
+				}); !errors.Is(err, context.Canceled) {
+					t.Fatalf("run error: got %v want %v", err, context.Canceled)
+				}
+			})
+		})
+	}
+}
+
+func TestDefaultWithdrawFinalizerSubmitTimeoutMatchesProofHorizon(t *testing.T) {
+	t.Parallel()
+
+	if got, want := defaultWithdrawFinalizerSubmitTimeout, 30*time.Minute; got != want {
+		t.Fatalf("default submit timeout = %s, want %s", got, want)
 	}
 }
 
@@ -541,56 +616,74 @@ func TestValidateWithdrawWitnessExtractorConfig_EnabledRequiresFlags(t *testing.
 		{
 			name: "missing scan url",
 			cfg: withdrawWitnessExtractorConfig{
-				Enabled:    true,
-				WalletID:   "wallet-1",
-				RPCURL:     "http://127.0.0.1:8232",
-				RPCUserEnv: "JUNO_RPC_USER",
-				RPCPassEnv: "JUNO_RPC_PASS",
+				Enabled:     true,
+				WalletID:    "wallet-1",
+				ScanTimeout: defaultJunoScanHTTPTimeout,
+				RPCURL:      "http://127.0.0.1:8232",
+				RPCUserEnv:  "JUNO_RPC_USER",
+				RPCPassEnv:  "JUNO_RPC_PASS",
 			},
 			wantError: "--juno-scan-url is required",
 		},
 		{
 			name: "missing wallet id",
 			cfg: withdrawWitnessExtractorConfig{
-				Enabled:    true,
-				ScanURL:    "http://127.0.0.1:8080",
-				RPCURL:     "http://127.0.0.1:8232",
-				RPCUserEnv: "JUNO_RPC_USER",
-				RPCPassEnv: "JUNO_RPC_PASS",
+				Enabled:     true,
+				ScanURL:     "http://127.0.0.1:8080",
+				ScanTimeout: defaultJunoScanHTTPTimeout,
+				RPCURL:      "http://127.0.0.1:8232",
+				RPCUserEnv:  "JUNO_RPC_USER",
+				RPCPassEnv:  "JUNO_RPC_PASS",
 			},
 			wantError: "--juno-scan-wallet-id is required",
 		},
 		{
 			name: "missing rpc url",
 			cfg: withdrawWitnessExtractorConfig{
-				Enabled:    true,
-				ScanURL:    "http://127.0.0.1:8080",
-				WalletID:   "wallet-1",
-				RPCUserEnv: "JUNO_RPC_USER",
-				RPCPassEnv: "JUNO_RPC_PASS",
+				Enabled:     true,
+				ScanURL:     "http://127.0.0.1:8080",
+				WalletID:    "wallet-1",
+				ScanTimeout: defaultJunoScanHTTPTimeout,
+				RPCUserEnv:  "JUNO_RPC_USER",
+				RPCPassEnv:  "JUNO_RPC_PASS",
 			},
 			wantError: "--juno-rpc-url is required",
 		},
 		{
 			name: "missing rpc user env",
 			cfg: withdrawWitnessExtractorConfig{
-				Enabled:  true,
-				ScanURL:  "http://127.0.0.1:8080",
-				WalletID: "wallet-1",
-				RPCURL:   "http://127.0.0.1:8232",
+				Enabled:     true,
+				ScanURL:     "http://127.0.0.1:8080",
+				WalletID:    "wallet-1",
+				ScanTimeout: defaultJunoScanHTTPTimeout,
+				RPCURL:      "http://127.0.0.1:8232",
 			},
 			wantError: "--juno-rpc-user-env is required",
 		},
 		{
 			name: "missing rpc pass env",
 			cfg: withdrawWitnessExtractorConfig{
-				Enabled:    true,
-				ScanURL:    "http://127.0.0.1:8080",
-				WalletID:   "wallet-1",
-				RPCURL:     "http://127.0.0.1:8232",
-				RPCUserEnv: "JUNO_RPC_USER",
+				Enabled:     true,
+				ScanURL:     "http://127.0.0.1:8080",
+				WalletID:    "wallet-1",
+				ScanTimeout: defaultJunoScanHTTPTimeout,
+				RPCURL:      "http://127.0.0.1:8232",
+				RPCUserEnv:  "JUNO_RPC_USER",
 			},
 			wantError: "--juno-rpc-pass-env is required",
+		},
+		{
+			name: "nonpositive scan timeout",
+			cfg: withdrawWitnessExtractorConfig{
+				Enabled:     true,
+				ScanURL:     "http://127.0.0.1:8080",
+				WalletID:    "wallet-1",
+				ScanTimeout: 0,
+				RPCURL:      "http://127.0.0.1:8232",
+				RPCUserEnv:  "JUNO_RPC_USER",
+				RPCPassEnv:  "JUNO_RPC_PASS",
+			},
+			wantError: "--juno-scan-timeout must be > 0",
 		},
 	}
 
@@ -615,6 +708,7 @@ func TestNewWithdrawWitnessExtractor_RequiresRPCCredentials(t *testing.T) {
 		ScanURL:       "http://127.0.0.1:8080",
 		WalletID:      "wallet-1",
 		ScanBearerEnv: "JUNO_SCAN_BEARER_TOKEN",
+		ScanTimeout:   defaultJunoScanHTTPTimeout,
 		RPCURL:        "http://127.0.0.1:8232",
 		RPCUserEnv:    "JUNO_RPC_USER",
 		RPCPassEnv:    "JUNO_RPC_PASS",
@@ -1132,6 +1226,49 @@ func (s *stubWitnessRPCClient) GetOrchardAction(_ context.Context, txid string, 
 	s.gotTxID = txid
 	s.gotActionIndex = actionIndex
 	return s.action, nil
+}
+
+func TestNewScanHTTPClientUsesConfiguredDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := newScanHTTPClient("http://127.0.0.1:8080", "token", 0)
+	if client == nil || client.hc == nil {
+		t.Fatal("newScanHTTPClient returned a nil HTTP client")
+	}
+	if got, want := client.hc.Timeout, defaultJunoScanHTTPTimeout; got != want {
+		t.Fatalf("HTTP timeout: got %s want %s", got, want)
+	}
+	if got, want := client.hc.Timeout, 5*time.Minute; got != want {
+		t.Fatalf("default HTTP timeout: got %s want %s", got, want)
+	}
+	configured := 6 * time.Minute
+	client = newScanHTTPClient("http://127.0.0.1:8080", "token", configured)
+	if got := client.hc.Timeout; got != configured {
+		t.Fatalf("configured HTTP timeout: got %s want %s", got, configured)
+	}
+}
+
+func TestScanHTTPClientOrchardWitnessDelegatesToSharedClient(t *testing.T) {
+	t.Parallel()
+
+	want := witnessextract.WitnessResponse{AnchorHeight: 42, Root: "0x1234"}
+	delegate := &stubWitnessScanClient{witness: want}
+	client := &scanHTTPClient{witnessClient: delegate}
+	anchorHeight := int64(42)
+
+	got, err := client.OrchardWitness(context.Background(), &anchorHeight, []uint32{7})
+	if err != nil {
+		t.Fatalf("OrchardWitness: %v", err)
+	}
+	if got.AnchorHeight != want.AnchorHeight || got.Root != want.Root {
+		t.Fatalf("response: got %#v want %#v", got, want)
+	}
+	if delegate.gotAnchorHeight == nil || *delegate.gotAnchorHeight != anchorHeight {
+		t.Fatalf("anchor height: got %v want %d", delegate.gotAnchorHeight, anchorHeight)
+	}
+	if len(delegate.gotPositions) != 1 || delegate.gotPositions[0] != 7 {
+		t.Fatalf("positions: got %v want [7]", delegate.gotPositions)
+	}
 }
 
 func testRPCAction() junorpc.OrchardAction {

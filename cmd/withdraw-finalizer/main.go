@@ -31,6 +31,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
@@ -56,9 +57,11 @@ type checkpointPackageV1 struct {
 }
 
 const (
-	defaultJunoScanBearerEnv = "JUNO_SCAN_BEARER_TOKEN"
-	defaultJunoRPCUserEnv    = "JUNO_RPC_USER"
-	defaultJunoRPCPassEnv    = "JUNO_RPC_PASS"
+	defaultJunoScanBearerEnv              = "JUNO_SCAN_BEARER_TOKEN"
+	defaultJunoRPCUserEnv                 = "JUNO_RPC_USER"
+	defaultJunoRPCPassEnv                 = "JUNO_RPC_PASS"
+	defaultJunoScanHTTPTimeout            = 5 * time.Minute
+	defaultWithdrawFinalizerSubmitTimeout = 30 * time.Minute
 )
 
 func main() {
@@ -82,6 +85,7 @@ func main() {
 		junoScanURL     = flag.String("juno-scan-url", "", "juno-scan base URL for witness extraction")
 		junoScanWallet  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet id for witness extraction")
 		junoScanBearer  = flag.String("juno-scan-bearer-env", defaultJunoScanBearerEnv, "env var containing optional juno-scan bearer token for witness extraction")
+		junoScanTimeout = flag.Duration("juno-scan-timeout", defaultJunoScanHTTPTimeout, "HTTP timeout for juno-scan requests; must be > 0")
 		junoRPCURL      = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL for witness extraction")
 		junoRPCUserEnv  = flag.String("juno-rpc-user-env", defaultJunoRPCUserEnv, "env var containing junocashd RPC username for witness extraction")
 		junoRPCPassEnv  = flag.String("juno-rpc-pass-env", defaultJunoRPCPassEnv, "env var containing junocashd RPC password for witness extraction")
@@ -97,7 +101,7 @@ func main() {
 		tickInterval       = flag.Duration("tick-interval", 1*time.Second, "finalizer tick interval")
 		gasLimit           = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 
-		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
+		submitTimeout = flag.Duration("submit-timeout", defaultWithdrawFinalizerSubmitTimeout, "per-batch timeout (proof request + base-relayer)")
 
 		proofDriver        = flag.String("proof-driver", "queue", "proof client driver: queue|mock")
 		proofRequestTopic  = flag.String("proof-request-topic", "proof.requests.v1", "proof request topic")
@@ -221,6 +225,7 @@ func main() {
 		ScanURL:       *junoScanURL,
 		WalletID:      *junoScanWallet,
 		ScanBearerEnv: *junoScanBearer,
+		ScanTimeout:   *junoScanTimeout,
 		RPCURL:        *junoRPCURL,
 		RPCUserEnv:    *junoRPCUserEnv,
 		RPCPassEnv:    *junoRPCPassEnv,
@@ -423,6 +428,8 @@ func main() {
 		"leaseTTL", leaseTTL.String(),
 		"leaseRenewInterval", leaseRenewInterval.String(),
 		"tickInterval", tickInterval.String(),
+		"submitTimeout", submitTimeout.String(),
+		"junoScanTimeout", junoScanTimeout.String(),
 		"queueDriver", *queueDriver,
 		"blobDriver", normalizeBlobDriver(*blobDriver),
 		"blobBucket", strings.TrimSpace(*blobBucket),
@@ -449,9 +456,7 @@ func main() {
 				log.Error("queue consume error", "err", err)
 			}
 		case <-t.C:
-			cctx, cancel := context.WithTimeout(ctx, *submitTimeout)
-			err := f.Tick(cctx)
-			cancel()
+			err := runWithdrawFinalizerTick(ctx, f.Tick)
 			if err != nil {
 				log.Error("tick", "err", err)
 			}
@@ -512,12 +517,12 @@ func main() {
 					continue
 				}
 
-				cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				err := f.IngestCheckpoint(cctx, withdrawfinalizer.CheckpointPackage{
-					Checkpoint:         cpMsg.Checkpoint,
-					OperatorSignatures: sigs,
+				err := runWithdrawFinalizerCheckpoint(ctx, func(workCtx context.Context) error {
+					return f.IngestCheckpoint(workCtx, withdrawfinalizer.CheckpointPackage{
+						Checkpoint:         cpMsg.Checkpoint,
+						OperatorSignatures: sigs,
+					})
 				})
-				cancel()
 				if err != nil {
 					log.Error("ingest checkpoint", "err", err)
 				}
@@ -535,12 +540,16 @@ type withdrawWitnessExtractorConfig struct {
 	ScanURL       string
 	WalletID      string
 	ScanBearerEnv string
+	ScanTimeout   time.Duration
 	RPCURL        string
 	RPCUserEnv    string
 	RPCPassEnv    string
 }
 
 func validateWithdrawWitnessExtractorConfig(cfg withdrawWitnessExtractorConfig) error {
+	if cfg.ScanTimeout <= 0 {
+		return fmt.Errorf("--juno-scan-timeout must be > 0")
+	}
 	if !cfg.Enabled {
 		return nil
 	}
@@ -584,11 +593,7 @@ func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig, cursorStore
 	}
 
 	scanBearer := strings.TrimSpace(os.Getenv(strings.TrimSpace(cfg.ScanBearerEnv)))
-	scanClient := &scanHTTPClient{
-		baseURL: strings.TrimRight(strings.TrimSpace(cfg.ScanURL), "/"),
-		bearer:  scanBearer,
-		hc:      &http.Client{Timeout: 15 * time.Second},
-	}
+	scanClient := newScanHTTPClient(cfg.ScanURL, scanBearer, cfg.ScanTimeout)
 	return &withdrawWitnessExtractor{
 		walletID:    strings.TrimSpace(cfg.WalletID),
 		builder:     witnessextract.New(scanClient, rpcClient),
@@ -712,9 +717,29 @@ func (e *withdrawWitnessExtractor) RefreshWithdrawWitness(ctx context.Context, a
 }
 
 type scanHTTPClient struct {
-	baseURL string
-	bearer  string
-	hc      *http.Client
+	baseURL       string
+	bearer        string
+	hc            *http.Client
+	witnessClient witnessextract.ScanClient
+}
+
+func newScanHTTPClient(baseURL, bearer string, timeout time.Duration) *scanHTTPClient {
+	timeout = junoScanHTTPTimeoutOrDefault(timeout)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	bearer = strings.TrimSpace(bearer)
+	return &scanHTTPClient{
+		baseURL:       baseURL,
+		bearer:        bearer,
+		hc:            &http.Client{Timeout: timeout},
+		witnessClient: junoscanhttp.NewWithTimeout(baseURL, bearer, timeout),
+	}
+}
+
+func junoScanHTTPTimeoutOrDefault(timeout time.Duration) time.Duration {
+	if timeout == 0 {
+		return defaultJunoScanHTTPTimeout
+	}
+	return timeout
 }
 
 func (c *scanHTTPClient) BackfillWallet(ctx context.Context, walletID string, fromHeight int64) error {
@@ -868,53 +893,10 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 }
 
 func (c *scanHTTPClient) OrchardWitness(ctx context.Context, anchorHeight *int64, positions []uint32) (witnessextract.WitnessResponse, error) {
-	if c == nil || c.hc == nil {
+	if c == nil || c.witnessClient == nil {
 		return witnessextract.WitnessResponse{}, fmt.Errorf("scan client is nil")
 	}
-
-	reqBody := map[string]any{
-		"positions": positions,
-	}
-	if anchorHeight != nil {
-		reqBody["anchor_height"] = *anchorHeight
-	}
-	raw, err := json.Marshal(reqBody)
-	if err != nil {
-		return witnessextract.WitnessResponse{}, err
-	}
-
-	body, status, err := c.do(ctx, http.MethodPost, c.baseURL+"/v1/orchard/witness", raw)
-	if err != nil {
-		return witnessextract.WitnessResponse{}, err
-	}
-	if status != http.StatusOK {
-		return witnessextract.WitnessResponse{}, fmt.Errorf("juno-scan orchard witness status=%d body=%s", status, strings.TrimSpace(string(body)))
-	}
-
-	var resp struct {
-		AnchorHeight int64 `json:"anchor_height"`
-		Root         string
-		Paths        []struct {
-			Position uint32   `json:"position"`
-			AuthPath []string `json:"auth_path"`
-		} `json:"paths"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return witnessextract.WitnessResponse{}, fmt.Errorf("decode juno-scan orchard witness: %w", err)
-	}
-
-	out := witnessextract.WitnessResponse{
-		AnchorHeight: resp.AnchorHeight,
-		Root:         resp.Root,
-		Paths:        make([]witnessextract.WitnessPath, 0, len(resp.Paths)),
-	}
-	for _, p := range resp.Paths {
-		out.Paths = append(out.Paths, witnessextract.WitnessPath{
-			Position: p.Position,
-			AuthPath: append([]string(nil), p.AuthPath...),
-		})
-	}
-	return out, nil
+	return c.witnessClient.OrchardWitness(ctx, anchorHeight, positions)
 }
 
 func (c *scanHTTPClient) do(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, error) {
@@ -945,6 +927,14 @@ func (c *scanHTTPClient) do(ctx context.Context, method, endpoint string, body [
 		return nil, 0, err
 	}
 	return respBody, resp.StatusCode, nil
+}
+
+func runWithdrawFinalizerTick(ctx context.Context, tick func(context.Context) error) error {
+	return tick(ctx)
+}
+
+func runWithdrawFinalizerCheckpoint(ctx context.Context, ingest func(context.Context) error) error {
+	return ingest(ctx)
 }
 
 func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {

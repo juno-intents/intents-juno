@@ -153,6 +153,14 @@ func TestDefaultClaimTTLDelegatesToRelayerSafeLease(t *testing.T) {
 	}
 }
 
+func TestDefaultDepositJunoScanTimeoutAllowsSlowWitnessSlot(t *testing.T) {
+	t.Parallel()
+
+	if got, want := defaultDepositJunoScanTimeout, 5*time.Minute; got != want {
+		t.Fatalf("default juno-scan timeout = %s, want %s", got, want)
+	}
+}
+
 func TestDepositRelayerQueueConsumerConfig_PostgresFallsBackToStoreDSN(t *testing.T) {
 	t.Parallel()
 

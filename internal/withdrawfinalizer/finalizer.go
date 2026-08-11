@@ -33,6 +33,8 @@ var (
 	ErrInvalidCheckpoint = errors.New("withdrawfinalizer: invalid checkpoint")
 )
 
+const defaultProofRequestTimeout = 30 * time.Minute
+
 type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
 }
@@ -157,7 +159,7 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 		return nil, fmt.Errorf("%w: OperatorThreshold must be > 0", ErrInvalidConfig)
 	}
 	if cfg.ProofRequestTimeout <= 0 {
-		cfg.ProofRequestTimeout = 15 * time.Minute
+		cfg.ProofRequestTimeout = defaultProofRequestTimeout
 	}
 	if cfg.ProofPriority < 0 {
 		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)

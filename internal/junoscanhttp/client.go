@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,9 +20,13 @@ type Client struct {
 	baseURL string
 	bearer  string
 	hc      *http.Client
+	wait    func(context.Context, time.Duration) error
 }
 
-const defaultHTTPTimeout = 15 * time.Second
+const (
+	defaultHTTPTimeout           = 15 * time.Second
+	defaultWitnessBusyRetryDelay = time.Second
+)
 
 func New(baseURL, bearerToken string) *Client {
 	return NewWithTimeout(baseURL, bearerToken, defaultHTTPTimeout)
@@ -35,6 +40,7 @@ func NewWithTimeout(baseURL, bearerToken string, timeout time.Duration) *Client 
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		bearer:  strings.TrimSpace(bearerToken),
 		hc:      &http.Client{Timeout: timeout},
+		wait:    waitForRetry,
 	}
 }
 
@@ -173,12 +179,28 @@ func (c *Client) OrchardWitness(ctx context.Context, anchorHeight *int64, positi
 		return witnessextract.WitnessResponse{}, err
 	}
 
-	body, status, err := c.do(ctx, http.MethodPost, c.baseURL+"/v1/orchard/witness", raw)
-	if err != nil {
-		return witnessextract.WitnessResponse{}, err
-	}
-	if status != http.StatusOK {
-		return witnessextract.WitnessResponse{}, fmt.Errorf("juno-scan orchard witness status=%d body=%s", status, strings.TrimSpace(string(body)))
+	var body []byte
+	for {
+		var status int
+		var headers http.Header
+		body, status, headers, err = c.doWithHeaders(ctx, http.MethodPost, c.baseURL+"/v1/orchard/witness", raw)
+		if err != nil {
+			return witnessextract.WitnessResponse{}, err
+		}
+		if status == http.StatusOK {
+			break
+		}
+		if status != http.StatusServiceUnavailable || strings.TrimSpace(string(body)) != "witness busy" {
+			return witnessextract.WitnessResponse{}, fmt.Errorf("juno-scan orchard witness status=%d body=%s", status, strings.TrimSpace(string(body)))
+		}
+
+		wait := c.wait
+		if wait == nil {
+			wait = waitForRetry
+		}
+		if err := wait(ctx, retryAfterDelay(headers.Get("Retry-After"), time.Now())); err != nil {
+			return witnessextract.WitnessResponse{}, fmt.Errorf("wait to retry juno-scan orchard witness: %w", err)
+		}
 	}
 
 	var resp struct {
@@ -208,13 +230,18 @@ func (c *Client) OrchardWitness(ctx context.Context, anchorHeight *int64, positi
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, error) {
+	respBody, status, _, err := c.doWithHeaders(ctx, method, endpoint, body)
+	return respBody, status, err
+}
+
+func (c *Client) doWithHeaders(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, http.Header, error) {
 	var reader io.Reader
 	if len(body) > 0 {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
@@ -225,13 +252,48 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) (
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
-	return respBody, resp.StatusCode, nil
+	return respBody, resp.StatusCode, resp.Header.Clone(), nil
+}
+
+func retryAfterDelay(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if _, err := strconv.ParseUint(value, 10, 63); err == nil {
+		if delay, err := time.ParseDuration(value + "s"); err == nil {
+			return delay
+		}
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		if delay := retryAt.Sub(now); delay > 0 {
+			return delay
+		}
+		return 0
+	}
+	return defaultWitnessBusyRetryDelay
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

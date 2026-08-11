@@ -546,14 +546,19 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	if got, want := f.cfg.ProofRequestTimeout, 30*time.Minute; got != want {
+		t.Fatalf("resolved proof request timeout: got %s want %s", got, want)
+	}
 	f.WithBlobStore(artifacts)
 
+	proofDeadlineStart := time.Now().UTC()
 	if err := f.IngestCheckpoint(ctx, CheckpointPackage{
 		Checkpoint:         cp,
 		OperatorSignatures: checkpointSigs,
 	}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
+	proofDeadlineEnd := time.Now().UTC()
 
 	if err := f.Tick(ctx); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -578,6 +583,11 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	}
 	if prover.gotReq.JobID == (common.Hash{}) {
 		t.Fatalf("expected non-zero proof job id")
+	}
+	if got, earliest, latest := prover.gotReq.Deadline,
+		proofDeadlineStart.Add(30*time.Minute),
+		proofDeadlineEnd.Add(30*time.Minute); got.Before(earliest) || got.After(latest) {
+		t.Fatalf("proof request deadline: got %s want between %s and %s", got, earliest, latest)
 	}
 	wantJournalKey := journalArtifactKey(batchID)
 	wantPrivateInputKey := privateInputArtifactKey(batchID)
