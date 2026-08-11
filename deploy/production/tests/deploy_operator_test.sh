@@ -428,9 +428,11 @@ EOF
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
-    --operator-deploy "$manifest" >/dev/null
+    --operator-deploy "$manifest" \
+    --skip-mesh-ingress >/dev/null
 
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "deploy stages over ssm"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "skip-mesh-ingress avoids security group mutation"
   assert_contains "$(cat "$log_dir/ssm.commands")" "ufvk.txt" "ufvk file copied"
   assert_contains "$(cat "$log_dir/ssm.commands")" "intents-juno-config-hydrator.sh" "config hydrator copied"
   assert_contains "$(cat "$log_dir/ssm.commands")" "dkg-peer-hosts.json" "distributed dkg peer host map copied"
@@ -1081,8 +1083,10 @@ EOF
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" \
-    --prepare-only >/dev/null
+    --prepare-only \
+    --skip-mesh-ingress >/dev/null
 
+  assert_not_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "prepare-only skip-mesh-ingress avoids security group mutation"
   assert_contains "$(cat "$log_dir/ssm.commands")" "sudo install -d -m 0700" "prepare-only creates a private remote stage directory"
   assert_not_contains "$(cat "$log_dir/ssm.commands")" "sudo install -d -m 0755 /tmp/intents-juno-deploy" "prepare-only keeps the remote deploy stage directory private"
   assert_contains "$(cat "$log_dir/ssm.commands")" "operator-stack.env" "prepare-only stages rendered operator env"

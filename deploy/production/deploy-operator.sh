@@ -20,6 +20,7 @@ Options:
   --force                     Redeploy even when rollout-state already marks this operator done
   --prepare-only              Stage the remote deployment package without applying it
   --apply-prepared            Apply an already staged remote deployment package
+  --skip-mesh-ingress         Do not reconcile operator gRPC mesh security-group ingress
   --dry-run                   Print actions without mutating remote state
 EOF
 }
@@ -29,6 +30,7 @@ dkg_tls_dir_override=""
 force="false"
 prepare_only="false"
 apply_prepared="false"
+skip_mesh_ingress="false"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --force) force="true"; shift ;;
     --prepare-only) prepare_only="true"; shift ;;
     --apply-prepared) apply_prepared="true"; shift ;;
+    --skip-mesh-ingress) skip_mesh_ingress="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -412,6 +415,14 @@ ensure_operator_grpc_mesh_ingress() {
       done < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -type f -name 'operator-deploy.json' | sort)
     fi
   done
+}
+
+maybe_ensure_operator_grpc_mesh_ingress() {
+  if [[ "$skip_mesh_ingress" == "true" ]]; then
+    log "skipping operator gRPC mesh ingress reconciliation"
+    return 0
+  fi
+  ensure_operator_grpc_mesh_ingress "$@"
 }
 
 generate_dkg_server_tls() {
@@ -1257,7 +1268,7 @@ else
   production_require_registered_operator "$shared_manifest_path" "$operator_deploy"
   instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
   if [[ "$prepare_only" == "true" ]]; then
-    ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
+    maybe_ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
     stage_remote_deploy_package "$instance_id"
     success="true"
     log "operator deployment package staged: $operator_id -> $remote_stage_dir"
@@ -1266,7 +1277,7 @@ else
   if [[ "$apply_prepared" == "true" ]]; then
     verify_prepared_deploy_package "$instance_id"
   fi
-  ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
+  maybe_ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
   production_rollout_reserve "$rollout_state_file" "$operator_id"
   reserved="true"
   if [[ "$apply_prepared" != "true" ]]; then
