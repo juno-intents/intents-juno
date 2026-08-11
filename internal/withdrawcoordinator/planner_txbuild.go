@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -18,10 +19,18 @@ import (
 
 var ErrInvalidTxBuildPlannerConfig = errors.New("withdrawcoordinator: invalid txbuild planner config")
 
+const (
+	// DefaultTxBuildPlannerCommandTimeout bounds one juno-txbuild invocation.
+	DefaultTxBuildPlannerCommandTimeout = 5 * time.Minute
+	// txBuildCommandWaitDelay bounds cleanup when descendants retain command pipes.
+	txBuildCommandWaitDelay = 250 * time.Millisecond
+)
+
 type TxBuildPlannerConfig struct {
-	Binary        string
-	WalletID      string
-	ChangeAddress string
+	Binary         string
+	WalletID       string
+	ChangeAddress  string
+	CommandTimeout time.Duration
 
 	BaseChainID   uint32
 	BridgeAddress common.Address
@@ -80,6 +89,12 @@ func NewTxBuildPlanner(cfg TxBuildPlannerConfig) (*TxBuildPlanner, error) {
 	}
 	if cfg.FeeMultiplier == 0 {
 		return nil, fmt.Errorf("%w: fee multiplier must be >= 1", ErrInvalidTxBuildPlannerConfig)
+	}
+	if cfg.CommandTimeout < 0 {
+		return nil, fmt.Errorf("%w: command timeout must be > 0 when set", ErrInvalidTxBuildPlannerConfig)
+	}
+	if cfg.CommandTimeout == 0 {
+		cfg.CommandTimeout = DefaultTxBuildPlannerCommandTimeout
 	}
 
 	return &TxBuildPlanner{
@@ -142,7 +157,10 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 		"--json",
 	}
 
-	out, err := p.execCommand(ctx, p.cfg.Binary, args, p.commandEnv())
+	commandCtx, cancel := context.WithTimeout(ctx, p.cfg.CommandTimeout)
+	defer cancel()
+
+	out, err := p.execCommand(commandCtx, p.cfg.Binary, args, p.commandEnv())
 	if err != nil {
 		return nil, fmt.Errorf("withdrawcoordinator: txbuild command failed: %w", err)
 	}
@@ -297,9 +315,16 @@ func parseTxBuildJSONEnvelope(raw []byte) ([]byte, error) {
 func runExecCommand(ctx context.Context, name string, args []string, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
+	cmd.WaitDelay = txBuildCommandWaitDelay
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if msg == "" {
+				return nil, ctxErr
+			}
+			return nil, fmt.Errorf("%w: %s", ctxErr, msg)
+		}
 		if msg == "" {
 			return nil, err
 		}

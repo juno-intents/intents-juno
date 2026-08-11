@@ -79,6 +79,28 @@ type withdrawRequestedMessage struct {
 	FinalitySource   string
 }
 
+type coordinatorTickRunner interface {
+	SetLeaderLease(leases.Lease)
+	ClearLeaderLease()
+	Tick(context.Context) error
+}
+
+func runCoordinatorTick(ctx context.Context, elector *withdrawcoordinator.LeaderElector, coord coordinatorTickRunner) (bool, error) {
+	if elector == nil {
+		return true, coord.Tick(ctx)
+	}
+
+	ran, err := elector.RunWhileLeader(ctx, func(workCtx context.Context, lease leases.Lease) error {
+		coord.SetLeaderLease(lease)
+		defer coord.ClearLeaderLease()
+		return coord.Tick(workCtx)
+	})
+	if !ran {
+		coord.ClearLeaderLease()
+	}
+	return ran, err
+}
+
 const (
 	runtimeModeFull                 = "full"
 	withdrawMetricIdleExpirySeconds = 24 * 60 * 60
@@ -629,22 +651,17 @@ func main() {
 				log.Error("queue consume error", "err", err)
 			}
 		case <-t.C:
-			if elector != nil {
-				lease, leader, err := elector.Tick(ctx)
+			ran, err := runCoordinatorTick(ctx, elector, coord)
+			if !ran {
 				if err != nil {
 					log.Error("leader election tick", "err", err)
-					coord.ClearLeaderLease()
-					continue
-				}
-				if !leader {
+				} else {
 					log.Info("not leader, skipping tick")
-					coord.ClearLeaderLease()
-					continue
 				}
-				coord.SetLeaderLease(lease)
+				continue
 			}
 
-			if err := coord.Tick(ctx); err != nil {
+			if err != nil {
 				if errors.Is(err, withdrawcoordinator.ErrLeadershipLost) {
 					log.Warn("leadership lost during tick", "err", err)
 				} else if errors.Is(err, withdrawcoordinator.ErrRebroadcastExhausted) {

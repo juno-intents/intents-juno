@@ -213,6 +213,32 @@ test_withdraw_coordinator_includes_extend_signer_response_limit() {
   assert_contains "$script_text" "--extend-signer-max-response-bytes \"1048576\" \\" "withdraw coordinator sets explicit extend signer response byte limit"
 }
 
+test_withdraw_coordinator_e2e_exercises_leader_heartbeat() {
+  local script_text
+  local leader_election_count lease_name_count lease_ttl_count
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local withdraw_coordinator_leader_lease_name="testnet-e2e-withdraw-coordinator-${proof_topic_seed}"' "withdraw coordinator derives a unique E2E leader lease name from the run seed"
+  assert_contains "$script_text" 'local withdraw_coordinator_leader_lease_ttl="${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-5s}"' "withdraw coordinator uses a short env-overridable E2E leader lease TTL"
+  assert_not_contains "$script_text" '--leader-election=false' "withdraw coordinator E2E launch paths keep leader election enabled"
+
+  leader_election_count="$(grep -Fc -- '--leader-election=true \' <<<"$script_text" || true)"
+  lease_name_count="$(grep -Fc -- '--leader-lease-name "$withdraw_coordinator_leader_lease_name" \' <<<"$script_text" || true)"
+  lease_ttl_count="$(grep -Fc -- '--leader-lease-ttl "$withdraw_coordinator_leader_lease_ttl" \' <<<"$script_text" || true)"
+  if (( leader_election_count != 2 )); then
+    printf 'assert_count failed: both withdraw coordinator E2E launch paths must enable leader election (references=%s)\n' "$leader_election_count" >&2
+    exit 1
+  fi
+  if (( lease_name_count != 2 )); then
+    printf 'assert_count failed: both withdraw coordinator E2E launch paths must use the per-run lease name (references=%s)\n' "$lease_name_count" >&2
+    exit 1
+  fi
+  if (( lease_ttl_count != 2 )); then
+    printf 'assert_count failed: both withdraw coordinator E2E launch paths must use the short lease TTL (references=%s)\n' "$lease_ttl_count" >&2
+    exit 1
+  fi
+}
+
 test_withdraw_coordinator_forwards_operator_signer_env() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1431,6 +1457,7 @@ main() {
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
   test_operator_signer_is_lazy_for_runner_core_flow
   test_withdraw_coordinator_includes_extend_signer_response_limit
+  test_withdraw_coordinator_e2e_exercises_leader_heartbeat
   test_withdraw_coordinator_forwards_operator_signer_env
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_distributed_withdraw_coordinator_sets_tss_server_name_override

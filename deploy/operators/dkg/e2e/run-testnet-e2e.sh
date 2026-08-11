@@ -4661,6 +4661,8 @@ command_run() {
   local deposit_relayer_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"
+  local withdraw_coordinator_leader_lease_name="testnet-e2e-withdraw-coordinator-${proof_topic_seed}"
+  local withdraw_coordinator_leader_lease_ttl="${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-5s}"
   local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"
   local withdraw_coordinator_max_expiry_extension="${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"
   local -a witness_pool_operator_labels=()
@@ -6979,7 +6981,9 @@ command_run() {
           "$distributed_withdraw_coordinator_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
-          --leader-election=false \
+          --leader-election=true \
+          --leader-lease-name "$withdraw_coordinator_leader_lease_name" \
+          --leader-lease-ttl "$withdraw_coordinator_leader_lease_ttl" \
           "${operator_queue_args[@]}" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
@@ -7112,7 +7116,9 @@ command_run() {
         go run ./cmd/withdraw-coordinator \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
-          --leader-election=false \
+          --leader-election=true \
+          --leader-lease-name "$withdraw_coordinator_leader_lease_name" \
+          --leader-lease-ttl "$withdraw_coordinator_leader_lease_ttl" \
           "${operator_queue_args[@]}" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \

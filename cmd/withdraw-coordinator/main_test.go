@@ -12,9 +12,151 @@ import (
 	"testing"
 	"time"
 
+	"github.com/juno-intents/intents-juno/internal/leases"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
+	"github.com/juno-intents/intents-juno/internal/withdrawcoordinator"
 )
+
+type stubCoordinatorTickRunner struct {
+	lease      leases.Lease
+	leaseAtRun leases.Lease
+	tickCalls  int
+	clearCalls int
+	tickErr    error
+}
+
+type invalidCoordinatorLeaderStore struct{}
+
+func (invalidCoordinatorLeaderStore) TryAcquire(_ context.Context, name, _ string, ttl time.Duration) (leases.Lease, bool, error) {
+	return leases.Lease{
+		Name:      name,
+		Owner:     "unexpected-owner",
+		Version:   1,
+		ExpiresAt: time.Now().Add(ttl),
+	}, true, nil
+}
+
+func (invalidCoordinatorLeaderStore) Renew(context.Context, string, string, time.Duration) (leases.Lease, bool, error) {
+	return leases.Lease{}, false, leases.ErrNotFound
+}
+
+func (invalidCoordinatorLeaderStore) Release(context.Context, string, string) error {
+	return nil
+}
+
+func (invalidCoordinatorLeaderStore) Get(context.Context, string) (leases.Lease, error) {
+	return leases.Lease{}, leases.ErrNotFound
+}
+
+func (s *stubCoordinatorTickRunner) SetLeaderLease(lease leases.Lease) {
+	s.lease = lease
+}
+
+func (s *stubCoordinatorTickRunner) ClearLeaderLease() {
+	s.clearCalls++
+	s.lease = leases.Lease{}
+}
+
+func (s *stubCoordinatorTickRunner) Tick(context.Context) error {
+	s.tickCalls++
+	s.leaseAtRun = s.lease
+	return s.tickErr
+}
+
+func TestRunCoordinatorTick_SetsAndClearsLeaderLease(t *testing.T) {
+	store := leases.NewMemoryStore(time.Now)
+	elector, err := withdrawcoordinator.NewLeaderElector(store, "withdraw-coordinator", "a", time.Minute)
+	if err != nil {
+		t.Fatalf("NewLeaderElector: %v", err)
+	}
+	tickErr := errors.New("tick failed")
+	coord := &stubCoordinatorTickRunner{tickErr: tickErr}
+
+	ran, err := runCoordinatorTick(context.Background(), elector, coord)
+	if !ran {
+		t.Fatalf("expected coordinator tick to run")
+	}
+	if !errors.Is(err, tickErr) {
+		t.Fatalf("runCoordinatorTick error: got %v want %v", err, tickErr)
+	}
+	if coord.tickCalls != 1 {
+		t.Fatalf("tick calls: got %d want 1", coord.tickCalls)
+	}
+	if coord.leaseAtRun.Owner != "a" || coord.leaseAtRun.Version != 1 {
+		t.Fatalf("lease during tick: %+v", coord.leaseAtRun)
+	}
+	if coord.lease != (leases.Lease{}) {
+		t.Fatalf("lease was not cleared after tick: %+v", coord.lease)
+	}
+	if coord.clearCalls != 1 {
+		t.Fatalf("clear calls: got %d want 1", coord.clearCalls)
+	}
+}
+
+func TestRunCoordinatorTick_ClearsStaleLeaseWhenFollower(t *testing.T) {
+	store := leases.NewMemoryStore(time.Now)
+	ctx := context.Background()
+	if _, ok, err := store.TryAcquire(ctx, "withdraw-coordinator", "b", time.Minute); err != nil || !ok {
+		t.Fatalf("seed leader lease: ok=%v err=%v", ok, err)
+	}
+	elector, err := withdrawcoordinator.NewLeaderElector(store, "withdraw-coordinator", "a", time.Minute)
+	if err != nil {
+		t.Fatalf("NewLeaderElector: %v", err)
+	}
+	coord := &stubCoordinatorTickRunner{
+		lease: leases.Lease{Name: "stale", Owner: "a", Version: 99},
+	}
+
+	ran, err := runCoordinatorTick(ctx, elector, coord)
+	if err != nil {
+		t.Fatalf("runCoordinatorTick: %v", err)
+	}
+	if ran {
+		t.Fatalf("expected follower tick to be skipped")
+	}
+	if coord.tickCalls != 0 {
+		t.Fatalf("tick calls: got %d want 0", coord.tickCalls)
+	}
+	if coord.lease != (leases.Lease{}) {
+		t.Fatalf("stale lease was not cleared: %+v", coord.lease)
+	}
+	if coord.clearCalls != 1 {
+		t.Fatalf("clear calls: got %d want 1", coord.clearCalls)
+	}
+}
+
+func TestRunCoordinatorTick_ClearsStaleLeaseWhenInitialLeaseIsInvalid(t *testing.T) {
+	elector, err := withdrawcoordinator.NewLeaderElector(
+		invalidCoordinatorLeaderStore{},
+		"withdraw-coordinator",
+		"a",
+		time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("NewLeaderElector: %v", err)
+	}
+	coord := &stubCoordinatorTickRunner{
+		lease: leases.Lease{Name: "stale", Owner: "a", Version: 99},
+	}
+
+	ran, err := runCoordinatorTick(context.Background(), elector, coord)
+	if ran {
+		t.Fatalf("invalid initial lease reported coordinator work as run")
+	}
+	if !errors.Is(err, withdrawcoordinator.ErrLeadershipLost) {
+		t.Fatalf("expected ErrLeadershipLost, got %v", err)
+	}
+	if coord.tickCalls != 0 {
+		t.Fatalf("tick calls: got %d want 0", coord.tickCalls)
+	}
+	if coord.lease != (leases.Lease{}) {
+		t.Fatalf("stale lease was not cleared: %+v", coord.lease)
+	}
+	if coord.clearCalls != 1 {
+		t.Fatalf("clear calls: got %d want 1", coord.clearCalls)
+	}
+}
 
 func TestNormalizeRuntimeMode(t *testing.T) {
 	t.Parallel()

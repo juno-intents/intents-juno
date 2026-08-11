@@ -222,6 +222,98 @@ func TestTxBuildPlanner_Plan_UsesRuntimeConfiguredMinConfirmations(t *testing.T)
 	}
 }
 
+func TestTxBuildPlanner_Plan_TimesOutHungCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := TxBuildPlannerConfig{
+		Binary:           "juno-txbuild",
+		WalletID:         "wallet-1",
+		ChangeAddress:    "j1change",
+		BaseChainID:      8453,
+		BridgeAddress:    common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		MinConfirmations: 1,
+		ExpiryOffset:     40,
+		FeeMultiplier:    1,
+		CommandTimeout:   25 * time.Millisecond,
+	}
+	p, err := NewTxBuildPlanner(cfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner: %v", err)
+	}
+
+	commandStarted := make(chan struct{})
+	p.execCommand = func(ctx context.Context, _ string, _ []string, _ []string) ([]byte, error) {
+		close(commandStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	w := withdraw.Withdrawal{
+		ID:          seq32ForPlanner(0x01),
+		Amount:      100,
+		FeeBps:      0,
+		RecipientUA: []byte("j1recipienta"),
+		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
+	}
+	parentCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, err = p.Plan(parentCtx, seq32ForPlanner(0x80), []withdraw.Withdrawal{w})
+	elapsed := time.Since(started)
+
+	select {
+	case <-commandStarted:
+	default:
+		t.Fatal("txbuild command did not start")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Plan error: got %v want context deadline exceeded", err)
+	}
+	if parentCtx.Err() != nil {
+		t.Fatalf("planner exhausted parent context after %v", elapsed)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("planner timeout took %v, want less than 500ms", elapsed)
+	}
+}
+
+func TestRunExecCommand_ReportsContextDeadline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := runExecCommand(ctx, "/bin/sh", []string{"-c", "exec sleep 10"}, os.Environ())
+	elapsed := time.Since(started)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runExecCommand error: got %v want context deadline exceeded", err)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("command timeout took %v, want less than 500ms", elapsed)
+	}
+}
+
+func TestRunExecCommand_CancellationBoundsInheritedPipeWait(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := runExecCommand(ctx, "/bin/sh", []string{"-c", "sleep 2 & wait"}, os.Environ())
+	elapsed := time.Since(started)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runExecCommand error: got %v want context deadline exceeded", err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("inherited pipe cleanup took %v, want less than 1s", elapsed)
+	}
+}
+
 func TestTxBuildPlanner_Plan_RejectsRecipientUAWithWhitespace(t *testing.T) {
 	t.Parallel()
 
@@ -335,6 +427,46 @@ func TestNewTxBuildPlanner_RejectsInvalidConfig(t *testing.T) {
 	_, err := NewTxBuildPlanner(TxBuildPlannerConfig{})
 	if !errors.Is(err, ErrInvalidTxBuildPlannerConfig) {
 		t.Fatalf("expected ErrInvalidTxBuildPlannerConfig, got %v", err)
+	}
+}
+
+func TestNewTxBuildPlanner_CommandTimeout(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := TxBuildPlannerConfig{
+		Binary:           "juno-txbuild",
+		WalletID:         "wallet-1",
+		ChangeAddress:    "j1change",
+		BaseChainID:      8453,
+		BridgeAddress:    common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		MinConfirmations: 1,
+		ExpiryOffset:     40,
+		FeeMultiplier:    1,
+	}
+
+	p, err := NewTxBuildPlanner(baseCfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner(default): %v", err)
+	}
+	if got := p.cfg.CommandTimeout; got != 5*time.Minute {
+		t.Fatalf("default command timeout: got %v want %v", got, 5*time.Minute)
+	}
+
+	configuredCfg := baseCfg
+	configuredCfg.CommandTimeout = 2 * time.Minute
+	p, err = NewTxBuildPlanner(configuredCfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner(configured): %v", err)
+	}
+	if got := p.cfg.CommandTimeout; got != 2*time.Minute {
+		t.Fatalf("configured command timeout: got %v want %v", got, 2*time.Minute)
+	}
+
+	invalidCfg := baseCfg
+	invalidCfg.CommandTimeout = -time.Second
+	_, err = NewTxBuildPlanner(invalidCfg)
+	if !errors.Is(err, ErrInvalidTxBuildPlannerConfig) || !strings.Contains(err.Error(), "command timeout") {
+		t.Fatalf("negative command timeout error: got %v", err)
 	}
 }
 

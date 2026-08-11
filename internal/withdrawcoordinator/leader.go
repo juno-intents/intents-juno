@@ -16,8 +16,8 @@ type LeaderElectorOption func(*LeaderElector)
 
 // LeaderElector is a small helper for "single active coordinator" semantics.
 //
-// It uses a TTL-based lease in the shared DB. Call Tick periodically; it returns
-// whether this instance is the current leader.
+// It uses a TTL-based lease in the shared DB. Use RunWhileLeader for work that
+// can outlive one lease interval; Tick is the single-attempt primitive.
 type LeaderElector struct {
 	store leases.Store
 	name  string
@@ -71,4 +71,101 @@ func (l *LeaderElector) Tick(ctx context.Context) (leases.Lease, bool, error) {
 		return leases.Lease{}, false, err
 	}
 	return lease, ok, nil
+}
+
+// RunWhileLeader acquires leadership once, then keeps that exact lease alive
+// while work runs. A heartbeat may renew the current lease, but it must never
+// reacquire a lost lease because work is fenced to the initially acquired
+// version.
+func (l *LeaderElector) RunWhileLeader(ctx context.Context, work func(context.Context, leases.Lease) error) (bool, error) {
+	if l == nil || l.store == nil {
+		return false, fmt.Errorf("%w: nil leader elector", ErrInvalidConfig)
+	}
+	if work == nil {
+		return false, fmt.Errorf("%w: nil leader work", ErrInvalidConfig)
+	}
+
+	lease, leader, err := l.Tick(ctx)
+	if err != nil || !leader {
+		return false, err
+	}
+	if lease.Name != l.name || lease.Owner != l.owner || lease.Version <= 0 {
+		return false, fmt.Errorf(
+			"%w: acquired lease identity mismatch: name=%q owner=%q version=%d",
+			ErrLeadershipLost,
+			lease.Name,
+			lease.Owner,
+			lease.Version,
+		)
+	}
+
+	workCtx, cancelWork := context.WithCancel(ctx)
+	defer cancelWork()
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	defer cancelHeartbeat()
+
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		interval := l.ttl / 3
+		if interval <= 0 {
+			interval = time.Nanosecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				heartbeatDone <- nil
+				return
+			case <-ticker.C:
+				renewCtx, cancelRenew := context.WithTimeout(heartbeatCtx, interval)
+				renewed, ok, renewErr := l.store.Renew(renewCtx, l.name, l.owner, l.ttl)
+				renewCtxErr := renewCtx.Err()
+				cancelRenew()
+				if heartbeatCtx.Err() != nil {
+					heartbeatDone <- nil
+					return
+				}
+				if renewErr != nil {
+					err := fmt.Errorf("%w: renew leader lease: %v", ErrLeadershipLost, renewErr)
+					cancelWork()
+					heartbeatDone <- err
+					return
+				}
+				if renewCtxErr != nil {
+					err := fmt.Errorf("%w: renew leader lease context: %v", ErrLeadershipLost, renewCtxErr)
+					cancelWork()
+					heartbeatDone <- err
+					return
+				}
+				if !ok {
+					err := fmt.Errorf("%w: renew leader lease rejected", ErrLeadershipLost)
+					cancelWork()
+					heartbeatDone <- err
+					return
+				}
+				if renewed.Name != lease.Name || renewed.Owner != lease.Owner || renewed.Version != lease.Version {
+					err := fmt.Errorf(
+						"%w: renewed lease identity changed: name=%q owner=%q version=%d",
+						ErrLeadershipLost,
+						renewed.Name,
+						renewed.Owner,
+						renewed.Version,
+					)
+					cancelWork()
+					heartbeatDone <- err
+					return
+				}
+			}
+		}
+	}()
+
+	workErr := work(workCtx, lease)
+	cancelHeartbeat()
+	heartbeatErr := <-heartbeatDone
+	if heartbeatErr != nil {
+		return true, heartbeatErr
+	}
+	return true, workErr
 }
